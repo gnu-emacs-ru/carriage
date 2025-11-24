@@ -146,7 +146,7 @@ Cross-References and Anchors
 - Stability: stable
 - Pack-Priority: P3
 - Source of Truth: spec/spec-on-specs.org
-- Related: spec/index.org, spec/file-header-format-v2.org
+- Related: spec/index.org, spec/file-header-format-v2.org, spec/code-style-essentials-v2.org
 - Code: lisp/**/*.el (headers), tools/lint/* (out of tree)
 
 Evolution

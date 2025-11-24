@@ -1,0 +1,33 @@
+#+title: i18n v2 — Required UI keys (minimal set used in code)
+#+author: Carriage Team
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Purpose
+- Enumerate i18n keys that MUST be provided by locales to avoid nil labels/tooltips in UI.
+
+Required keys (currently used by UI code)
+- :suite
+- :suite-tooltip
+- :engine-label
+- :engine-tooltip
+- :engine-tooltip-branch
+- :state-tt-streaming
+- :state-tt-reasoning
+- :state-tt-apply
+- :state-tt-dry
+- :state-tt-error
+- :ctx-tooltip
+- :files-tooltip
+- :patched-tooltip
+- :visible-tooltip
+- :doc-scope-all-tip
+- :doc-scope-last-tip
+
+Testing
+- REQ: spec/testing-v2.org MUST include a locale coverage test that asserts all keys above resolve to non-empty strings for the selected locale (and fallbacks if applicable).
+
+Notes
+- The list may expand; keep this file synchronized with carriage-ui.el usages.
+

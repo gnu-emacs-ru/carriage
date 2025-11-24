@@ -61,10 +61,31 @@ Grammar/Schema
 - Pack-Priority: P3
 - Directory overview (bullets):
   - lisp/: core and domain modules (carriage-*.el)
+    - carriage-apply.el — пайплайн dry-run/apply (синхр./асинх.), отчёт, вызов движков
+    - carriage-parser.el — сборка плана по begin_patch; диспетчер оп‑модулей (через registry)
+    - carriage-ui.el — header-line/mode-line, тултипы, кнопки, отчёты
+    - carriage-mode.el — minor-mode, команды, интеграция подсистем
+    - carriage-context.el — сбор и форматирование контекста (doc/gptel/visible)
+    - carriage-errors.el — регистрация кодов ошибок и define-error
+    - carriage-logging.el — лог и traffic, сводки (head/tail/bytes)
+    - carriage-utils.el — безопасные пути, I/O‑вспомогательные функции
   - lisp/engines/: apply engines
+    - carriage-apply-engine.el — реестр движков, выбор, диспетчеризация :dry-run/:apply
+    - carriage-engine-git.el — git‑движок (apply/check, стадирование, веточные политики)
+    - carriage-engine-emacs.el — локальный emacs‑движок (sre/aibo/file‑ops; флаговый udiff)
   - lisp/ops/: format modules
+    - carriage-op-sre.el — SRE v2 (FROM→TO пары)
+    - carriage-op-aibo.el — AIBO v2 (literal-only)
+    - carriage-op-file.el — file‑ops (create/delete/rename/…)
+    - carriage-op-patch.el — udiff (один файл); dry‑run через git --check
   - lisp/transports/: LLM transports
+    - carriage-transport.el — ядро стриминга (begin/chunk/reasoning/done/error/abort)
+    - carriage-transport-gptel.el — адаптер к gptel (стрим, tool‑use)
+    - carriage-transport-echo.el — dev/echo транспорт
   - spec/: specifications (this corpus)
+    - addendum‑файлы: apply-engines-v2-addendum.org, engines-ui-v2-addendum.org, i18n-required-keys-v2.org
+    - essentials: code-style-essentials-v2.org
+    - gap‑документы: gap-closure-v2.org, gap-closure-dialectic-v2.org
 
 Interfaces/Contracts
 - Anchor: IFC

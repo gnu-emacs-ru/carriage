@@ -1,0 +1,62 @@
+#+title: API v2 — Public commands, variables, faces (catalog)
+#+author: Carriage Team
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Scope
+- Stable, user-facing API surface (interactive commands, key variables, faces).
+- Complementary to keyspec-v2 and ui-v2; non-UI plumbing APIs live in tool-contracts-v2.
+
+Interactive commands (selection)
+- carriage-mode — Minor mode; Org buffers only.
+- carriage-open-buffer — Open/switch ephemeral project buffer for Carriage.
+- carriage-send-buffer — Send whole document with active Intent/Suite.
+- carriage-send-subtree — Send current Org subtree.
+- carriage-dry-run-at-point — Dry-run block under point (or iteration with prefix).
+- carriage-apply-at-point-or-region — Apply block at point, or all in region as a group.
+- carriage-apply-last-iteration — Apply all blocks from the last iteration.
+- carriage-select-suite — Choose Suite (sre|udiff).
+- carriage-toggle-intent — Toggle Intent (Ask|Code|Hybrid).
+- carriage-select-apply-engine — Choose apply engine (supports git:POLICY combos).
+- carriage-select-model — Choose model for current backend/provider.
+- Context toggles:
+  - carriage-toggle-include-gptel-context
+  - carriage-toggle-include-doc-context
+  - carriage-toggle-include-visible-context
+- Reports and logs:
+  - carriage-report-open
+  - carriage-show-log
+  - carriage-show-traffic
+  - carriage-show-log-and-traffic
+
+Core variables (selection)
+- carriage-apply-engine (symbol) — default 'emacs (see apply-engines addendum).
+- carriage-apply-engine-extra-args (alist) — engine extra args (e.g., git apply/check).
+- carriage-apply-timeout-seconds (number|nil) — per-step timeout override.
+- Git policies:
+  - carriage-git-branch-policy (symbol) — in-place|wip|ephemeral.
+- Context toggles (buffer-local):
+  - carriage-mode-include-gptel-context (boolean)
+  - carriage-mode-include-doc-context (boolean)
+  - carriage-mode-include-visible-context (boolean)
+- UI:
+  - carriage-mode-use-suite-icon (boolean)
+  - carriage-mode-use-engine-icon (boolean)
+  - carriage-mode-headerline-show-outline (boolean)
+  - carriage-mode-state-tooltip-verbosity (symbol)
+- Emacs engine capability:
+  - carriage-engine-emacs-enable-udiff (boolean) — OFF by default.
+
+Faces (selection)
+- State faces: carriage-ui-state-idle-face, carriage-ui-state-sending-face, carriage-ui-state-error-face.
+- Accents: carriage-ui-accent-blue-face, carriage-ui-accent-orange-face, carriage-ui-accent-purple-face, carriage-ui-accent-cyan-face.
+- Patch highlighting: carriage-patch-valid-face, carriage-patch-warning-face, carriage-patch-error-face.
+
+Stability policy
+- Commands and variables listed here are considered stable for v2 unless marked experimental in their docstrings.
+- Additions MUST be backward compatible; removals require deprecation period and migration notes.
+
+Cross-references
+- spec/ui-v2.org, spec/keyspec-v2.org, spec/tool-contracts-v2.org
+

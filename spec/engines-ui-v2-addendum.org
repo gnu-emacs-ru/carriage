@@ -1,0 +1,31 @@
+#+title: Engines UI v2 — Addendum (git combos, hide bare git, tooltips)
+#+author: Carriage Team
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Status
+- Normative addendum to spec/engines-ui-v2.org
+
+1) Visible engine choices
+- REQ: UI MUST list git engine only as combos:
+  - "git:in-place — Git apply engine (in-place)"
+  - "git:wip — Git apply engine (wip)"
+  - "git:ephemeral — Git apply engine (ephemeral)"
+- REQ: A bare "git" entry MUST be hidden from choices.
+
+2) Selection semantics
+- REQ: Choosing any git:POLICY combo MUST:
+  - set carriage-apply-engine='git
+  - set carriage-git-branch-policy to the selected policy (in-place|wip|ephemeral).
+
+3) Tooltips
+- REQ: The [Engine] UI tooltip MUST include the current branch policy when engine='git.
+- REQ: When engine='emacs and user attempts to apply a 'patch plan, UI SHOULD hint that patch requires git.
+
+4) Defaults
+- REQ: The default prompt initial value MUST reflect "git:<policy>" when engine='git so that choices align with combos.
+
+Cross-references
+- Engine defaults and dispatch: spec/apply-engines-v2-addendum.org
+

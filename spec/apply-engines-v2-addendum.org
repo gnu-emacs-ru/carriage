@@ -1,0 +1,36 @@
+#+title: Apply Engines v2 — Addendum (default engine, soft skip, optional udiff in Emacs)
+#+author: Carriage Team
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Status
+- Normative addendum to spec/apply-engines-v2.org
+- Scope: engine defaults, dispatch behavior for unsupported ops, optional udiff in Emacs engine
+
+1) Default engine
+- REQ: The default apply engine MUST be 'emacs.
+- Rationale: faster local SRE/file-ops path; patch remains delegated to Git by default.
+
+2) Dispatch behavior for unsupported patch in Emacs
+- REQ: When the active engine is 'emacs and OP='patch, dispatcher MUST return a friendly skip item (status='skip) with details "patch unsupported by emacs engine" instead of a hard error.
+- REQ: UI/report MUST NOT treat this as error; it SHOULD include a hint to switch to git engine.
+- Rationale: reduce noisy failures when users pick the wrong engine.
+
+3) Optional unified diff support in Emacs engine (flagged)
+- Capability flag: carriage-engine-emacs-enable-udiff (default: nil).
+- When enabled, Emacs engine MAY support a narrow slice of udiff:
+  - Single-file, text-only; create from /dev/null; :strip=1; no rename/copy/binary; exact context only; best-effort CRLF tolerance.
+  - Dry-run MUST parse/validate headers and hunks; apply MUST write the new file ensuring parent dirs exist.
+  - Security: binary sections and multi-file diffs are forbidden.
+- REQ: Engines MUST expose this capability via :capabilities so dispatcher can allow 'patch for 'emacs only when flag is on.
+
+4) UI and policy coherence
+- REQ: Switching to any git:POLICY combo MUST set both carriage-apply-engine='git and carriage-git-branch-policy accordingly (see engines-ui addendum).
+- REQ: Dry-run NEVER creates or switches branches; branch policies apply only in apply stage.
+
+Cross-references
+- engines UI: spec/engines-ui-v2-addendum.org
+- unified diff constraints: spec/patch-unified-diff-v2.org
+- security: spec/security-v2.org
+

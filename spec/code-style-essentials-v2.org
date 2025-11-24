@@ -1,0 +1,36 @@
+#+title: Code Style v2 — Essentials (clean core, async-first, readable code)
+#+author: Carriage Team
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Purpose
+- Re-anchor core engineering practices to ensure maintainable, readable code.
+
+Essentials (normative)
+- Clean core + thin ports:
+  - Domain logic SHOULD be pure, composable, and testable.
+  - Effects (buffers, processes, UI) MUST be isolated at the edges.
+- Async-first:
+  - Do not block the UI; process filters/sentinels MUST be fast and exception-safe.
+  - Provide sync wrappers only as thin delegates to async flows.
+- Structured errors:
+  - Distinguish domain failures (structured alists) from programmer errors (signal).
+  - Do not throw from filters/sentinels; report via structured results.
+- Stable data schemas:
+  - Prefer alist with symbol keys for internal APIs; document shapes; keep types stable.
+- Logging:
+  - Cheap to disable; separate channels (log/traffic); cap buffer sizes.
+- Readability:
+  - Prefer small functions over large monoliths; add docstrings with contracts and alist schemas.
+- Tests and compatibility:
+  - ERT for pure logic/parsers; simulate process IO; keep byte-compiler warnings at zero.
+
+Checklist (minimum)
+- Lexical binding enabled; provide/require correct; public functions documented.
+- No blocking waits on main thread; timeouts and abort flows tested.
+- i18n keys present for UI strings referenced by code.
+
+Cross-references
+- spec/testing-v2.org, spec/errors-v2.org, spec/logging-v2.org
+

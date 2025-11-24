@@ -242,7 +242,7 @@ Update only when BUF is visible; avoid forcing window repaints."
     (let* ((buf (current-buffer))
            (interval (or (and (boundp 'carriage-mode-spinner-interval)
                               carriage-mode-spinner-interval)
-                         0.15)))
+                         0.08)))
       (setq carriage--ui-spinner-timer
             (run-at-time 0 interval
                          (lambda ()

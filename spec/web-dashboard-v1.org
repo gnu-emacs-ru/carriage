@@ -1,0 +1,302 @@
+#+title: Web Dashboard v1 — Local, real-time status and control for Carriage
+#+author: Carriage Team <dev@carriage>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+#+begin_carriage
+CARRIAGE_AUDIO_NOTIFY nil
+CARRIAGE_CTX_DOC t
+CARRIAGE_CTX_GPTEL nil
+CARRIAGE_CTX_VISIBLE nil
+CARRIAGE_ENGINE emacs
+CARRIAGE_FLASH t
+CARRIAGE_ICONS t
+CARRIAGE_INTENT Ask
+CARRIAGE_MODE t
+CARRIAGE_MODEL_ID gptel:ai-tunnel:gpt-4.1
+CARRIAGE_REPORT_POLICY on-error
+CARRIAGE_STAGE_POLICY none
+CARRIAGE_SUITE aibo
+#+end_carriage
+
+Meta
+- Spec-ID: carriage/ui/web-dashboard/v1
+- Version: v1.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: ui, transport
+- Prompt-ABI: v1
+- Pack-Profiles: P3-debug
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Anchor: PURPOSE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- LLM-Summary: Define a local (localhost) web dashboard for real-time observation and safe control
+  of Carriage sessions:
+  - Single source of truth: Emacs/Carriage runtime state
+  - Real-time stream via SSE/WebSocket
+  - Minimal command set (whitelist) exposed as HTTP JSON API
+  - Non-blocking server with payload limits and throttling
+  - Optional Guile proxy for heavier UI without leaving Lisp family
+
+Scope
+- Anchor: SCOPE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- In scope: local HTTP endpoints, SSE/WebSocket streaming, session snapshot model, command RPC
+  (apply/abort/toggles/report-open), minimal static HTML/JS page.
+- Out of scope: multi-user auth and ACL, remote exposure beyond loopback, heavy SPA/graphing
+  (may be added via optional Guile proxy).
+
+Terms
+- Anchor: TERMS
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- Session: logical unit of observation (repo-relative file or ephemeral buffer).
+- Snapshot: compact JSON state of a session (for list/detail views).
+- Event: real-time update delivered over SSE/WebSocket (ui/apply/report/transport/heartbeat).
+- Command: whitelisted action invoked via JSON POST (no arbitrary eval).
+- Local token: shared secret (optional) sent as X-Auth header.
+
+Normative Requirements
+- Anchor: REQ
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- REQ-web-001: The dashboard MUST bind to loopback (127.0.0.1) by default; CORS MUST be disabled.
+- REQ-web-002: All command endpoints MUST implement a strict whitelist; arbitrary eval is forbidden.
+- REQ-web-003: The server MUST be non-blocking: I/O and serialization via timers/threads; no UI stalls.
+- REQ-web-004: Real-time stream MUST be provided via SSE or WebSocket; SSE is the REQUIRED baseline.
+- REQ-web-005: Payloads MUST be size-limited and truncated; diffs/previews MUST NOT be streamed by default.
+- REQ-web-006: Session ids MUST be stable for files (repo-relative path) and stable-enough for ephemeral
+  buffers (generated uid within process lifetime).
+- REQ-web-007: Errors MUST map to errors-v2 (severity and codes), returning JSON envelopes with HTTP 4xx/5xx.
+- REQ-web-008: The API MUST expose health, sessions list, per-session snapshot, last report summary,
+  real-time stream, and command endpoint.
+- REQ-web-009: The server MUST tolerate reconnects (SSE idempotency) and close stale/inactive clients.
+- REQ-web-010: When an optional X-Auth token is configured, all API and stream requests MUST validate it.
+
+Invariants
+- Anchor: INV
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- FREEZE: default-port = 8787
+- FREEZE: default-bind = 127.0.0.1
+- FREEZE: max-clients-sse = 16
+- FREEZE: publish-debounce-ms = 50
+- FREEZE: max-json-bytes = 131072
+- INV-web-001: No heavy artifacts (patch bodies, large context) are emitted in events; use dedicated GET for details.
+- INV-web-002: Exactly one publication path per state change: sources publish to the internal bus; bus fans out to clients.
+
+Grammar/Schema
+- Anchor: SCHEMA
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Response envelope (success):
+  - JSON object: {"ok": true, "data": <payload>}
+- Response envelope (error):
+  - JSON object: {"ok": false, "error": "<message>", "code": "<ERR_CODE>"}
+- Session (snapshot fields, minimal):
+  - {
+      "id": string,               ; "proj/path/file.org" or "ephemeral:<uid>"
+      "title": string,            ; file/buffer short name
+      "project": string,          ; project id/dir name
+      "mode": string,             ; major-mode name
+      "intent": "Ask|Code|Hybrid",
+      "suite": "udiff|sre|aibo",
+      "engine": "git:<policy>|emacs",
+      "branch": string|null,
+      "ctx": {"count": int},
+      "patches": {"count": int},
+      "state": {"phase": "idle|sending|streaming|dry-run|apply|error", "tooltip": string}
+    }
+- ReportSummary:
+  - {"ok": int, "fail": int, "skipped": int, "total": int, "ts": string}
+- Event payloads:
+  - ui:        {"type":"ui","doc":"<id>","state":{...}}
+  - apply:     {"type":"apply","doc":"<id>","summary":ReportSummary}
+  - report:    {"type":"report","doc":"<id>","summary":ReportSummary}
+  - transport: {"type":"transport","doc":"<id>","phase":"begin|streaming|complete","meta":{"model":string}}
+  - heartbeat: {"type":"heartbeat","ts":number}
+
+Interfaces/Contracts
+- Anchor: IFC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- HTTP endpoints (JSON; Content-Type: application/json; UTF-8):
+  - GET /api/health
+    - 200: {"ok":true,"data":{"version":"X.Y.Z","engine":"git|emacs","ts":<unix>}}
+  - GET /api/sessions
+    - 200: {"ok":true,"data":[Session,...]}
+  - GET /api/session/<id>
+    - 200: {"ok":true,"data": Session+{"apply":{"last":ReportSummary},"ctx":{"sources":{"doc":N,"gptel":N,"visible":N,"both":N}}}}
+  - GET /api/report/last?doc=<id>&limit=<N>
+    - 200: {"ok":true,"data":{"summary":ReportSummary,"items":[...<=N...]}}
+    - 404: {"ok":false,"error":"no-report","code":"WEB_E_NOT_FOUND"}
+  - POST /api/cmd
+    - Input: {"cmd": "<name>", "doc": "<id>", ...args}
+    - Allowed commands:
+      * "apply_last_iteration"
+      * "abort"
+      * "report_open"
+      * "commit_all"
+      * "commit_last"
+      * "wip"
+      * "toggle" with {"key":"ctx|files|visible|patched|profile"}
+    - 200: {"ok":true} or 400/500 with error envelope
+  - GET /stream[?doc=<id>]
+    - SSE events:
+      * event: ui|apply|report|transport|heartbeat
+      * id: <seq>
+      * data: <JSON payload per SCHEMA>
+- Security headers (SHOULD):
+  - X-Frame-Options: DENY
+  - X-Content-Type-Options: nosniff
+  - Referrer-Policy: no-referrer
+- Token header (when enabled):
+  - X-Auth: <token>
+
+Algorithms
+- Anchor: ALG
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- ALG-web-001: Publish pipeline
+  1) Source hooks (apply/report/transport/ui) assemble small payloads (no heavy bodies).
+  2) Enqueue to a ring buffer; debounce/time-slice (publish-debounce-ms).
+  3) Fan out to connected SSE clients; drop or truncate payloads exceeding max-json-bytes.
+- ALG-web-002: Sessions snapshot
+  1) Collect open Carriage buffers; compute stable ids; derive intent/suite/engine/branch and ctx/patch counts.
+  2) Merge with last known report summary from cache.
+  3) Return ordered list; pagination MAY be added later.
+- ALG-web-003: Command dispatch
+  1) Validate token (if configured) and input schema for "cmd".
+  2) Assert whitelist; map cmd→safe interactive function(s); run asynchronously (timer/thread).
+  3) Return success or structured error; never eval arbitrary forms.
+
+Errors and Diagnostics
+- Anchor: ERR
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- WEB_E_AUTH — invalid or missing X-Auth token (severity=error).
+- WEB_E_CMD — unknown or disallowed command (severity=error).
+- WEB_E_PAYLOAD — malformed payload (severity=error).
+- WEB_E_NOT_FOUND — requested session/report not found (severity=error).
+- WEB_W_TRUNCATED — payload truncated by size limit (severity=warn).
+- Mapping to errors-v2:
+  - Use severity and concise messages; include minimal details; avoid leaking large payloads.
+
+Security and Limits
+- Anchor: SEC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- Dashboard MUST bind loopback by default; remote exposure is forbidden by default.
+- Optional shared token MUST be supported and checked on all endpoints (including stream).
+- No arbitrary eval; commands MUST be whitelisted; inputs validated.
+- Payload size limits and truncation MUST be enforced; secrets MUST NOT be logged in clear.
+- TRAMP/remote apply and unsafe git flags remain forbidden as per security-v2; dashboard MUST NOT weaken them.
+
+Performance and Asynchrony
+- Anchor: PERF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Publish pipeline MUST use timers or threads; do not block the main UI loop.
+- SSE SHOULD be used by default for simplicity; WebSocket MAY be added.
+- Debounce and batch small updates; coalesce bursts; enforce client caps.
+- Record minimal observability: elapsed-ms for heavy operations when available.
+
+UI/UX
+- Anchor: UI
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- MVP static page served by the server:
+  - Sidebar: sessions list (id/title/phase/ctx.count/patches.count)
+  - Main: session card (state summary, last report summary, controls)
+  - Controls: Apply last iteration, Abort, Toggle context, Open report, Commit
+- No frameworks required; vanilla HTML/JS (fetch + EventSource).
+- Large details (report items) fetched on demand with explicit user action.
+
+Context Packaging
+- Anchor: PACK
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- Profile: P3-debug
+  - include: carriage/ui/web-dashboard/v1#REQ priority=P3 max-tokens=300 summarize=0.7
+  - include: carriage/ui/web-dashboard/v1#SCHEMA priority=P3 max-tokens=300 summarize=0.7
+  - include: carriage/ui/web-dashboard/v1#IFC priority=P3 max-tokens=300 summarize=0.7
+
+Retrieval and Indexing
+- Anchor: RAG
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- Index REQ/SCHEMA/IFC/SEC only; chunk ids CHK-carriage/ui/web-dashboard/v1-<ANCHOR>-NN.
+- Normalize whitespace; forbid zero-width characters; UTF-8 only.
+
+Precedence Rules
+- Anchor: PREC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- Security and Errors take precedence over UI and Interfaces; the dashboard MUST NOT weaken global policies.
+
+Testing and Conformance
+- Anchor: TST
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Compliance Checklist:
+  - CHK-web-001: Server binds loopback by default; CORS disabled.
+  - CHK-web-002: SSE endpoint streams events; reconnects tolerated.
+  - CHK-web-003: Commands validated against whitelist; unknown→WEB_E_CMD.
+  - CHK-web-004: Token (when set) enforced on all endpoints; invalid→WEB_E_AUTH.
+  - CHK-web-005: Payloads truncated to max-json-bytes; WEB_W_TRUNCATED may be signaled/logged.
+- Test Matrix:
+  - TST-web-001: GET /api/health returns ok with version/engine.
+  - TST-web-002: GET /api/sessions returns list; fields populated.
+  - TST-web-003: GET /api/session/<id> augments last report summary.
+  - TST-web-004: POST /api/cmd apply_last_iteration executes and returns ok.
+  - TST-web-005: POST /api/cmd unknown → 400 with WEB_E_CMD.
+  - TST-web-006: GET /stream emits ui/apply/report/transport events on state changes.
+
+Cross-References and Anchors
+- Anchor: XREF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Source of Truth: spec/spec-on-specs.org#IFC, spec/security-v2.org#SEC, spec/errors-v2.org#ERR
+- Related:
+  - spec/observability-v2.org
+  - spec/logging-v2.org
+- Code:
+  - lisp/carriage-web.el (new module; HTTP/SSE server, pub/sub bus, API)
+  - lisp/carriage-apply.el (hooks)
+  - lisp/carriage-report.el (hooks)
+  - lisp/transports/carriage-transport.el (hooks)
+  - lisp/carriage-ui.el (state note hooks)
+
+Evolution
+- Anchor: EVO
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Affects-Prompt: none
+- Future v1.x:
+  - Optional WebSocket channel; richer UI widgets; filters/pagination
+  - Guix/Guile proxy variant (Unix domain socket RPC) for heavier SPA/graphing
+  - Versioned API paths (/api/v1/…) when stability requires it

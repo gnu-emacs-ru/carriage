@@ -1,0 +1,133 @@
+#+title: Web Dashboard v1 — Readiness and Verification Guide
+#+author: Carriage Team <dev@carriage>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Purpose
+- This guide helps you verify the MVP Web Dashboard implemented in Emacs Lisp:
+  - Start/stop the local HTTP/SSE server
+  - Validate API endpoints and auth
+  - Observe real-time events (SSE)
+  - Invoke whitelisted commands from the UI
+  - Confirm non-blocking behavior and limits
+
+Prerequisites
+- Emacs 27.1+ (29+ recommended)
+- Carriage repository on load-path (e.g., M-: (add-to-list 'load-path "/path/to/carriage/lisp"))
+- Optional: curl for API checks
+
+Quick start
+1) Load and start the server in Emacs
+   - M-: (require 'carriage-web)
+   - M-: (carriage-web-start)
+   - By default, the server binds to 127.0.0.1:8787
+
+2) Optional shared token (recommended)
+   - M-: (setq carriage-web-auth-token "t0k")
+   - Reload the UI page after setting the token and use “X-Auth token” input (top-right) in the header
+
+3) Open the UI
+   - Browser: http://127.0.0.1:8787/
+   - If a token is set: enter it in the input and press “Set”
+
+What to expect (UI)
+- Sidebar: sessions list (id/title/phase/ctx/patches)
+- Main panel: selected session summary (state + last report), action buttons
+- Live updates: status changes and summaries are pushed via SSE (EventSource)
+
+API verification (curl examples)
+- Health
+  - curl -s http://127.0.0.1:8787/api/health
+  - With token: curl -s -H 'X-Auth: t0k' http://127.0.0.1:8787/api/health
+  - Expect: {"ok":true,"data":{"version":"...","engine":"git|emacs","ts":...}}
+
+- Sessions list
+  - curl -s -H 'X-Auth: t0k' http://127.0.0.1:8787/api/sessions
+  - Expect: {"ok":true,"data":[...]}
+
+- Per-session snapshot (replace <id> from sessions list)
+  - curl -s -H 'X-Auth: t0k' http://127.0.0.1:8787/api/session/<id>
+  - Expect: {"ok":true,"data":{...,"apply":{"last":...},"ctx":{"sources":{...}}}}
+
+- Last report summary (replace <id>)
+  - No report yet → 404:
+    curl -i -s -H 'X-Auth: t0k' 'http://127.0.0.1:8787/api/report/last?doc=<id>'
+    Expect: 404 with {"ok":false,"code":"WEB_E_NOT_FOUND"}
+  - After you open a report (see Actions) you can re-check; expect {"ok":true,"data":{"summary":...,"items":[]}}
+
+SSE stream (live events)
+- Navigate in browser UI (already subscribes to /stream)
+- Or raw check with curl (will not render events nicely but shows headers):
+  - curl -s -N 'http://127.0.0.1:8787/stream?token=t0k'
+- Expect: a “hello” event, periodic “heartbeat”, and events when state changes:
+  - event: ui|apply|report|transport|heartbeat
+
+Actions (from UI or API)
+- UI buttons:
+  - Apply last (POST /api/cmd {cmd:"apply_last_iteration", doc:"<id>"})
+  - Abort (POST /api/cmd {cmd:"abort", doc:"<id>"})
+  - Open report (POST /api/cmd {cmd:"report_open", doc:"<id>"})
+  - Toggles (POST /api/cmd {cmd:"toggle", doc:"<id>", key:"ctx|files|visible|patched|profile"})
+- API example (apply_last_iteration):
+  - curl -s -H 'X-Auth: t0k' -H 'Content-Type: application/json' \
+    -d '{"cmd":"apply_last_iteration","doc":"<id>"}' \
+    http://127.0.0.1:8787/api/cmd
+  - Expect: {"ok":true} on supported paths, or {"ok":false,"code":"WEB_E_CMD"} if unsupported
+
+Recommended manual checks
+1) Health and auth
+   - With no token set: API should work without X-Auth
+   - With token set: API should require X-Auth; SSE must accept ?token=... in URL
+
+2) Sessions and snapshots
+   - Open an Org buffer with Carriage mode; verify it appears in /api/sessions and UI list
+   - Confirm ctx.count and patches.count are non-negative integers
+
+3) SSE delivery and idempotency
+   - Open two browser tabs to http://127.0.0.1:8787/
+   - Trigger actions (e.g., Open report, Apply last) and observe both tabs updating
+   - Heartbeat is emitted periodically; idle tabs should be pruned after inactivity timeout
+
+4) Commands whitelist
+   - POST /api/cmd with an unknown command → 400 {"ok":false,"code":"WEB_E_CMD"}
+   - toggle without key/doc → 400 {"ok":false,"code":"WEB_E_PAYLOAD"}
+   - report_last for unknown doc → 404 {"ok":false,"code":"WEB_E_NOT_FOUND"}
+
+5) Payload limits
+   - Large JSON outputs are truncated by the server-side encoder to max-json-bytes
+   - No heavy bodies (diff/previews) are streamed as events by default
+
+Troubleshooting
+- The page won’t open
+  - Ensure (carriage-web-start) has run and Emacs did not report a socket error
+  - Confirm binding: defaults to 127.0.0.1:8787; verify “host” and “port” defcustoms
+
+- Unauthorized (401)
+  - If carriage-web-auth-token is non-nil, set token in the UI input and click Set
+  - For curl, pass -H 'X-Auth: <token>'; for SSE in UI, the token is added via ?token=...
+
+- No sessions visible
+  - Ensure at least one Carriage buffer is active (Carriage mode or a file buffer)
+  - Verify the id and snapshot by calling GET /api/sessions with X-Auth (if set)
+
+- SSE not updating / stalled
+  - Reload the UI to obtain a fresh SSE connection
+  - Idle clients are pruned; refresh re-subscribes automatically
+
+Security notes
+- Bind is loopback-only by default; do not expose externally during MVP
+- Token protection is optional but recommended (set carriage-web-auth-token)
+- Commands are strictly whitelisted; no arbitrary eval is possible via the dashboard
+
+Appendix: Emacs commands
+- M-: (carriage-web-start)   ; start server
+- M-: (carriage-web-stop)    ; stop server
+- M-: (setq carriage-web-auth-token "t0k") ; enable token
+- M-: (setq carriage-web-port 8787)        ; change listen port (restart required)
+
+References
+- Spec: spec/web-dashboard-v1.org (REQ/SCHEMA/IFC/SEC/TST)
+- Code: lisp/carriage-web.el
+- Tests: test/carriage-web-tests.el
+

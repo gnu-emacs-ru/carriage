@@ -73,6 +73,10 @@
   "Interval in seconds for sending heartbeat events to SSE clients."
   :type 'number :group 'carriage-web)
 
+(defcustom carriage-web-sse-idle-timeout 180.0
+  "Idle timeout in seconds for SSE clients. Stale clients are pruned on heartbeat."
+  :type 'number :group 'carriage-web)
+
 (defvar carriage-web--server-proc nil
   "Server process for dashboard HTTP listener.")
 
@@ -128,7 +132,7 @@
           ;; SSE 'data' must be single line or split. We send compact JSON (no newlines).
           (process-send-string proc (format "data: %s\r\n\r\n" data-json)))
       (error
-       (ignore-errors (delete-process proc))))))
+       (ignore-errors (process-send-eof proc))))))
 
 (defun carriage-web--broadcast (event-name payload)
   "Send EVENT-NAME with PAYLOAD (plist or alist) to all SSE clients.
@@ -149,16 +153,18 @@ Respects per-client filter (:filter (\"doc\" . ID)) when present."
       (cl-incf carriage-web--next-event-id)
       (dolist (cli carriage-web--clients)
         (let* ((proc (plist-get cli :proc))
-               (flt  (plist-get cli :filter)))
-          ;; Skip when client asked for a specific doc and this event is for a different doc.
+               (flt  (or (process-get proc 'carriage-web-filter)
+                         (plist-get cli :filter))))
+          ;; Respect optional per-client doc filter (string or cons (\"doc\" . id)).
           (when (or (null flt)
-                    (not (consp flt))
-                    (not (string= (car flt) "doc"))
                     (null doc)
-                    (string= (cdr flt) doc))
+                    (and (consp flt)
+                         (string= (car flt) "doc")
+                         (string= (cdr flt) doc))
+                    (and (stringp flt) (string= flt doc)))
             (carriage-web--sse-write proc eid event-name json)
-            ;; Mark client as recently active.
-            (plist-put cli :last-ts now)))))))
+            ;; Mark client as recently active (process-local to survive plist mutations).
+            (process-put proc 'carriage-web-last-ts now)))))))
 
 (defun carriage-web--debounce-push ()
   "Debounced delivery of queued events."
@@ -240,6 +246,7 @@ CONTENT-TYPE defaults to application/json."
            "X-Frame-Options: DENY\r\n"
            "X-Content-Type-Options: nosniff\r\n"
            "Referrer-Policy: no-referrer\r\n"
+           "Connection: close\r\n"
            (or extra-headers "")
            "\r\n")))
     (process-send-string proc headers)
@@ -254,7 +261,7 @@ CONTENT-TYPE defaults to application/json."
 ;;; Route handlers
 
 (defun carriage-web--handle-health (proc _method _path _query _headers)
-  (let* ((ver (or (get 'carriage-web--version 'value) "0.1"))
+  (let* ((ver (or (and (boundp 'carriage-web--version) carriage-web--version) "0.1"))
          (engine (condition-case _e
                      (if (boundp 'carriage-apply-engine)
                          (format "%s" carriage-apply-engine)
@@ -276,38 +283,46 @@ CONTENT-TYPE defaults to application/json."
     (let ((cli (list :proc proc :id (format "cli-%d" (random 1000000))
                      :filter nil :last-ts (carriage-web--now))))
       (push cli carriage-web--clients)
+      (process-put proc 'carriage-web-last-ts (carriage-web--now))
       (carriage-web--log "sse: client added (total=%d)" (length carriage-web--clients)))))
 
 (defun carriage-web--handle-stream (proc _method _path query headers)
-  (cond
-   ((not (carriage-web--auth-ok headers))
-    (carriage-web--send-json proc "401 Unauthorized"
-                             (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))
-    (ignore-errors (delete-process proc)))
-   ((>= (length carriage-web--clients) carriage-web-max-sse-clients)
-    (carriage-web--send-json proc "503 Service Unavailable"
-                             (list :ok json-false :error "too many clients" :code "WEB_E_LIMIT"))
-    (ignore-errors (delete-process proc)))
-   (t
-    ;; Optional filter by ?doc=... (store for future fan-out filtering)
-    (let ((doc (cdr (cl-find "doc" query :key #'car  :test #'string=))))
-      (set-process-query-on-exit-flag proc nil)
-      (set-process-sentinel
-       proc
-       (lambda (p _s)
-         (setq carriage-web--clients
-               (cl-remove-if (lambda (c) (or (eq (plist-get c :proc) p)
-                                             (not (process-live-p (plist-get c :proc)))))
-                             carriage-web--clients))))
-      (carriage-web--sse-accept proc)
-      (when doc
-        (let ((cli (cl-find proc carriage-web--clients :key (lambda (c) (plist-get c :proc)))))
-          (when cli (plist-put cli :filter (cons "doc" doc)))))
-      ;; Immediately send a hello + heartbeat tick (so the client knows stream is live)
-      (let* ((eid carriage-web--next-event-id)
-             (hello (carriage-web--json (list :type "hello" :ts (carriage-web--now)))))
-        (cl-incf carriage-web--next-event-id)
-        (carriage-web--sse-write proc eid "hello" hello))))))
+  (let* ((tok carriage-web-auth-token)
+         (h-ok (carriage-web--auth-ok headers))
+         (qtok (cdr (cl-find "token" query :key #'car :test #'string=)))
+         (auth-ok (or (not (stringp tok))
+                      h-ok
+                      (and (stringp qtok) (string= qtok tok)))))
+    (cond
+     ((not auth-ok)
+      (carriage-web--send-json proc "401 Unauthorized"
+                               (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))
+      (ignore-errors (delete-process proc)))
+     ((>= (length carriage-web--clients) carriage-web-max-sse-clients)
+      (carriage-web--send-json proc "503 Service Unavailable"
+                               (list :ok json-false :error "too many clients" :code "WEB_E_LIMIT"))
+      (ignore-errors (delete-process proc)))
+     (t
+      ;; Optional filter by ?doc=... (store for future fan-out filtering)
+      (let ((doc (cdr (cl-find "doc" query :key #'car  :test #'string=))))
+        (set-process-query-on-exit-flag proc nil)
+        (set-process-sentinel
+         proc
+         (lambda (p _s)
+           (setq carriage-web--clients
+                 (cl-remove-if (lambda (c) (or (eq (plist-get c :proc) p)
+                                          (not (process-live-p (plist-get c :proc)))))
+                               carriage-web--clients))))
+        (carriage-web--sse-accept proc)
+        (when doc
+          (process-put proc 'carriage-web-filter doc)
+          (let ((cli (cl-find proc carriage-web--clients :key (lambda (c) (plist-get c :proc)))))
+            (when cli (plist-put cli :filter (cons "doc" doc)))))
+        ;; Immediately send a hello + heartbeat tick (so the client knows stream is live)
+        (let* ((eid carriage-web--next-event-id)
+               (hello (carriage-web--json (list :type "hello" :ts (carriage-web--now)))))
+          (cl-incf carriage-web--next-event-id)
+          (carriage-web--sse-write proc eid "hello" hello)))))))
 
 ;;; HTTP dispatcher
 
@@ -323,6 +338,9 @@ REQ is a plist (:method :path :query :headers [:body])."
      ;; Root: static HTML dashboard
      ((and (string= method "GET") (string= path "/"))
       (carriage-web--handle-root proc method path query headers))
+     ;; Favicon (avoid spurious resets/404s)
+     ((and (string= method "GET") (string= path "/favicon.ico"))
+      (carriage-web--send-response proc "204 No Content" "" "image/x-icon"))
      ;; Health
      ((and (string= method "GET") (string= path "/api/health"))
       (if (carriage-web--auth-ok headers)
@@ -400,9 +418,17 @@ REQ is a plist (:method :path :query :headers [:body])."
                   (erase-buffer)
                   (carriage-web--dispatch-request
                    proc (list :method method :path path :query query :headers headers :body body))
-                  ;; Close connection for non-SSE
+                  ;; Close connection for non-SSE (graceful, delayed)
                   (unless (string= path "/stream")
-                    (ignore-errors (delete-process proc))))))))))))
+                    (run-at-time
+                     0.05 nil
+                     (lambda (p)
+                       (when (process-live-p p)
+                         (condition-case _e
+                             (progn
+                               (ignore-errors (process-send-eof p)))
+                           (error nil))))
+                     proc)))))))))))
 
 (defun carriage-web--accept (server proc _msg)
   "Accept callback for SERVER; attach buffer/filter/sentinel to PROC."
@@ -423,21 +449,23 @@ REQ is a plist (:method :path :query :headers [:body])."
   "Emit a heartbeat SSE event to all clients and prune idle ones."
   (let* ((now (carriage-web--now))
          ;; Idle timeout in seconds for SSE clients (close stale ones).
-         (idle 180.0))
+         (idle (or carriage-web-sse-idle-timeout 180.0)))
     (when carriage-web--clients
       ;; Prune non-live or idle clients.
       (setq carriage-web--clients
             (cl-remove-if
              (lambda (c)
-               (let ((p (plist-get c :proc))
-                     (last (or (plist-get c :last-ts) now)))
+               (let* ((p (plist-get c :proc))
+                      (last (or (and (process-live-p p) (process-get p 'carriage-web-last-ts))
+                                (plist-get c :last-ts) now)))
                  (when (or (not (process-live-p p))
                            (> (- now last) idle))
                    (ignore-errors (when (process-live-p p) (delete-process p)))
                    t)))
              carriage-web--clients))
-      ;; Emit heartbeat to remaining clients (also updates :last-ts via broadcast).
+      ;; Emit heartbeat to remaining clients (also updates last-ts via broadcast).
       (carriage-web--broadcast "heartbeat" (list :type "heartbeat" :ts now)))))
+
 
 ;;; Public control API
 
@@ -450,14 +478,31 @@ REQ is a plist (:method :path :query :headers [:body])."
   (when (process-live-p carriage-web--server-proc)
     (carriage-web--log "server already running on %s:%s" carriage-web-bind carriage-web-port)
     (cl-return-from carriage-web-start t))
-  (let ((proc (make-network-process
-               :name "carriage-web"
-               :family 'ipv4
-               :server t
-               :noquery t
-               :host carriage-web-bind
-               :service carriage-web-port
-               :log #'carriage-web--accept)))
+  (let ((proc nil))
+    (condition-case _e
+        (setq proc (make-network-process
+                    :name "carriage-web"
+                    :family 'ipv4
+                    :server t
+                    :noquery t
+                    :reuseaddr t
+                    :host carriage-web-bind
+                    :service carriage-web-port
+                    :log #'carriage-web--accept))
+      (error
+       ;; Fallback: bind to an ephemeral free port (service 0), then record it.
+       (setq proc (make-network-process
+                   :name "carriage-web"
+                   :family 'ipv4
+                   :server t
+                   :noquery t
+                   :reuseaddr t
+                   :host carriage-web-bind
+                   :service 0
+                   :log #'carriage-web--accept))
+       (when (process-live-p proc)
+         (setq carriage-web-port (or (process-contact proc :service)
+                                     carriage-web-port)))))
     (setq carriage-web--server-proc proc)
     (carriage-web--log "server started on %s:%s" carriage-web-bind carriage-web-port)
     ;; Start heartbeat
@@ -523,7 +568,7 @@ REQ is a plist (:method :path :query :headers [:body])."
    "button{margin:4px 6px 4px 0;padding:6px 10px}"
    "</style>"
    "</head><body>"
-   "<header>Carriage — Local Dashboard</header>"
+   "<header>Carriage — Local Dashboard <span style='float:right'><input id='auth' placeholder='X-Auth token' size='18'/><button onclick='saveAuth()'>Set</button></span></header>"
    "<div class='wrap'>"
    "<aside>"
    "<div class='small'>Sessions (live)</div>"
@@ -540,7 +585,7 @@ REQ is a plist (:method :path :query :headers [:body])."
    "</main>"
    "</div>"
    "<script>"
-   "const state={sessions:new Map(), selected:null};"
+   "const state={sessions:new Map(), selected:null};function getAuth(){try{return localStorage.getItem('X-Auth')||'';}catch(e){return ''}}function saveAuth(){try{localStorage.setItem('X-Auth',document.getElementById('auth').value.trim());}catch(e){} location.reload();}"
    "function h(t){return document.createTextNode(t)}"
    "function renderSessions(){"
    " const tb=document.querySelector('#tbl tbody');"
@@ -569,7 +614,7 @@ REQ is a plist (:method :path :query :headers [:body])."
    "}"
    "async function fetchSessions(){"
    " try{"
-   "  const r=await fetch('/api/sessions',{headers:{'Accept':'application/json'}});"
+   "  const r=await fetch('/api/sessions',{headers:(()=>{const h={'Accept':'application/json'};const a=getAuth();if(a)h['X-Auth']=a;return h;})()});"
    "  const j=await r.json();"
    "  if(j&&j.ok){"
    "    const arr=j.data||[]; state.sessions.clear();"
@@ -589,9 +634,9 @@ REQ is a plist (:method :path :query :headers [:body])."
    "  }"
    "}"
    "async function boot(){"
-   " await fetchSessions();"
+   " const a=getAuth(); const inp=document.getElementById('auth'); if(inp) inp.value=a; await fetchSessions();"
    " try{"
-   "  const es=new EventSource('/stream');"
+   "  const es=new EventSource('/stream'+(getAuth()?('?token='+encodeURIComponent(getAuth())):''));"
    "  const on=(t)=>(e)=>{ try{ applyEvent(Object.assign({type:t}, JSON.parse(e.data))); }catch(_e){} };"
    "  es.addEventListener('ui', on('ui'));"
    "  es.addEventListener('apply', on('apply'));"
@@ -604,7 +649,7 @@ REQ is a plist (:method :path :query :headers [:body])."
    "async function cmd(name){"
    " if(!state.selected){ alert('Select a session first'); return; }"
    " try{"
-   "  const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({cmd:name,doc:state.selected})});"
+   "  const r=await fetch('/api/cmd',{method:'POST',headers:(()=>{const h={'Content-Type':'application/json','Accept':'application/json'};const a=getAuth();if(a)h['X-Auth']=a;return h;})(),body:JSON.stringify({cmd:name,doc:state.selected})});"
    "  const j=await r.json();"
    "  if(!(j&&j.ok)){ console.warn('cmd failed',j); alert('Command failed: '+((j&&j.error)||'error')); }"
    " }catch(e){ console.error('cmd error',e); alert('Command error'); }"
@@ -700,9 +745,19 @@ REQ is a plist (:method :path :query :headers [:body])."
                  (intent (or (and (boundp 'carriage-intent) (symbol-name carriage-intent)) "Code"))
                  (suite (or (and (boundp 'carriage-suite) (symbol-name carriage-suite)) "udiff"))
                  (engine (carriage-web--buffer-engine-policy b))
-                 (branch nil)
+                 (branch (when (and (stringp engine)
+                                    (string-prefix-p "git:" engine)
+                                    (require 'carriage-git nil t))
+                           (ignore-errors
+                             (carriage-git-current-branch (carriage-web--buffer-file-root b)))))
                  (ctxc (carriage-web--ctx-count b))
-                 (patches 0)
+                 (patches (with-current-buffer b
+                            (save-excursion
+                              (goto-char (point-min))
+                              (let ((case-fold-search t) (n 0))
+                                (while (re-search-forward "^[ \t]*#\\+begin_patch\\b" nil t)
+                                  (setq n (1+ n)))
+                                n))))
                  (state (carriage-web--buffer-state b)))
             (push (list :id id :title title :project project :mode mode
                         :intent intent :suite suite :engine engine :branch branch
@@ -912,26 +967,49 @@ REQ is a plist (:method :path :query :headers [:body])."
         (carriage-web--send-json proc "404 Not Found"
                                  (list :ok json-false :error "not found" :code "WEB_E_NOT_FOUND"))
       (with-current-buffer buf
-        (let* ((id id) ; shadow-safe
-               (id (carriage-web--buffer-id buf))
+        (let* ((id (carriage-web--buffer-id buf))
                (title (carriage-web--buffer-title buf))
                (project (or (carriage-web--buffer-project buf) ""))
                (mode (symbol-name major-mode))
                (intent (or (and (boundp 'carriage-intent) (symbol-name carriage-intent)) "Code"))
                (suite (or (and (boundp 'carriage-suite) (symbol-name carriage-suite)) "udiff"))
                (engine (carriage-web--buffer-engine-policy buf))
-               (branch nil)
-               (ctxc (carriage-web--ctx-count buf))
-               (patches 0)
-               (state (carriage-web--buffer-state buf))
-               (apply-last (gethash id carriage-web--last-apply-summary))
-               (data (list :id id :title title :project project :mode mode
-                           :intent intent :suite suite :engine engine :branch branch
-                           :ctx (list :count ctxc :sources (list :doc 0 :gptel 0 :visible 0 :both 0))
-                           :patches (list :count patches)
-                           :state state
-                           :apply (list :last apply-last))))
-          (carriage-web--send-json proc "200 OK" (list :ok t :data data)))))))
+               (branch (when (and (stringp engine)
+                                  (string-prefix-p "git:" engine)
+                                  (require 'carriage-git nil t))
+                         (ignore-errors
+                           (carriage-git-current-branch (carriage-web--buffer-file-root buf)))))
+               ;; Context counts and sources breakdown
+               (ctxres (condition-case _e
+                           (and (fboundp 'carriage-context-count)
+                                (carriage-context-count buf (point)))
+                         (error nil)))
+               (ctxc (or (and (listp ctxres) (plist-get ctxres :count)) 0))
+               (items (or (and (listp ctxres) (plist-get ctxres :items)) '()))
+               (docN 0) (gptN 0) (visN 0) (bothN 0))
+          (dolist (it items)
+            (pcase (plist-get it :source)
+              ('doc     (setq docN  (1+ docN)))
+              ('gptel   (setq gptN  (1+ gptN)))
+              ('visible (setq visN  (1+ visN)))
+              ('both    (setq bothN (1+ bothN)))
+              (_ nil)))
+          (let* ((patches (progn
+                            (save-excursion
+                              (goto-char (point-min))
+                              (let ((case-fold-search t) (n 0))
+                                (while (re-search-forward "^[ \t]*#\\+begin_patch\\b" nil t)
+                                  (setq n (1+ n)))
+                                n))))
+                 (state (carriage-web--buffer-state buf))
+                 (apply-last (gethash id carriage-web--last-apply-summary))
+                 (data (list :id id :title title :project project :mode mode
+                             :intent intent :suite suite :engine engine :branch branch
+                             :ctx (list :count ctxc :sources (list :doc docN :gptel gptN :visible visN :both bothN))
+                             :patches (list :count patches)
+                             :state state
+                             :apply (list :last apply-last))))
+            (carriage-web--send-json proc "200 OK" (list :ok t :data data))))))))
 
 (defun carriage-web--handle-report-last (proc _method _path query _headers)
   "Return last report summary/items for a doc from QUERY."

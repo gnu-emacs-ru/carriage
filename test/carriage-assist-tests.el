@@ -13,7 +13,7 @@
 
 (require 'ert)
 (require 'cl-lib)
-(require 'carriage-transport-gptel)
+(require 'carriage-assist)
 
 (ert-deftest carriage-assist/suggest-valid ()
   "Validator accepts empty or well-formed suggestion lists; rejects malformed."

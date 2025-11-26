@@ -30,7 +30,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'gptel)              ;; provided by the gptel package
+(require 'gptel nil t)        ;; optional at load time; allow tests without gptel
 (require 'carriage-logging)
 (require 'carriage-ui)
 (require 'carriage-transport)
@@ -424,52 +424,7 @@ On backend mismatch, logs and completes with error."
 ;; Entry-point: carriage-transport-gptel-dispatch
 
 ;; Assist (schema-locked) minimal APIs and validators
-
-(defun carriage-assist--suggest-valid-p (lst)
-  "Return non-nil when LST is a valid Suggest list: each element is a plist with :id/:label/:reason/:weight."
-  (and (listp lst)
-       (cl-every
-        (lambda (it)
-          (and (listp it)
-               (plist-get it :id)
-               (plist-get it :label)
-               (plist-member it :reason)
-               (plist-member it :weight)))
-        lst)))
-
-(defun carriage-assist--ctx-delta-valid-p (pl)
-  "Return non-nil when PL is a valid Context-Delta plist {:add list :remove list :why string}."
-  (and (listp pl)
-       (plist-member pl :add)
-       (plist-member pl :remove)
-       (plist-member pl :why)
-       (listp (plist-get pl :add))
-       (listp (plist-get pl :remove))))
-
-;;;###autoload
-(defun carriage-assist-suggest (_ctx)
-  "Return a schema-locked list of suggestions for the current document state.
-Minimal stub: returns an empty list; transports may advise/override.
-Errors are mapped to ASSIST_E_SCHEMA and never modify buffers."
-  (condition-case _e
-      '()
-    (error
-     (when (require 'carriage-errors nil t)
-       (ignore-errors (signal (carriage-error-symbol 'ASSIST_E_SCHEMA)
-                              (list "assist suggest failed"))))
-     '())))
-
-;;;###autoload
-(defun carriage-assist-context-delta (_ctx)
-  "Return a schema-locked context delta plist {:add [] :remove [] :why}.
-Minimal stub: returns an empty delta; transports may advise/override."
-  (condition-case _e
-      (list :add '() :remove '() :why "")
-    (error
-     (when (require 'carriage-errors nil t)
-       (ignore-errors (signal (carriage-error-symbol 'ASSIST_E_SCHEMA)
-                              (list "assist context-delta failed"))))
-     (list :add '() :remove '() :why ""))))
+(require 'carriage-assist)
 
 (provide 'carriage-transport-gptel)
 ;;; carriage-transport-gptel.el ends here

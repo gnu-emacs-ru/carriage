@@ -40,6 +40,11 @@ Normative Requirements
   MUST reveal on cursor enter and re-hide on leave without relying on org-fold.
 - REQ-ds-007: The begin_carriage storage MAY include provenance keys (CAR_TEMPLATE_ID,
   CAR_TEMPLATE_VER, CAR_CONTEXT_PROFILE, CAR_INHERITED); writers SHOULD upsert and preserve them.
+- REQ-ds-008: Autosave MUST be opt-in and disabled by default. Save hooks MUST be installed
+  only when `carriage-doc-state-save-on-save' is non-nil, and hook handlers MUST be no-ops
+  when it is nil.
+- REQ-ds-009: Restoring CAR_MODE MUST NOT redundantly re-enable or re-disable carriage-mode;
+  implementations MUST compare desired vs current state and avoid no-op toggles.
 
 Interfaces/Contracts
 - Anchor: IFC

@@ -38,13 +38,13 @@
   :group 'applications
   :prefix "carriage-doc-state-")
 
-(defcustom carriage-doc-state-save-on-save t
+(defcustom carriage-doc-state-save-on-save nil
   "When non-nil, write current Carriage state to the document before each save (buffer-local)."
   :type 'boolean
   :group 'carriage-doc-state)
 (make-variable-buffer-local 'carriage-doc-state-save-on-save)
 
-(defcustom carriage-doc-state-sync-on-change t
+(defcustom carriage-doc-state-sync-on-change nil
   "When non-nil, update document properties on each state-changing command (buffer-local)."
   :type 'boolean
   :group 'carriage-doc-state)
@@ -263,11 +263,14 @@ Returns t on success."
 Gracefully ignores missing keys."
   (with-current-buffer (or buffer (current-buffer))
     (let* ((pl (carriage-doc-state-read (current-buffer))))
-      ;; Mode (enable/disable carriage-mode)
+      ;; Mode (enable/disable carriage-mode) — avoid redundant toggles
       (let ((m (plist-get pl :CAR_MODE)))
         (when m
           (ignore-errors
-            (carriage-mode (if (carriage-doc-state--str->bool m) 1 0)))))
+            (let ((want (carriage-doc-state--str->bool m))
+                  (cur  (and (boundp 'carriage-mode) carriage-mode)))
+              (when (not (eq cur want))
+                (carriage-mode (if want 1 0)))))))
       ;; Intent
       (let ((v (plist-get pl :CAR_INTENT)))
         (when v (setq carriage-mode-intent (intern (format "%s" v)))))
@@ -432,8 +435,11 @@ Falls back to drawer-based heading when file-level properties are absent."
         (carriage-doc-state--alist->plist (carriage-doc-state--read-drawer))))))
 
 (defun carriage-doc-state--on-before-save ()
-  "Before-save: apply state from begin_carriage (if present), then persist normalized block and fold."
-  (when (derived-mode-p 'org-mode)
+  "Before-save: apply state from begin_carriage (if present), then persist normalized block and fold.
+No-op unless `carriage-doc-state-save-on-save' is non-nil in this buffer."
+  (when (and (derived-mode-p 'org-mode)
+             (boundp 'carriage-doc-state-save-on-save)
+             carriage-doc-state-save-on-save)
     (carriage-log "doc-state: before-save (buf=%s modified=%s)"
                   (buffer-name) (buffer-modified-p))
     (condition-case e
@@ -457,21 +463,28 @@ Falls back to drawer-based heading when file-level properties are absent."
        nil))))
 
 (defun carriage-doc-state-install-save-hook ()
-  "Install buffer-local hooks to persist Carriage state on save.
+  "Install buffer-local hooks to persist Carriage state on save (idempotent).
 
 Adds both:
 - before-save-hook (runs for modified buffers)
 - write-contents-functions (runs even on 'clean' saves).
 
-Both handlers are safe and never block normal saving."
-  (when (derived-mode-p 'org-mode)
-    (carriage-log "doc-state: installing save hooks in %s" (buffer-name))
+Only installed when opt-in is enabled in this buffer and not already present."
+  (when (and (derived-mode-p 'org-mode)
+             (boundp 'carriage-doc-state-save-on-save)
+             carriage-doc-state-save-on-save
+             (not carriage-doc-state--save-hooks-installed))
     (add-hook 'before-save-hook #'carriage-doc-state--on-before-save nil t)
-    (add-hook 'write-contents-functions #'carriage-doc-state--on-write-contents nil t)))
+    (add-hook 'write-contents-functions #'carriage-doc-state--on-write-contents nil t)
+    (setq carriage-doc-state--save-hooks-installed t)
+    (carriage-log "doc-state: installing save hooks in %s" (buffer-name))))
 
 (defun carriage-doc-state--on-write-contents ()
-  "Persist begin_carriage on 'clean' saves; always return nil to continue normal save."
-  (when (derived-mode-p 'org-mode)
+  "Persist begin_carriage on 'clean' saves; always return nil to continue normal save.
+No-op unless `carriage-doc-state-save-on-save' is non-nil in this buffer."
+  (when (and (derived-mode-p 'org-mode)
+             (boundp 'carriage-doc-state-save-on-save)
+             carriage-doc-state-save-on-save)
     (carriage-log "doc-state: write-contents fired (buf=%s modified=%s)"
                   (buffer-name) (buffer-modified-p))
     (condition-case e
@@ -494,11 +507,15 @@ Both handlers are safe and never block normal saving."
   nil)
 
 (defun carriage-doc-state-remove-save-hook ()
-  "Remove before-save hook for applying and persisting document state."
-  (remove-hook 'before-save-hook #'carriage-doc-state--on-before-save t))
+  "Remove buffer-local save hooks for persisting document state."
+  (remove-hook 'before-save-hook #'carriage-doc-state--on-before-save t)
+  (remove-hook 'write-contents-functions #'carriage-doc-state--on-write-contents t)
+  (setq carriage-doc-state--save-hooks-installed nil))
 
 (defvar-local carriage-doc-state--props-overlay nil
   "Overlay covering folded file-level Carriage property lines.")
+(defvar-local carriage-doc-state--save-hooks-installed nil
+  "Non-nil when doc-state save hooks are installed in this buffer.")
 
 (defun carriage-doc-state--props-range ()
   "Return (BEG END COUNT) for contiguous file-level CARRIAGE_* property lines, or nil."
@@ -824,7 +841,6 @@ This delegates to the reusable carriage-block-fold module."
 (add-hook 'find-file-hook #'carriage-doc-state--maybe-auto-enable)
 (add-hook 'after-change-major-mode-hook #'carriage-doc-state--fold-on-visit)
 (add-hook 'org-mode-hook #'carriage-doc-state--fold-carriage-block-now)
-(add-hook 'org-mode-hook #'carriage-doc-state-install-save-hook)
 (add-hook 'after-revert-hook #'carriage-doc-state--fold-carriage-block-now)
 
 ;; -------------------------------------------------------------------

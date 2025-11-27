@@ -428,6 +428,7 @@ Consults engine capabilities; safe when registry is not yet loaded."
     ;; Legacy bindings:
     ;; - C-c C-c → apply at point/region ONLY on patch blocks; otherwise delegate to Org
     ;; - C-c !   → apply last iteration (override org-time-stamp in carriage-mode buffers)
+    (define-key carriage-mode-map (kbd "C-c e s") #'carriage-save-settings)
     (define-key carriage-mode-map (kbd "C-c !") #'carriage-apply-last-iteration)
     (when (and (boundp 'carriage-enable-legacy-bindings) carriage-enable-legacy-bindings)
       (define-key carriage-mode-map (kbd "C-c C-c") #'carriage-ctrl-c-ctrl-c))
@@ -444,7 +445,9 @@ Consults engine capabilities; safe when registry is not yet loaded."
   ;; Restore state from document, persist snapshot, then fold the block; install save hook.
   (when (require 'carriage-doc-state nil t)
     (ignore-errors (carriage-doc-state-restore))
-    (ignore-errors (carriage-doc-state-write-current))
+    (when (and (boundp 'carriage-doc-state-sync-on-change)
+               carriage-doc-state-sync-on-change)
+      (ignore-errors (carriage-doc-state-write-current)))
     (ignore-errors (carriage-doc-state-hide))
     (ignore-errors
       (when (and (boundp 'carriage-doc-state-save-on-save)
@@ -1744,6 +1747,16 @@ Otherwise falls back to a free-form prompt. Stores backend as a symbol."
              (if (symbolp carriage-mode-backend)
                  (symbol-name carriage-mode-backend)
                carriage-mode-backend))))
+
+;;;###autoload
+(defun carriage-save-settings ()
+  "Manually save Carriage state from this buffer into the document."
+  (interactive)
+  (require 'carriage-doc-state nil t)
+  (let ((ok (ignore-errors (carriage-doc-state-write-current))))
+    (if ok
+        (message "Carriage: настройки сохранены")
+      (message "Carriage: не удалось сохранить настройки"))))
 
 ;;; Navigation placeholders
 

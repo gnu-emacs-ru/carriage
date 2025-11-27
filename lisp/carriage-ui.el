@@ -405,6 +405,7 @@ Disabling this eliminates periodic redisplay work during active phases."
     engine
     branch
     report
+    save
     settings)
   "Default order of Carriage modeline blocks.")
 
@@ -1043,6 +1044,11 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                                                    :height carriage-mode-icon-height
                                                    :v-adjust carriage-mode-icon-v-adjust
                                                    :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face)))))
+                 ('save   (when (fboundp 'all-the-icons-material)
+                            (all-the-icons-material "publish"
+                                                    :height carriage-mode-icon-height
+                                                    :v-adjust carriage-mode-icon-v-adjust
+                                                    :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-cyan-face)))))
                  ('wip    (when (fboundp 'all-the-icons-octicon)
                             (all-the-icons-octicon "git-branch"
                                                    :height carriage-mode-icon-height
@@ -1942,6 +1948,12 @@ Uses pulse.el when available, otherwise temporary overlays."
          (label (or (and uicons (carriage-ui--icon 'report)) "[Report]")))
     (carriage-ui--ml-button label #'carriage-report-open "Open report buffer")))
 
+(defun carriage-ui--ml-seg-save ()
+  "Build Save-settings button."
+  (let* ((uicons (carriage-ui--icons-available-p))
+         (label (or (and uicons (carriage-ui--icon 'save)) "[Save]")))
+    (carriage-ui--ml-button label #'carriage-save-settings "Сохранить настройки Carriage сейчас")))
+
 (defun carriage-ui--ml-seg-toggle-ctx ()
   "Build GPT context toggle."
   (let* ((_ (require 'carriage-i18n nil t))
@@ -2071,6 +2083,7 @@ Uses pulse.el when available, otherwise temporary overlays."
     ('toggle-files  (carriage-ui--ml-seg-toggle-files))
     ('doc-scope-all (carriage-ui--ml-seg-doc-scope-all))
     ('doc-scope-last (carriage-ui--ml-seg-doc-scope-last))
+    ('save          (carriage-ui--ml-seg-save))
     ('settings      (carriage-ui--ml-seg-settings))
     (_ nil)))
 

@@ -52,6 +52,7 @@ Normative Requirements
 - REQ-ui-003: Badges MUST reflect Suite/Engine/Model; clicks open selectors.
 - REQ-ui-004: Menu item labels MUST be non-empty after i18n/label fallbacks; no postfix bracketed key hints in labels (transient shows keys before labels).
 - REQ-ui-005: Context controls MUST be rendered in a dedicated “Context” column; its header SHOULD provide help-echo guiding two-stroke usage (“press t, then letter”).
+- REQ-ui-006: UI MUST provide an explicit “Save settings” control in the modeline and a default key binding C-c e s. Saving MUST be explicit; no automatic writes are performed unless the user opts in.
 
 Invariants
 - Anchor: INV

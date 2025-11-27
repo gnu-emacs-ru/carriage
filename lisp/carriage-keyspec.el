@@ -87,7 +87,7 @@ Each value is a plist with :add and/or :remove lists of (:id ID :keys (..)).")
     (:id doc-scope-cycle :cmd carriage-toggle-doc-context-scope    :keys ("t s") :menu-key "t s" :contexts (carriage) :section context :desc-key :doc-scope-cycle :label "Cycle Doc Scope")
     (:id toggle-profile :cmd carriage-toggle-context-profile        :keys ("t P") :menu-key "t P" :contexts (carriage) :section context :desc-key :toggle-profile :label "Toggle P1/P3")
     ;; Suite/Intent (tools)
-    (:id select-suite :cmd carriage-select-suite                 :keys ("s")   :contexts (carriage) :section tools :desc-key :select-suite)
+    (:id select-suite :cmd carriage-select-suite                 :keys ("S")   :contexts (carriage) :section tools :desc-key :select-suite)
     (:id toggle-intent :cmd carriage-toggle-intent               :keys ("i")   :contexts (carriage) :section tools :desc-key :toggle-intent)
     ;; Actions
     (:id dry-run      :cmd carriage-dry-run-at-point        :keys ("d")     :contexts (carriage) :section act :desc-key :dry-run)

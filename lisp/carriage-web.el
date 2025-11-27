@@ -77,7 +77,7 @@
   "Idle timeout in seconds for SSE clients. Stale clients are pruned on heartbeat."
   :type 'number :group 'carriage-web)
 
-(defcustom carriage-web-close-delay 0.2
+(defcustom carriage-web-close-delay 0.5
   "Delay in seconds before gracefully closing non-SSE HTTP connections.
 Increases robustness against premature TCP resets on slower systems."
   :type 'number :group 'carriage-web)
@@ -254,6 +254,7 @@ CONTENT-TYPE defaults to application/json."
            "Connection: close\r\n"
            (or extra-headers "")
            "\r\n")))
+    (carriage-web--log "send-response: %s len=%d" status len)
     (process-send-string proc headers)
     (when content
       (process-send-string proc content))))
@@ -398,13 +399,14 @@ REQ is a plist (:method :path :query :headers [:body])."
     (with-current-buffer (process-buffer proc)
       (goto-char (point-max))
       (insert chunk)
+      (carriage-web--log "recv: bytes=%d" (string-bytes chunk))
       ;; Try to find header/body separator
       (let* ((raw (buffer-substring-no-properties (point-min) (point-max)))
              (sep-idx (or (string-match "\r\n\r\n" raw) (string-match "\n\n" raw))))
         (when sep-idx
           (let* ((hdr (substring raw 0 (+ sep-idx (if (eq (aref raw sep-idx) ?\r) 4 2))))
                  (body (substring raw (+ sep-idx (if (eq (aref raw sep-idx) ?\r) 4 2))))
-                 (lines (split-string hdr "\r?\n" t))
+                 (lines (split-string hdr "\\r?\\n" t))
                  (start (car lines))
                  (head-rest (cdr lines))
                  (parsed (carriage-web--parse-start-line start)))
@@ -436,16 +438,28 @@ REQ is a plist (:method :path :query :headers [:body])."
                      (carriage-web--log "dispatch error: %s" (error-message-string err))
                      (carriage-web--send-json proc "500 Internal Server Error"
                                               (list :ok json-false :error "server error" :code "WEB_E_SERVER"))))
-                  ;; Close connection for non-SSE (graceful, delayed)
+                  ;; Close connection for non-SSE (graceful, delayed):
+                  ;; 1) send EOF after a short delay to allow body to flush;
+                  ;; 2) optionally hard-close later as a safety net.
                   (unless (string= path "/stream")
+                    (carriage-web--log "close: schedule eof=%.2fs delete=%.2fs"
+                                       (or carriage-web-close-delay 0.5)
+                                       (+ (or carriage-web-close-delay 0.5) 0.5))
+                    ;; Step 1: EOF
                     (run-at-time
                      carriage-web-close-delay nil
                      (lambda (p)
                        (when (process-live-p p)
                          (condition-case _e
-                             (progn
-                               (ignore-errors (process-send-eof p)))
+                             (process-send-eof p)
                            (error nil))))
+                     proc)
+                    ;; Step 2: late hard-close (rarely needed; keeps sockets from lingering)
+                    (run-at-time
+                     (+ carriage-web-close-delay 0.5) nil
+                     (lambda (p)
+                       (when (process-live-p p)
+                         (ignore-errors (delete-process p))))
                      proc)))))))))))
 
 (defun carriage-web--accept (server proc _msg)
@@ -456,6 +470,7 @@ REQ is a plist (:method :path :query :headers [:body])."
     (set-process-query-on-exit-flag proc nil)
     ;; Force byte-accurate I/O: avoid recoding that may break Content-Length.
     (set-process-coding-system proc 'binary 'binary)
+    (carriage-web--log "accept: client=%s" (process-name proc))
     (set-process-filter proc #'carriage-web--process-filter)
     (set-process-sentinel
      proc
@@ -500,47 +515,47 @@ REQ is a plist (:method :path :query :headers [:body])."
         (carriage-web--log "server already running on %s:%s" carriage-web-bind carriage-web-port)
         t)
     (let ((proc nil))
-    (condition-case _e
-        (setq proc (make-network-process
-                    :name "carriage-web"
-                    :family 'ipv4
-                    :server t
-                    :noquery t
-                    :reuseaddr t
-                    :host carriage-web-bind
-                    :service carriage-web-port
-                    :log #'carriage-web--accept))
-      (error
-       ;; Fallback: bind to an ephemeral free port (service 0), then record it.
-       (setq proc (make-network-process
-                   :name "carriage-web"
-                   :family 'ipv4
-                   :server t
-                   :noquery t
-                   :reuseaddr t
-                   :host carriage-web-bind
-                   :service 0
-                   :log #'carriage-web--accept))
-       (when (process-live-p proc)
-         (let* ((svc1 (ignore-errors (process-contact proc :service)))
-                (svc (if (numberp svc1)
-                         svc1
-                       (let* ((pc (ignore-errors (process-contact proc)))
-                              (s  (and (listp pc) (plist-get pc :service))))
-                         s))))
-           (when (numberp svc) (setq carriage-web-port svc))))))
-    (setq carriage-web--server-proc proc)
-    (carriage-web--log "server started on %s:%s" carriage-web-bind carriage-web-port)
-    ;; Start heartbeat
-    (when (timerp carriage-web--heartbeat-timer)
-      (cancel-timer carriage-web--heartbeat-timer))
-    (setq carriage-web--heartbeat-timer
-          (run-at-time carriage-web-heartbeat-interval
-                       carriage-web-heartbeat-interval
-                       #'carriage-web--heartbeat))
-    ;; Install advices for live publications
-    (carriage-web-install-advices)
-    t)))
+      (condition-case _e
+          (setq proc (make-network-process
+                      :name "carriage-web"
+                      :family 'ipv4
+                      :server t
+                      :noquery t
+                      :reuseaddr t
+                      :host carriage-web-bind
+                      :service carriage-web-port
+                      :log #'carriage-web--accept))
+        (error
+         ;; Fallback: bind to an ephemeral free port (service 0), then record it.
+         (setq proc (make-network-process
+                     :name "carriage-web"
+                     :family 'ipv4
+                     :server t
+                     :noquery t
+                     :reuseaddr t
+                     :host carriage-web-bind
+                     :service 0
+                     :log #'carriage-web--accept))
+         (when (process-live-p proc)
+           (let* ((svc1 (ignore-errors (process-contact proc :service)))
+                  (svc (if (numberp svc1)
+                           svc1
+                         (let* ((pc (ignore-errors (process-contact proc)))
+                                (s  (and (listp pc) (plist-get pc :service))))
+                           s))))
+             (when (numberp svc) (setq carriage-web-port svc))))))
+      (setq carriage-web--server-proc proc)
+      (carriage-web--log "server started on %s:%s" carriage-web-bind carriage-web-port)
+      ;; Start heartbeat
+      (when (timerp carriage-web--heartbeat-timer)
+        (cancel-timer carriage-web--heartbeat-timer))
+      (setq carriage-web--heartbeat-timer
+            (run-at-time carriage-web-heartbeat-interval
+                         carriage-web-heartbeat-interval
+                         #'carriage-web--heartbeat))
+      ;; Install advices for live publications
+      (carriage-web-install-advices)
+      t)))
 
 ;;;###autoload
 (defun carriage-web-stop ()

@@ -399,24 +399,24 @@ Consults engine capabilities; safe when registry is not yet loaded."
       (add-hook 'post-command-hook #'carriage-ui--headerline-post-command nil t)
       (add-hook 'window-scroll-functions #'carriage-ui--headerline-window-scroll nil t))
     (when carriage-mode-show-mode-line-ui
+      ;; Insert modeline segment as a concrete (:eval …) list; avoid global fallback.
       (setq carriage--mode-modeline-construct '(:eval (carriage-ui--modeline)))
       (let* ((ml (if (listp mode-line-format) (copy-sequence mode-line-format) (list mode-line-format)))
-             (pos (cl-position 'mode-line-end-spaces ml)))
+             (present (memq carriage--mode-modeline-construct ml))
+             (pos (and (not present) (cl-position 'mode-line-end-spaces ml))))
         (setq-local mode-line-format
-                    (if pos
-                        (append (cl-subseq ml 0 pos)
-                                (list carriage--mode-modeline-construct)
-                                (nthcdr pos ml))
-                      (append ml (list carriage--mode-modeline-construct)))))
-      ;; Fallback: если кастомный модлайн перезаписывает mode-line-format,
-      ;; продублируем сегмент в global-mode-string, чтобы он всё равно отображался.
-      (unless (memq carriage--mode-modeline-construct mode-line-format)
-        (setq-local global-mode-string
-                    (let ((cur (if (listp global-mode-string) (copy-sequence global-mode-string) (list global-mode-string))))
-                      (if (memq carriage--mode-modeline-construct cur)
-                          cur
-                        (append cur (list carriage--mode-modeline-construct))))))
-      (force-mode-line-update t)))
+                    (cond
+                     (present ml)
+                     (pos (append (cl-subseq ml 0 pos)
+                                  (list carriage--mode-modeline-construct)
+                                  (nthcdr pos ml)))
+                     (t (append ml (list carriage--mode-modeline-construct))))))
+      ;; No global-mode-string fallback: it caused duplicate widgets.
+      (when (fboundp 'carriage-log)
+        (carriage-log "mode-line: segment inserted (present=%s) pos=%s"
+                      (and (memq carriage--mode-modeline-construct mode-line-format) 'yes)
+                      (or (and (boundp 'pos) pos) -1)))
+      (force-mode-line-update)))
   (when (require 'carriage-keyspec nil t)
     (carriage-keys-apply-known-keymaps)
     (ignore-errors (carriage-keys-which-key-register))

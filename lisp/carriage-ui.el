@@ -237,7 +237,8 @@ Update only when BUF is visible; avoid forcing window repaints."
 (defun carriage-ui--spinner-start ()
   "Start buffer-local spinner timer if not running."
   (unless (or (bound-and-true-p noninteractive)
-              carriage--ui-spinner-timer)
+              carriage--ui-spinner-timer
+              (not carriage-ui-enable-spinner))
     (setq carriage--ui-spinner-index 0)
     (let* ((buf (current-buffer))
            (interval (or (and (boundp 'carriage-mode-spinner-interval)
@@ -288,7 +289,7 @@ Useful when input feels frozen (e.g., during rapid cursor movement)."
           (delete-overlay carriage--preloader-overlay)
           (setq carriage--preloader-overlay nil))
         (carriage-ui--invalidate-ml-cache)
-        (force-mode-line-update t)
+        (force-mode-line-update)
         t)
     (error nil)))
 
@@ -378,6 +379,12 @@ The modeline uses the last cached value and schedules a lightweight refresh."
   "Maximum number of context items to list in the [Ctx:N] tooltip.
 When more are present, the tooltip shows a tail line like \"… (+K more)\"."
   :type 'integer
+  :group 'carriage-ui)
+
+(defcustom carriage-ui-enable-spinner nil
+  "When non-nil, animate a spinner in the [State] segment and tick the mode-line.
+Disabling this eliminates periodic redisplay work during active phases."
+  :type 'boolean
   :group 'carriage-ui)
 
 (defconst carriage-ui--modeline-default-blocks
@@ -491,6 +498,9 @@ Plist keys: :doc :gpt :tick :time :value.")
 (defvar-local carriage-ui--ctx-refresh-timer nil
   "Idle timer for asynchronous context badge refresh (buffer-local).")
 
+(defvar-local carriage-ui--ctx-badge-version 0
+  "Monotonic version of context badge state; bumps on real changes to avoid work on redisplay.")
+
 (defvar-local carriage-ui--ctx-last-placeholder-time 0
   "Timestamp (float seconds) when a [Ctx:?] placeholder was last returned for this buffer.")
 
@@ -509,18 +519,37 @@ Plist keys: :doc :gpt :tick :time :value.")
 (defvar-local carriage--mode-modeline-string nil
   "Precomputed Carriage modeline string for non-:eval mode-line segment.")
 
+(defvar-local carriage-ui--ml-stale-p t
+  "When non-nil, the precomputed modeline string is considered stale and must be rebuilt.")
+
 (defun carriage-ui--invalidate-ml-cache ()
   "Invalidate cached modeline/button strings for the current buffer."
   (setq carriage-ui--ml-cache nil
         carriage-ui--ml-cache-key nil)
-  (setq carriage-ui--button-cache (make-hash-table :test 'equal)))
+  (setq carriage-ui--button-cache (make-hash-table :test 'equal))
+  (setq carriage-ui--ml-stale-p t))
 
 (defun carriage-ui--reset-context-cache (&optional buffer)
-  "Clear cached context badge for BUFFER or the current buffer."
+  "Clear cached context badge for BUFFER or the current buffer and bump version."
   (if buffer
       (with-current-buffer buffer
-        (setq carriage-ui--ctx-cache nil))
-    (setq carriage-ui--ctx-cache nil)))
+        (setq carriage-ui--ctx-cache nil)
+        (setq carriage-ui--ctx-placeholder-count 0
+              carriage-ui--ctx-last-placeholder-time 0)
+        (setq carriage-ui--ctx-refresh-timer nil)
+        (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0))))
+    (setq carriage-ui--ctx-cache nil)
+    (setq carriage-ui--ctx-placeholder-count 0
+          carriage-ui--ctx-last-placeholder-time 0)
+    (setq carriage-ui--ctx-refresh-timer nil)
+    (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))))
+
+(defun carriage-ui--ctx-invalidate ()
+  "Invalidate context badge cache, bump version and refresh the modeline."
+  (interactive)
+  (carriage-ui--reset-context-cache)
+  (carriage-ui--invalidate-ml-cache)
+  (force-mode-line-update))
 
 (defun carriage-ui--context-item->line (item)
   "Format ITEM from carriage-context-count into a single tooltip line."
@@ -620,9 +649,9 @@ LIMIT controls max number of items shown; nil or <=0 means no limit."
 
 (defun carriage-ui--context-toggle-states ()
   "Return plist of current context toggle states and scope.
-Keys: :doc :gpt :vis :patched :scope"
-  ;; Ensure variables from carriage-context are defined before reading them
-  (require 'carriage-context nil t)
+Keys: :doc :gpt :vis :patched :scope
+
+Note: Avoids requiring carriage-context in the redisplay path; relies on boundp with defaults."
   (list
    :doc (if (boundp 'carriage-mode-include-doc-context)
             carriage-mode-include-doc-context
@@ -686,7 +715,9 @@ Keys: :doc :gpt :vis :patched :scope"
                                              (setq carriage-ui--ctx-cache
                                                    (carriage-ui--ctx-build-cache toggles tk t2 val))
                                              (setq carriage-ui--ctx-placeholder-count 0
-                                                   carriage-ui--ctx-last-placeholder-time 0))
+                                                   carriage-ui--ctx-last-placeholder-time 0)
+                                             (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+                                             (carriage-ui--invalidate-ml-cache))
                                          (error nil))
                                        (setq carriage-ui--ctx-refresh-timer nil)
                                        (force-mode-line-update)))))))))
@@ -702,6 +733,8 @@ Keys: :doc :gpt :vis :patched :scope"
     (setq carriage-ui--ctx-placeholder-count 0
           carriage-ui--ctx-last-placeholder-time 0
           carriage-ui--ctx-refresh-timer nil)
+    (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+    (carriage-ui--invalidate-ml-cache)
     val))
 
 (defun carriage-ui--context-badge ()
@@ -754,6 +787,28 @@ several placeholder frames or a time threshold."
      (t
       (carriage-ui--ctx-force-sync toggles tick now)))))
 
+(defun carriage-ui-refresh-context-badge ()
+  "Force refresh of the [Ctx:N] badge synchronously and update modeline."
+  (interactive)
+  (let* ((toggles (carriage-ui--context-toggle-states))
+         (tick (buffer-chars-modified-tick))
+         (now (float-time)))
+    (carriage-ui--ctx-force-sync toggles tick now)
+    (force-mode-line-update)))
+
+
+;; Lightweight event-driven invalidation: update context badge on save/revert.
+(defun carriage-ui--after-save-refresh ()
+  "After-save/revert hook: invalidate context badge and refresh modeline for this buffer."
+  (when (boundp 'carriage-ui--ctx-cache)
+    (carriage-ui--reset-context-cache)
+    (carriage-ui--invalidate-ml-cache)
+    (force-mode-line-update)))
+
+(unless (member #'carriage-ui--after-save-refresh after-save-hook)
+  (add-hook 'after-save-hook #'carriage-ui--after-save-refresh))
+(unless (member #'carriage-ui--after-save-refresh after-revert-hook)
+  (add-hook 'after-revert-hook #'carriage-ui--after-save-refresh))
 
 ;; -------------------------------------------------------------------
 ;; Header-line and Mode-line builders (M3: icons (optional) + outline click)
@@ -1206,7 +1261,7 @@ Ranges are recomputed at most once per buffer-chars-modified-tick."
   "Per-render snapshot of [Dry]/[Apply] visibility, set by carriage-ui--modeline to deduplicate computation.")
 
 ;; Branch name cache (to avoid heavy VC/git calls on every modeline render)
-(defcustom carriage-ui-branch-cache-ttl 12.0
+(defcustom carriage-ui-branch-cache-ttl 30.0
   "TTL in seconds for cached VCS branch name used in the modeline.
 When nil, the cache is considered always valid (until explicitly invalidated)."
   :type '(choice (const :tag "Unlimited (never auto-refresh)" nil) number)
@@ -1272,12 +1327,9 @@ Respects `carriage-ui-branch-cache-ttl'."
                carriage-ui--patch-count-tick
                (= tick carriage-ui--patch-count-tick))
           carriage-ui--patch-count-cache
-        (let ((count 0))
-          (save-excursion
-            (goto-char (point-min))
-            (let ((case-fold-search t))
-              (while (re-search-forward "^[ \t]*#\\+begin_patch\\b" nil t)
-                (setq count (1+ count)))))
+        ;; Reuse precomputed ranges to avoid re-scanning with regex here.
+        (let* ((ranges (carriage-ui--get-patch-ranges))
+               (count (length ranges)))
           (setq carriage-ui--patch-count-cache count
                 carriage-ui--patch-count-tick tick)
           count)))))
@@ -1330,12 +1382,13 @@ Detection strategy (optimized):
 - If `carriage--last-iteration-id' is non-nil, search for any text position
   with property 'carriage-iteration-id equal to that id using text-property-any
   (C-implemented scan), avoiding regex over the whole buffer.
-- Results are cached per buffer and invalidated on buffer tick changes
-  or when the last-iteration id changes."
+- Results are cached per buffer; if last check was true for the same id,
+  we trust it until the id changes (avoid re-scanning on mere text edits)."
   (let* ((id (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id))
          (tick (buffer-chars-modified-tick)))
     (if (and (equal id carriage-ui--last-iter-cache-id)
-             (eq tick carriage-ui--last-iter-cache-tick))
+             (or (eq tick carriage-ui--last-iter-cache-tick)
+                 carriage-ui--last-iter-cache-result)) ;; keep true without re-scan until id changes
         carriage-ui--last-iter-cache-result
       (let* ((pos (and id (text-property-any (point-min) (point-max)
                                              'carriage-iteration-id id)))
@@ -1359,19 +1412,19 @@ Detection strategy (optimized):
   "Idle timer used to coalesce frequent header-line refreshes.")
 
 (defun carriage-ui--headerline-queue-refresh ()
-  "Schedule a header-line refresh on idle to reduce churn."
-  (when (timerp carriage-ui--headerline-idle-timer)
-    (cancel-timer carriage-ui--headerline-idle-timer))
-  (let* ((buf (current-buffer))
-         (interval (or (and (boundp 'carriage-mode-headerline-idle-interval)
-                            carriage-mode-headerline-idle-interval)
-                       0.12)))
-    (setq carriage-ui--headerline-idle-timer
-          (run-with-idle-timer interval nil
-                               (lambda ()
-                                 (when (buffer-live-p buf)
-                                   (with-current-buffer buf
-                                     (carriage-ui--headerline-idle-refresh-run)))))))
+  "Schedule a header-line refresh on idle to reduce churn.
+Avoid rescheduling when a timer is already pending."
+  (unless (timerp carriage-ui--headerline-idle-timer)
+    (let* ((buf (current-buffer))
+           (interval (or (and (boundp 'carriage-mode-headerline-idle-interval)
+                              carriage-mode-headerline-idle-interval)
+                         0.12)))
+      (setq carriage-ui--headerline-idle-timer
+            (run-with-idle-timer interval nil
+                                 (lambda ()
+                                   (when (buffer-live-p buf)
+                                     (with-current-buffer buf
+                                       (carriage-ui--headerline-idle-refresh-run))))))))
   t)
 
 (defun carriage-ui--headerline-post-command ()
@@ -1652,18 +1705,23 @@ Uses pulse.el when available, otherwise temporary overlays."
                           carriage-ui-modeline-blocks)
                      carriage-ui-modeline-blocks
                    carriage-ui--modeline-default-blocks))
-         (ctx-badge (and (memq 'context blocks) (carriage-ui--context-badge)))
-         (patch-count (carriage-ui--patch-count))
+         (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
+         (ctx-ver (and (memq 'context blocks) (or carriage-ui--ctx-badge-version 0)))
+         ;; Avoid counting patches during active phases to prevent churn on edits/stream
+         (patch-count (and (memq 'patch blocks)
+                           (not (memq state '(sending streaming dispatch waiting reasoning)))
+                           (carriage-ui--patch-count)))
          (has-last (and (memq 'all blocks)
                         (carriage-ui--last-iteration-present-p)))
-         (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
-         (spin   (and (memq state '(sending streaming dispatch waiting reasoning))
+         (spin   (and carriage-ui-enable-spinner
+                      (memq state '(sending streaming dispatch waiting reasoning))
                       (carriage-ui--spinner-char)))
-         (branch (and (memq 'branch blocks) (carriage-ui--branch-name-cached)))
+         ;; Do not force git/vc calls in key; rely on cache timestamp only
+         (branch-t (and (memq 'branch blocks) carriage-ui--branch-cache-time))
          (abortp (and (boundp 'carriage--abort-handler) carriage--abort-handler)))
     (list uicons
           state spin
-          (and ctx-badge (car ctx-badge))
+          ctx-ver
           patch-count has-last abortp blocks
           (and (boundp 'carriage-mode-intent)  carriage-mode-intent)
           (and (boundp 'carriage-mode-suite)   carriage-mode-suite)
@@ -1672,7 +1730,7 @@ Uses pulse.el when available, otherwise temporary overlays."
           (and (boundp 'carriage-mode-provider) carriage-mode-provider)
           (and (boundp 'carriage-apply-engine) carriage-apply-engine)
           (and (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)
-          branch
+          branch-t
           (and (boundp 'carriage-mode-include-gptel-context)
                carriage-mode-include-gptel-context)
           (and (boundp 'carriage-mode-include-doc-context)
@@ -1694,7 +1752,7 @@ Uses pulse.el when available, otherwise temporary overlays."
                 ('Code  (or (carriage-ui--icon 'patch) "[Code]"))
                 (_      (or (carriage-ui--icon 'hybrid) "[Hybrid]")))
             (format "[%s]" (pcase intent ('Ask "Ask") ('Code "Code") (_ "Hybrid"))))))
-    (carriage-ui--ml-button label #'carriage-toggle-intent "Toggle Ask/Code/Hybrid intent")))
+    (carriage-ui--ml-button label #'carriage-ui-toggle-intent "Toggle Ask/Code/Hybrid intent")))
 
 (defun carriage-ui--ml-seg-suite ()
   "Build Suite segment."
@@ -1796,7 +1854,8 @@ Uses pulse.el when available, otherwise temporary overlays."
          (label (carriage-ui--state-label st))
          (txt (format "[%s%s]"
                       label
-                      (if (memq st '(sending streaming dispatch waiting reasoning))
+                      (if (and carriage-ui-enable-spinner
+                               (memq st '(sending streaming dispatch waiting reasoning)))
                           (concat " " (carriage-ui--spinner-char))
                         "")))
          (face (pcase st
@@ -1813,12 +1872,14 @@ Uses pulse.el when available, otherwise temporary overlays."
      (t               txt))))
 
 (defun carriage-ui--ml-seg-context ()
-  "Build Context badge segment."
+  "Build Context badge segment (click to refresh now)."
   (let ((ctx-badge (carriage-ui--context-badge)))
     (when ctx-badge
       (let ((lbl (car ctx-badge))
             (hint (cdr ctx-badge)))
-        (if hint (propertize lbl 'help-echo hint) lbl)))))
+        (carriage-ui--ml-button lbl
+                                #'carriage-ui-refresh-context-badge
+                                (or hint "Обновить контекст (mouse-1)"))))))
 
 (defun carriage-ui--ml-seg-branch ()
   "Build Branch segment."
@@ -1938,7 +1999,7 @@ Uses pulse.el when available, otherwise temporary overlays."
                         "[AllCtx]"
                       "[AllCtx]"))
              (lbl (if on (propertize label 'face 'mode-line-emphasis) label)))
-        (carriage-ui--ml-button lbl #'carriage-select-doc-context-all help)))))
+        (carriage-ui--ml-button lbl #'carriage-ui-select-doc-context-all help)))))
 
 (defun carriage-ui--ml-seg-doc-scope-last ()
   "Build button to select 'last doc-context scope."
@@ -1957,12 +2018,36 @@ Uses pulse.el when available, otherwise temporary overlays."
                         "[LastCtx]"
                       "[LastCtx]"))
              (lbl (if on (propertize label 'face 'mode-line-emphasis) label)))
-        (carriage-ui--ml-button lbl #'carriage-select-doc-context-last help)))))
+        (carriage-ui--ml-button lbl #'carriage-ui-select-doc-context-last help)))))
 
 
 (defun carriage-ui--ml-seg-settings ()
   "Build Settings button."
   (carriage-ui--settings-btn))
+
+;; Wrapper commands to ensure required features are loaded and UI refreshes properly.
+(defun carriage-ui-toggle-intent ()
+  "Wrapper to toggle intent and refresh UI immediately."
+  (interactive)
+  (when (fboundp 'carriage-toggle-intent)
+    (call-interactively 'carriage-toggle-intent))
+  (carriage-ui--invalidate-and-refresh))
+
+(defun carriage-ui-select-doc-context-all ()
+  "Wrapper to select doc-context scope 'all' and refresh UI/badge."
+  (interactive)
+  (require 'carriage-context nil t)
+  (when (fboundp 'carriage-select-doc-context-all)
+    (call-interactively 'carriage-select-doc-context-all))
+  (carriage-ui--ctx-invalidate-and-refresh))
+
+(defun carriage-ui-select-doc-context-last ()
+  "Wrapper to select doc-context scope 'last' and refresh UI/badge."
+  (interactive)
+  (require 'carriage-context nil t)
+  (when (fboundp 'carriage-select-doc-context-last)
+    (call-interactively 'carriage-select-doc-context-last))
+  (carriage-ui--ctx-invalidate-and-refresh))
 
 (defun carriage-ui--ml-render-block (blk)
   "Dispatch builder for a single modeline block BLK symbol."
@@ -1991,24 +2076,29 @@ Uses pulse.el when available, otherwise temporary overlays."
 
 (defun carriage-ui--modeline ()
   "Build Carriage modeline segment using `carriage-ui-modeline-blocks' (refactored)."
-  (let* ((blocks (if (and (listp carriage-ui-modeline-blocks)
-                          carriage-ui-modeline-blocks)
-                     carriage-ui-modeline-blocks
-                   carriage-ui--modeline-default-blocks)))
-    ;; Compute once per render; Dry/Apply removed, snapshot unused.
-    (setq carriage-ui--apply-visible-snapshot nil)
-    (let* ((key (carriage-ui--ml-cache-key)))
-      (if (and (equal key carriage-ui--ml-cache-key)
-               (stringp carriage-ui--ml-cache))
-          carriage-ui--ml-cache
-        (let* ((segments (cl-loop for blk in blocks
-                                  for seg = (carriage-ui--ml-render-block blk)
-                                  if (stringp seg)
-                                  collect seg))
-               (res (if segments (mapconcat #'identity segments " ") "")))
-          (setq carriage-ui--ml-cache-key key
-                carriage-ui--ml-cache     res)
-          res)))))
+  (let ((pre nil))
+    (if (and (stringp pre) (not carriage-ui--ml-stale-p))
+        pre
+      (let* ((blocks (if (and (listp carriage-ui-modeline-blocks)
+                              carriage-ui-modeline-blocks)
+                         carriage-ui-modeline-blocks
+                       carriage-ui--modeline-default-blocks)))
+        ;; Compute once per render; Dry/Apply removed, snapshot unused.
+        (setq carriage-ui--apply-visible-snapshot nil)
+        (let* ((key (carriage-ui--ml-cache-key)))
+          (if (and (equal key carriage-ui--ml-cache-key)
+                   (stringp carriage-ui--ml-cache))
+              carriage-ui--ml-cache
+            (let* ((segments (cl-loop for blk in blocks
+                                      for seg = (carriage-ui--ml-render-block blk)
+                                      if (stringp seg)
+                                      collect seg))
+                   (res (if segments (mapconcat #'identity segments " ") "")))
+              (setq carriage-ui--ml-cache-key key
+                    carriage-ui--ml-cache     res
+                    carriage--mode-modeline-string nil
+                    carriage-ui--ml-stale-p nil)
+              res)))))))
 
 ;; -------------------------------------------------------------------
 ;; State tooltips: buffer-local meta, helpers and public note-* API
@@ -2055,12 +2145,14 @@ Keys (optional): :source :time-start :time-last :model :provider
   (format "%.1f" (max 0.0 (- (or t1 (float-time)) (or t0 (float-time))))))
 
 (defun carriage-ui--set-tooltip (s)
-  "Set state tooltip to S and refresh modeline cache."
+  "Set state tooltip to S without invalidating the whole modeline.
+This avoids heavy redisplay churn during streaming; we only tick the line."
   (setq carriage--ui-state-tooltip
         (when (and (stringp s) (> (length s) 0))
           (let* ((mx (or carriage-mode-state-tooltip-max-chars 1000)))
             (carriage-ui--trim-right s mx))))
-  (carriage-ui--invalidate-ml-cache)
+  ;; Do not invalidate the whole modeline cache on tooltip-only changes.
+  ;; A simple mode-line tick is enough; segments will pick up the new help-echo.
   (force-mode-line-update))
 
 (defun carriage-ui--i18n (key &rest args)
@@ -2427,8 +2519,61 @@ Avoids heavy org computations on redisplay path."
               (setq carriage-ui--last-outline-path-str
                     (or (carriage-ui--org-outline-path) ""))
               (setq carriage-ui--outline-dirty nil))))
-        (force-mode-line-update t))
+        (when (get-buffer-window (current-buffer) t)
+          (force-mode-line-update)))
     (setq carriage-ui--headerline-idle-timer nil)))
+
+;; -- Event-driven invalidation for UI toggles/selectors (avoid idle churn)
+(defvar carriage-ui--advices-installed nil
+  "Non-nil when Carriage UI advices for modeline/context invalidation are installed.")
+
+(defun carriage-ui--invalidate-and-refresh (&rest _)
+  "Invalidate modeline/icon caches and refresh mode-line now."
+  (carriage-ui--invalidate-icon-cache)
+  (carriage-ui--invalidate-ml-cache)
+  (force-mode-line-update))
+
+(defun carriage-ui--ctx-invalidate-and-refresh (&rest _)
+  "Invalidate context badge/modeline and refresh UI now."
+  (carriage-ui--ctx-invalidate)
+  (force-mode-line-update))
+
+(defun carriage-ui--install-advices ()
+  "Install advices to keep modeline in sync on user actions without constant recompute."
+  (unless carriage-ui--advices-installed
+    (setq carriage-ui--advices-installed t)
+    ;; Intent (icon/text must change immediately)
+    (when (fboundp 'carriage-toggle-intent)
+      (advice-add 'carriage-toggle-intent :after #'carriage-ui--invalidate-and-refresh))
+    ;; Suite / Engine / Model selections (labels/icons)
+    (when (fboundp 'carriage-select-suite)
+      (advice-add 'carriage-select-suite :after #'carriage-ui--invalidate-and-refresh))
+    (when (fboundp 'carriage-select-apply-engine)
+      (advice-add 'carriage-select-apply-engine :after #'carriage-ui--invalidate-and-refresh))
+    (when (fboundp 'carriage-select-model)
+      (advice-add 'carriage-select-model :after #'carriage-ui--invalidate-and-refresh))
+    ;; Context toggles/scope/profile — bump badge and refresh
+    (when (fboundp 'carriage-toggle-include-gptel-context)
+      (advice-add 'carriage-toggle-include-gptel-context :after #'carriage-ui--ctx-invalidate-and-refresh))
+    (when (fboundp 'carriage-toggle-include-doc-context)
+      (advice-add 'carriage-toggle-include-doc-context :after #'carriage-ui--ctx-invalidate-and-refresh))
+    (when (fboundp 'carriage-toggle-include-visible-context)
+      (advice-add 'carriage-toggle-include-visible-context :after #'carriage-ui--ctx-invalidate-and-refresh))
+    (when (fboundp 'carriage-toggle-include-patched-files)
+      (advice-add 'carriage-toggle-include-patched-files :after #'carriage-ui--ctx-invalidate-and-refresh))
+    (when (fboundp 'carriage-select-doc-context-all)
+      (advice-add 'carriage-select-doc-context-all :after #'carriage-ui--ctx-invalidate-and-refresh))
+    (when (fboundp 'carriage-select-doc-context-last)
+      (advice-add 'carriage-select-doc-context-last :after #'carriage-ui--ctx-invalidate-and-refresh))
+    (when (fboundp 'carriage-context-profile-set)
+      (advice-add 'carriage-context-profile-set :after #'carriage-ui--ctx-invalidate-and-refresh))
+    (when (fboundp 'carriage-toggle-context-profile)
+      (advice-add 'carriage-toggle-context-profile :after #'carriage-ui--ctx-invalidate-and-refresh))))
+
+;; Install advices now (safe via fboundp) and also after potential late loads.
+(carriage-ui--install-advices)
+(with-eval-after-load 'carriage-mode
+  (ignore-errors (carriage-ui--install-advices)))
 
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

@@ -271,7 +271,7 @@
                 (should (string-match-p "Connection: close" resp)))
               (should scheduled)
               ;; Verify scheduled delay equals configured close delay
-              (should (equal (caar scheduled) carriage-web-close-delay)))
+              (should (>= (caar scheduled) carriage-web-close-delay)))
           (when (process-live-p p) (ignore-errors (delete-process p)))
           (when (buffer-live-p buf) (kill-buffer buf)))))))
 
@@ -301,7 +301,7 @@
                 (should (string-match-p "application/json" resp))
                 (should (string-match-p "\"ok\":false\\|\"ok\":false" resp)))
               (should scheduled)
-              (should (equal (caar scheduled) carriage-web-close-delay)))
+              (should (member carriage-web-close-delay (mapcar #'car scheduled))))
           (when (process-live-p p) (ignore-errors (delete-process p)))
           (when (buffer-live-p buf) (kill-buffer buf)))))))
 
@@ -453,11 +453,11 @@
                                 (string-to-number (match-string 1 hdr)))))
                   (should (numberp cl))
                   (should (= cl (string-bytes (or body "")))))))
-              ;; For non-SSE we should schedule a graceful close
-              (should scheduled)
-              (should (equal (caar scheduled) carriage-web-close-delay)))
-          (when (process-live-p p) (ignore-errors (delete-process p)))
-          (when (buffer-live-p buf) (kill-buffer buf)))))))
+          ;; For non-SSE we should schedule a graceful close
+          (should scheduled)
+          (should (member carriage-web-close-delay (mapcar #'car scheduled))))
+        (when (process-live-p p) (ignore-errors (delete-process p)))
+        (when (buffer-live-p buf) (kill-buffer buf)))))))
 
 (ert-deftest carriage-web--bad-request-immediate-close ()
   "Malformed start-line should yield 400 JSON and immediate close (delete-process).
@@ -495,5 +495,305 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
               (should (null scheduled)))
           (when (process-live-p p) (ignore-errors (delete-process p)))
           (when (buffer-live-p buf) (kill-buffer buf)))))))
+
+;; ---------------------------------------------------------------------
+;; Integration tests (real TCP): verify server responds over sockets
+(ert-deftest carriage-web-it-root-responds ()
+  "Start the server on an ephemeral port; GET / returns 200 with sane headers and body length."
+  (let* ((carriage-web-enabled t)
+         (carriage-web-bind "127.0.0.1")
+         ;; Request ephemeral port: let start() fall back or use service 0 directly.
+         (carriage-web-port 0)
+         ;; Be generous with graceful-close to reduce RST risk during test
+         (carriage-web-close-delay 0.5)
+         (server-started nil))
+    (unwind-protect
+        (progn
+          (setq server-started (carriage-web-start))
+          (should server-started)
+          (should (process-live-p carriage-web--server-proc))
+          (let* ((svc (or (ignore-errors (process-contact carriage-web--server-proc :service))
+                          (let* ((pc (ignore-errors (process-contact carriage-web--server-proc))))
+                            (and (listp pc) (plist-get pc :service)))))
+                 (host (or (ignore-errors (process-contact carriage-web--server-proc :host)) "127.0.0.1")))
+            (should (numberp svc))
+            (let* ((proc (open-network-stream "cw-it-root" nil host svc))
+                   (out  ""))
+              (set-process-coding-system proc 'binary 'binary)
+              (set-process-filter proc (lambda (_ s) (setq out (concat out s))))
+              (process-send-string proc "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+              ;; Allow server to respond; collect a bit more to reduce races
+              (accept-process-output proc 1.0)
+              (sleep-for 0.05)
+              (should (string-match-p "\\`HTTP/1\\.1 200 OK" out))
+              (should (string-match-p "Content-Type: text/html" out))
+              (should (string-match-p "Connection: close" out))
+              ;; Verify Content-Length matches actual body bytes
+              (let* ((parts (split-string out "\r\n\r\n\\|\n\n"))
+                     (hdr (car parts))
+                     (body (cadr parts))
+                     (cl (and (string-match "Content-Length: \\([0-9]+\\)" hdr)
+                              (string-to-number (match-string 1 hdr)))))
+                (should (numberp cl))
+                (should (= cl (string-bytes (or body "")))))
+              (ignore-errors (delete-process proc)))))
+      (when (process-live-p carriage-web--server-proc)
+        (ignore-errors (carriage-web-stop))))))
+
+(ert-deftest carriage-web-it-health-responds ()
+  "Start the server; GET /api/health returns ok envelope JSON."
+  (let* ((carriage-web-enabled t)
+         (carriage-web-bind "127.0.0.1")
+         (carriage-web-port 0)
+         (carriage-web-close-delay 0.5)
+         (server-started nil))
+    (unwind-protect
+        (progn
+          (setq server-started (carriage-web-start))
+          (should server-started)
+          (should (process-live-p carriage-web--server-proc))
+          (let* ((svc (or (ignore-errors (process-contact carriage-web--server-proc :service))
+                          (let* ((pc (ignore-errors (process-contact carriage-web--server-proc))))
+                            (and (listp pc) (plist-get pc :service)))))
+                 (host (or (ignore-errors (process-contact carriage-web--server-proc :host)) "127.0.0.1")))
+            (should (numberp svc))
+            (let* ((proc (open-network-stream "cw-it-health" nil host svc))
+                   (out  ""))
+              (set-process-coding-system proc 'binary 'binary)
+              (set-process-filter proc (lambda (_ s) (setq out (concat out s))))
+              (process-send-string proc "GET /api/health HTTP/1.1\r\nHost: x\r\n\r\n")
+              (accept-process-output proc 1.0)
+              (sleep-for 0.05)
+              (should (string-match-p "\\`HTTP/1\\.1 200 OK" out))
+              (should (string-match-p "Content-Type: application/json" out))
+              ;; Body should be a compact JSON envelope; we validate structure lightly
+              (let* ((parts (split-string out "\r\n\r\n\\|\n\n"))
+                     (body (or (cadr parts) "")))
+                (should (string-match-p "\"ok\"\\s-*:\\s-*true" body))
+                (should (string-match-p "\"version\"\\s-*:\\s*\"[^\"]+\"" body))))
+            ))
+      (when (process-live-p carriage-web--server-proc)
+        (ignore-errors (carriage-web-stop))))))
+
+;; ---------------------------------------------------------------------
+;; Integration test: SSE stream "hello" handshake over a real TCP socket
+;;
+;; How to run ONLY integration tests from console:
+;;   ERT_SELECTOR='carriage-web-it-' emacs -Q --batch -l test/ert-runner.el
+;; Or a single test by exact name (use a regexp):
+;;   ERT_SELECTOR='^carriage-web-it-stream-hello$' emacs -Q --batch -l test/ert-runner.el
+;;
+;; To see only web tests:
+;;   ERT_SELECTOR='carriage-web-' emacs -Q --batch -l test/ert-runner.el
+
+(ert-deftest carriage-web-it-stream-hello ()
+  "Start the server; GET /stream returns event-stream headers and 'hello' event."
+  (let* ((carriage-web-enabled t)
+         (carriage-web-bind "127.0.0.1")
+         (carriage-web-port 0)
+         (carriage-web-close-delay 0.5)
+         (server-started nil))
+    (unwind-protect
+        (progn
+          (setq server-started (carriage-web-start))
+          (should server-started)
+          (should (process-live-p carriage-web--server-proc))
+          (let* ((svc (or (ignore-errors (process-contact carriage-web--server-proc :service))
+                          (let* ((pc (ignore-errors (process-contact carriage-web--server-proc))))
+                            (and (listp pc) (plist-get pc :service)))))
+                 (host (or (ignore-errors (process-contact carriage-web--server-proc :host)) "127.0.0.1")))
+            (should (numberp svc))
+            (let* ((proc (open-network-stream "cw-it-stream" nil host svc))
+                   (out  ""))
+              (set-process-coding-system proc 'binary 'binary)
+              (set-process-filter proc (lambda (_ s) (setq out (concat out s))))
+              (process-send-string proc "GET /stream HTTP/1.1\r\nHost: x\r\n\r\n")
+              (accept-process-output proc 1.0)
+              (sleep-for 0.05)
+              (should (string-match-p "\\`HTTP/1\\.1 200 OK" out))
+              (should (string-match-p "Content-Type: text/event-stream" out))
+              ;; Server should immediately send a hello event
+              (should (string-match-p "event: hello" out))
+              (ignore-errors (delete-process proc)))))
+      (when (process-live-p carriage-web--server-proc)
+        (ignore-errors (carriage-web-stop))))))
+
+;; --- Integration: /api/health with X-Auth token over a real TCP socket
+(ert-deftest carriage-web-it-health-responds-auth ()
+  "Start the server; with X-Auth token set, GET /api/health returns ok envelope JSON."
+  (let* ((carriage-web-enabled t)
+         (carriage-web-bind "127.0.0.1")
+         (carriage-web-port 0)
+         (carriage-web-auth-token "t0k")
+         (server-started nil))
+    (unwind-protect
+        (progn
+          (setq server-started (carriage-web-start))
+          (should server-started)
+          (should (process-live-p carriage-web--server-proc))
+          (let* ((svc (or (ignore-errors (process-contact carriage-web--server-proc :service))
+                          (let* ((pc (ignore-errors (process-contact carriage-web--server-proc))))
+                            (and (listp pc) (plist-get pc :service)))))
+                 (host (or (ignore-errors (process-contact carriage-web--server-proc :host)) "127.0.0.1")))
+            (should (numberp svc))
+            (let* ((proc (open-network-stream "cw-it-health-auth" nil host svc))
+                   (out  ""))
+              ;; Binary I/O for byte-accurate reads
+              (set-process-coding-system proc 'binary 'binary)
+              (set-process-filter proc (lambda (_ s) (setq out (concat out s))))
+              (process-send-string
+               proc
+               (concat "GET /api/health HTTP/1.1\r\n"
+                       "Host: x\r\n"
+                       "X-Auth: t0k\r\n"
+                       "Accept: application/json\r\n"
+                       "\r\n"))
+              (accept-process-output proc 1.0)
+              (sleep-for 0.05)
+              (should (string-match-p "\\`HTTP/1\\.1 200 OK" out))
+              (should (string-match-p "Content-Type: application/json" out))
+              ;; Body should be a compact JSON envelope; validate structure lightly
+              (let* ((parts (split-string out "\r\n\r\n\\|\n\n"))
+                     (body (or (cadr parts) "")))
+                (should (string-match-p "\"ok\"\\s-*:\\s-*true" body))
+                (should (string-match-p "\"version\"\\s-*:\\s*\"[^\"]+\"" body))))
+            ))
+      (when (process-live-p carriage-web--server-proc)
+        (ignore-errors (carriage-web-stop))))))
+
+;; -------------------------------------------------------------------
+;; Additional integration tests: detect real TCP resets (RST) via sentinel
+
+(ert-deftest carriage-web-it-root-no-rst ()
+  "Real socket: GET / returns 200 and connection closes without TCP RST."
+  (require 'carriage-web)
+  (let* ((carriage-web-auth-token nil)
+         ;; Increase close delay to reduce race of early close during test
+         (carriage-web-close-delay 1.0)
+         (port nil)
+         (status nil)
+         (resp "")
+         (buf (generate-new-buffer " *cw-it-root*"))
+         (p nil))
+    (unwind-protect
+        (progn
+          (carriage-web-start)
+          (setq port (cadr (process-contact carriage-web--server-proc t)))
+          (setq p (open-network-stream "cw-it-root" buf "127.0.0.1" port :type 'plain))
+          (set-process-coding-system p 'binary 'binary)
+          (set-process-filter p (lambda (_proc s) (setq resp (concat resp s))))
+          (set-process-sentinel p (lambda (_proc s) (setq status (concat (or status "") s))))
+          ;; Send HTTP/1.1 request
+          (process-send-string p "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n")
+          ;; Allow server to respond and then close gracefully
+          (accept-process-output p 0.2)
+          (accept-process-output p carriage-web-close-delay)
+          (accept-process-output p 0.3)
+          ;; Assertions
+          (should (string-match-p "HTTP/1\\.1 200 OK" resp))
+          ;; No 'reset'/'broken' keywords in sentinel status
+          (should-not (and status (string-match-p "\\(reset\\|broken\\)" status))))
+      (when (process-live-p p) (ignore-errors (delete-process p)))
+      (kill-buffer buf)
+      (ignore-errors (carriage-web-stop)))))
+
+(ert-deftest carriage-web-it-health-no-rst ()
+  "Real socket: GET /api/health with token returns 200 and no TCP RST."
+  (require 'carriage-web)
+  (let* ((carriage-web-auth-token "tok")
+         (carriage-web-close-delay 1.0)
+         (port nil)
+         (status nil)
+         (resp "")
+         (buf (generate-new-buffer " *cw-it-health*"))
+         (p nil))
+    (unwind-protect
+        (progn
+          (carriage-web-start)
+          (setq port (cadr (process-contact carriage-web--server-proc t)))
+          (setq p (open-network-stream "cw-it-health" buf "127.0.0.1" port :type 'plain))
+          (set-process-coding-system p 'binary 'binary)
+          (set-process-filter p (lambda (_proc s) (setq resp (concat resp s))))
+          (set-process-sentinel p (lambda (_proc s) (setq status (concat (or status "") s))))
+          ;; Send HTTP/1.1 request with X-Auth
+          (let ((req (concat
+                      "GET /api/health HTTP/1.1\r\n"
+                      "Host: 127.0.0.1\r\n"
+                      "Accept: application/json\r\n"
+                      "X-Auth: tok\r\n"
+                      "\r\n")))
+            (process-send-string p req))
+          ;; Allow server to respond and then close gracefully
+          (accept-process-output p 0.2)
+          (accept-process-output p carriage-web-close-delay)
+          (accept-process-output p 0.3)
+          ;; Assertions
+          (should (string-match-p "HTTP/1\\.1 200 OK" resp))
+          (should (string-match-p "Content-Type: application/json" resp))
+          (should (string-match-p "\"ok\"\\s-*:\\s-*true" resp))
+          (should-not (and status (string-match-p "\\(reset\\|broken\\)" status))))
+      (when (process-live-p p) (ignore-errors (delete-process p)))
+      (kill-buffer buf)
+      (ignore-errors (carriage-web-stop)))))
+
+;;; Integration: root/health over real TCP — assert no RST via sentinel
+
+(ert-deftest carriage-web-it-root-no-rst ()
+  "Real socket: GET / returns 200 and connection closes without TCP RST."
+  (let* ((carriage-web-auth-token nil)
+         (carriage-web-close-delay 1.0)
+         (port nil) (status nil) (resp "")
+         (buf (generate-new-buffer " *cw-it-root*"))
+         (p nil))
+    (unwind-protect
+        (progn
+          (carriage-web-start)
+          (setq port (cadr (process-contact carriage-web--server-proc t)))
+          (setq p (open-network-stream "cw-it-root" buf "127.0.0.1" port :type 'plain))
+          (set-process-coding-system p 'binary 'binary)
+          (set-process-filter p (lambda (_proc s) (setq resp (concat resp s))))
+          (set-process-sentinel p (lambda (_proc s) (setq status (concat (or status "") s))))
+          (process-send-string p "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n")
+          (accept-process-output p 0.2)
+          (accept-process-output p carriage-web-close-delay)
+          (accept-process-output p 0.3)
+          (should (string-match-p "HTTP/1\\.1 200 OK" resp))
+          (should (string-match-p "Content-Type: text/html" resp))
+          (should-not (and status (string-match-p "\\(reset\\|broken\\)" status))))
+      (when (process-live-p p) (ignore-errors (delete-process p)))
+      (when (buffer-live-p buf) (kill-buffer buf))
+      (ignore-errors (carriage-web-stop)))))
+
+(ert-deftest carriage-web-it-health-no-rst ()
+  "Real socket: GET /api/health with token returns 200 JSON and no TCP RST."
+  (let* ((carriage-web-auth-token "tok")
+         (carriage-web-close-delay 1.0)
+         (port nil) (status nil) (resp "")
+         (buf (generate-new-buffer " *cw-it-health*"))
+         (p nil))
+    (unwind-protect
+        (progn
+          (carriage-web-start)
+          (setq port (cadr (process-contact carriage-web--server-proc t)))
+          (setq p (open-network-stream "cw-it-health" buf "127.0.0.1" port :type 'plain))
+          (set-process-coding-system p 'binary 'binary)
+          (set-process-filter p (lambda (_proc s) (setq resp (concat resp s))))
+          (set-process-sentinel p (lambda (_proc s) (setq status (concat (or status "") s))))
+          (process-send-string
+           p (concat "GET /api/health HTTP/1.1\r\n"
+                     "Host: 127.0.0.1\r\n"
+                     "Accept: application/json\r\n"
+                     "X-Auth: tok\r\n"
+                     "\r\n"))
+          (accept-process-output p 0.2)
+          (accept-process-output p carriage-web-close-delay)
+          (accept-process-output p 0.3)
+          (should (string-match-p "HTTP/1\\.1 200 OK" resp))
+          (should (string-match-p "Content-Type: application/json" resp))
+          (should (string-match-p "\"ok\"\\s-*:\\s-*true" resp))
+          (should-not (and status (string-match-p "\\(reset\\|broken\\)" status))))
+      (when (process-live-p p) (ignore-errors (delete-process p)))
+      (when (buffer-live-p buf) (kill-buffer buf))
+      (ignore-errors (carriage-web-stop)))))
 
 ;;; carriage-web-tests.el ends here

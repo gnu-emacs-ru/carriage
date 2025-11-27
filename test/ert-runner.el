@@ -83,4 +83,12 @@
           (should (equal cap-status "400 Bad Request"))
           (should (memq (plist-get cap-payload :ok) (list json-false :false)))
           (should (equal (plist-get cap-payload :code) "WEB_E_CMD")))))))
-(ert-run-tests-batch-and-exit)
+(let* ((sel (or (getenv "ERT_SELECTOR") (getenv "CARRIAGE_TESTS"))))
+  (if (and sel (> (length sel) 0))
+      ;; Use an ERT selector form (portable to older Emacs): (satisfies PRED)
+      (ert-run-tests-batch-and-exit
+       `(satisfies
+         (lambda (test)
+           (let ((name (symbol-name (ert-test-name test))))
+             (string-match-p ,sel name)))))
+    (ert-run-tests-batch-and-exit t)))

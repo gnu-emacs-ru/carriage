@@ -217,17 +217,24 @@ those fields."
          ;; Provenance extras already present in the buffer (from branching)
          (existing-pl (ignore-errors (carriage-doc-state-read (current-buffer)))))
     (let ((alist base))
-      ;; Merge provenance keys from the existing begin_carriage block to avoid losing them.
+      ;; Merge important keys from the existing document state to avoid losing them
+      ;; when current in-memory vars are not bound (e.g., carriage-mode not loaded in tests).
       (when (listp existing-pl)
-        (let ((pl existing-pl))
+        (let ((pl existing-pl)
+              (keep '("CAR_MODE" "CAR_INTENT" "CAR_SUITE" "CAR_MODEL_ID"
+                      "CAR_ENGINE" "CAR_BRANCH_POLICY"
+                      "CAR_CTX_GPTEL" "CAR_CTX_DOC" "CAR_CTX_VISIBLE"
+                      "CAR_REPORT_POLICY" "CAR_STAGE_POLICY"
+                      "CAR_ICONS" "CAR_FLASH" "CAR_AUDIO_NOTIFY"
+                      "CAR_CONTEXT_PROFILE" "CAR_INHERITED")))
           (while pl
             (let* ((k (car pl))
                    (v (cadr pl)))
               (when (and (keywordp k))
-                (let* ((ks (symbol-name k))         ; e.g., ":CAR_TEMPLATE_ID"
+                (let* ((ks (symbol-name k))                  ; e.g., ":CAR_TEMPLATE_ID"
                        (plain (upcase (string-remove-prefix ":" ks))))
                   (when (or (string-prefix-p "CAR_TEMPLATE_" plain)
-                            (member plain '("CAR_CONTEXT_PROFILE" "CAR_INHERITED")))
+                            (member plain keep))
                     (unless (assoc plain alist)
                       (push (cons plain (format "%s" v)) alist))))))
             (setq pl (cddr pl)))))
@@ -256,6 +263,11 @@ Returns t on success."
 Gracefully ignores missing keys."
   (with-current-buffer (or buffer (current-buffer))
     (let* ((pl (carriage-doc-state-read (current-buffer))))
+      ;; Mode (enable/disable carriage-mode)
+      (let ((m (plist-get pl :CAR_MODE)))
+        (when m
+          (ignore-errors
+            (carriage-mode (if (carriage-doc-state--str->bool m) 1 0)))))
       ;; Intent
       (let ((v (plist-get pl :CAR_INTENT)))
         (when v (setq carriage-mode-intent (intern (format "%s" v)))))

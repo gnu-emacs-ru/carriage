@@ -269,7 +269,9 @@
               (let ((resp (apply #'concat (nreverse outs))))
                 (should (string-match-p "HTTP/1.1 200 OK" resp))
                 (should (string-match-p "Connection: close" resp)))
-              (should scheduled))
+              (should scheduled)
+              ;; Verify scheduled delay equals configured close delay
+              (should (equal (caar scheduled) carriage-web-close-delay)))
           (when (process-live-p p) (ignore-errors (delete-process p)))
           (when (buffer-live-p buf) (kill-buffer buf)))))))
 
@@ -298,7 +300,8 @@
                 (should (string-match-p "HTTP/1.1 401 Unauthorized" resp))
                 (should (string-match-p "application/json" resp))
                 (should (string-match-p "\"ok\":false\\|\"ok\":false" resp)))
-              (should scheduled))
+              (should scheduled)
+              (should (equal (caar scheduled) carriage-web-close-delay)))
           (when (process-live-p p) (ignore-errors (delete-process p)))
           (when (buffer-live-p buf) (kill-buffer buf)))))))
 
@@ -414,5 +417,83 @@
         (ignore-errors (when (process-live-p p) (delete-process p))))
       (setq carriage-web--server-proc nil
             carriage-web--clients nil))))
+
+;; ---------------------------------------------------------------------
+;; HTTP root and malformed request behaviors
+
+(ert-deftest carriage-web--http-root-serves-html ()
+  "GET / should return 200 text/html and schedule graceful close."
+  (require 'cl-lib)
+  (let ((outs '())
+        (scheduled '()))
+    (cl-letf (((symbol-function 'process-send-string)
+               (lambda (_proc s) (push s outs)))
+              ((symbol-function 'run-at-time)
+               (lambda (sec _repeat fn &rest args)
+                 (push (list sec fn args) scheduled)
+                 nil))
+              ((symbol-function 'process-send-eof)
+               (lambda (&rest _args) (push :eof outs))))
+      (let* ((p (make-pipe-process :name "cw-test-root" :noquery t))
+             (buf (generate-new-buffer " *cw-root*")))
+        (unwind-protect
+            (progn
+              (set-process-buffer p buf)
+              (carriage-web--process-filter
+               p "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+              (let ((resp (apply #'concat (nreverse outs))))
+                (should (string-match-p "\\`HTTP/1.1 200 OK" resp))
+                (should (string-match-p "Content-Type: text/html" resp))
+                (should (string-match-p "Connection: close" resp))
+                ;; Content-Length must match actual body bytes
+                (let* ((parts (split-string resp "\r\n\r\n\\|\n\n"))
+                       (hdr (car parts))
+                       (body (cadr parts))
+                       (cl (and (string-match "Content-Length: \\([0-9]+\\)" hdr)
+                                (string-to-number (match-string 1 hdr)))))
+                  (should (numberp cl))
+                  (should (= cl (string-bytes (or body "")))))))
+              ;; For non-SSE we should schedule a graceful close
+              (should scheduled)
+              (should (equal (caar scheduled) carriage-web-close-delay)))
+          (when (process-live-p p) (ignore-errors (delete-process p)))
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
+
+(ert-deftest carriage-web--bad-request-immediate-close ()
+  "Malformed start-line should yield 400 JSON and immediate close (delete-process).
+This reproduces the path that can cause a TCP RST if the peer is too fast."
+  (require 'cl-lib)
+  (let ((outs '())
+        (deleted '())
+        (scheduled '()))
+    (cl-letf (((symbol-function 'process-send-string)
+               (lambda (_proc s) (push s outs)))
+              ;; In the bad-request path we do not want graceful close scheduling.
+              ((symbol-function 'run-at-time)
+               (lambda (_sec _repeat _fn &rest _args)
+                 (push :scheduled scheduled)
+                 nil))
+              ((symbol-function 'delete-process)
+               (lambda (p) (push (process-name p) deleted)))
+              ((symbol-function 'process-send-eof)
+               (lambda (&rest _args) (push :eof outs))))
+      (let* ((p (make-pipe-process :name "cw-test-bad" :noquery t))
+             (buf (generate-new-buffer " *cw-bad*")))
+        (unwind-protect
+            (progn
+              (set-process-buffer p buf)
+              ;; Send malformed request (no HTTP start line)
+              (carriage-web--process-filter
+               p "GARBAGE\r\n\r\n")
+              (let ((resp (apply #'concat (nreverse outs))))
+                (should (string-match-p "\\`HTTP/1.1 400 Bad Request" resp))
+                (should (string-match-p "application/json" resp))
+                (should (string-match-p "\"code\":\"WEB_E_PAYLOAD\"" resp)))
+              ;; Expect immediate delete (RST risk in real socket)
+              (should (member "cw-test-bad" deleted))
+              ;; And importantly, no graceful scheduling expected
+              (should (null scheduled)))
+          (when (process-live-p p) (ignore-errors (delete-process p)))
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
 
 ;;; carriage-web-tests.el ends here

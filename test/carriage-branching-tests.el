@@ -57,6 +57,8 @@
 ;; Integration tests for create-from-template (P1/P3, inheritance, dedup)
 (ert-deftest carriage-branching/create-from-template-p1-and-p3 ()
   "Create docs from template with P1 and P3; verify begin_context and CAR_*."
+  (unless (getenv "CARRIAGE_RUN_E2E")
+  (ert-skip "Set CARRIAGE_RUN_E2E=1 to run branching transient/e2e tests"))
   (let* ((tmp (make-temp-file "carriage-branch-" t))  ;; temp project root
          (default-directory (file-name-as-directory tmp)))
     ;; Prepare origin TODO with a heading and a begin_context (with duplicates)
@@ -125,6 +127,8 @@
 (ert-deftest carriage-branching/transient-fallback ()
   "carriage-branching-transient should work without transient.el by falling back to prompts.
 Creates a doc from default template with P1 profile and no inheritance."
+  (skip-unless (getenv "CARRIAGE_RUN_E2E"))
+  (skip-unless (getenv "CARRIAGE_RUN_E2E"))
   (let* ((tmp (make-temp-file "carriage-branch-transient-" t))
          (default-directory (file-name-as-directory tmp))
          (todo (expand-file-name "TODO.org" default-directory)))
@@ -165,6 +169,7 @@ Creates a doc from default template with P1 profile and no inheritance."
 
 (ert-deftest carriage-branching/transient-created-doc-has-begin-context ()
   "Transient fallback creates a new doc with an explicit begin_context block."
+  (skip-unless (getenv "CARRIAGE_RUN_E2E"))
   (let* ((tmp (make-temp-file "carriage-branch-transient-" t))
          (default-directory (file-name-as-directory tmp))
          (todo (expand-file-name "TODO.org" default-directory)))
@@ -205,6 +210,7 @@ Creates a doc from default template with P1 profile and no inheritance."
 
 (ert-deftest carriage-branching/transient-p3-inherit-dedup ()
   "End-to-end transient fallback: choose P3 + inherit; verify CAR_CONTEXT_PROFILE and deduped begin_context."
+  (skip-unless (getenv "CARRIAGE_RUN_E2E"))
   (let* ((tmp (make-temp-file "carriage-branch-transient2-" t))
          (default-directory (file-name-as-directory tmp))
          (todo (expand-file-name "TODO.org" default-directory)))

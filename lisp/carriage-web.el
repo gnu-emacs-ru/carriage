@@ -77,6 +77,11 @@
   "Idle timeout in seconds for SSE clients. Stale clients are pruned on heartbeat."
   :type 'number :group 'carriage-web)
 
+(defcustom carriage-web-close-delay 0.2
+  "Delay in seconds before gracefully closing non-SSE HTTP connections.
+Increases robustness against premature TCP resets on slower systems."
+  :type 'number :group 'carriage-web)
+
 (defvar carriage-web--server-proc nil
   "Server process for dashboard HTTP listener.")
 
@@ -297,7 +302,14 @@ CONTENT-TYPE defaults to application/json."
      ((not auth-ok)
       (carriage-web--send-json proc "401 Unauthorized"
                                (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))
-      (ignore-errors (delete-process proc)))
+      (run-at-time
+       carriage-web-close-delay nil
+       (lambda (p)
+         (when (process-live-p p)
+           (condition-case _e
+               (ignore-errors (process-send-eof p))
+             (error nil))))
+       proc))
      ((>= (length carriage-web--clients) carriage-web-max-sse-clients)
       (carriage-web--send-json proc "503 Service Unavailable"
                                (list :ok json-false :error "too many clients" :code "WEB_E_LIMIT"))
@@ -346,26 +358,26 @@ REQ is a plist (:method :path :query :headers [:body])."
       (if (carriage-web--auth-ok headers)
           (carriage-web--handle-health proc method path query headers)
         (carriage-web--send-json proc "401 Unauthorized"
-                                 (list :ok :false :error "auth required" :code "WEB_E_AUTH"))))
+                                 (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))))
      ;; Sessions list
      ((and (string= method "GET") (string= path "/api/sessions"))
       (if (carriage-web--auth-ok headers)
           (carriage-web--handle-sessions proc method path query headers)
         (carriage-web--send-json proc "401 Unauthorized"
-                                 (list :ok :false :error "auth required" :code "WEB_E_AUTH"))))
+                                 (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))))
      ;; Per-session details: /api/session/<id>
      ((and (string= method "GET") (string-prefix-p "/api/session/" path))
       (if (carriage-web--auth-ok headers)
           (let ((sid (substring path (length "/api/session/"))))
             (carriage-web--handle-session proc method path sid query headers))
         (carriage-web--send-json proc "401 Unauthorized"
-                                 (list :ok :false :error "auth required" :code "WEB_E_AUTH"))))
+                                 (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))))
      ;; Last report summary/items (lightweight): /api/report/last?doc=<id>&limit=N
      ((and (string= method "GET") (string= path "/api/report/last"))
       (if (carriage-web--auth-ok headers)
           (carriage-web--handle-report-last proc method path query headers)
         (carriage-web--send-json proc "401 Unauthorized"
-                                 (list :ok :false :error "auth required" :code "WEB_E_AUTH"))))
+                                 (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))))
      ;; Command endpoint
      ((and (string= method "POST") (string= path "/api/cmd"))
       (carriage-web--handle-cmd proc method path query headers body))
@@ -375,7 +387,8 @@ REQ is a plist (:method :path :query :headers [:body])."
      ;; Fallback 404
      (t
       (carriage-web--send-json proc "404 Not Found"
-                               (list :ok :false :error "not found" :code "WEB_E_NOT_FOUND"))))))
+                               (list :ok json-false :error "not found" :code "WEB_E_NOT_FOUND"))))))
+
 
 ;;; Process filter for simple HTTP
 
@@ -416,12 +429,17 @@ REQ is a plist (:method :path :query :headers [:body])."
                     nil
                   ;; We have enough to dispatch; clear buffer before dispatch to avoid reprocessing
                   (erase-buffer)
-                  (carriage-web--dispatch-request
-                   proc (list :method method :path path :query query :headers headers :body body))
+                  (condition-case err
+                      (carriage-web--dispatch-request
+                       proc (list :method method :path path :query query :headers headers :body body))
+                    (error
+                     (carriage-web--log "dispatch error: %s" (error-message-string err))
+                     (carriage-web--send-json proc "500 Internal Server Error"
+                                              (list :ok json-false :error "server error" :code "WEB_E_SERVER"))))
                   ;; Close connection for non-SSE (graceful, delayed)
                   (unless (string= path "/stream")
                     (run-at-time
-                     0.05 nil
+                     carriage-web-close-delay nil
                      (lambda (p)
                        (when (process-live-p p)
                          (condition-case _e
@@ -436,6 +454,8 @@ REQ is a plist (:method :path :query :headers [:body])."
   (let ((buf (generate-new-buffer (format " *carriage-web:%s*" (process-id proc)))))
     (set-process-buffer proc buf)
     (set-process-query-on-exit-flag proc nil)
+    ;; Force byte-accurate I/O: avoid recoding that may break Content-Length.
+    (set-process-coding-system proc 'binary 'binary)
     (set-process-filter proc #'carriage-web--process-filter)
     (set-process-sentinel
      proc
@@ -475,10 +495,11 @@ REQ is a plist (:method :path :query :headers [:body])."
   (interactive)
   (unless carriage-web-enabled
     (user-error "carriage-web is disabled (Customize carriage-web-enabled)"))
-  (when (process-live-p carriage-web--server-proc)
-    (carriage-web--log "server already running on %s:%s" carriage-web-bind carriage-web-port)
-    (cl-return-from carriage-web-start t))
-  (let ((proc nil))
+  (if (process-live-p carriage-web--server-proc)
+      (progn
+        (carriage-web--log "server already running on %s:%s" carriage-web-bind carriage-web-port)
+        t)
+    (let ((proc nil))
     (condition-case _e
         (setq proc (make-network-process
                     :name "carriage-web"
@@ -501,8 +522,13 @@ REQ is a plist (:method :path :query :headers [:body])."
                    :service 0
                    :log #'carriage-web--accept))
        (when (process-live-p proc)
-         (setq carriage-web-port (or (process-contact proc :service)
-                                     carriage-web-port)))))
+         (let* ((svc1 (ignore-errors (process-contact proc :service)))
+                (svc (if (numberp svc1)
+                         svc1
+                       (let* ((pc (ignore-errors (process-contact proc)))
+                              (s  (and (listp pc) (plist-get pc :service))))
+                         s))))
+           (when (numberp svc) (setq carriage-web-port svc))))))
     (setq carriage-web--server-proc proc)
     (carriage-web--log "server started on %s:%s" carriage-web-bind carriage-web-port)
     ;; Start heartbeat
@@ -514,7 +540,7 @@ REQ is a plist (:method :path :query :headers [:body])."
                        #'carriage-web--heartbeat))
     ;; Install advices for live publications
     (carriage-web-install-advices)
-    t))
+    t)))
 
 ;;;###autoload
 (defun carriage-web-stop ()
@@ -931,22 +957,32 @@ REQ is a plist (:method :path :query :headers [:body])."
                (with-current-buffer buf
                  (cond
                   ((fboundp 'carriage-apply-last-iteration)
-                   (ignore-errors (carriage-apply-last-iteration)))
+                   (ignore-errors (carriage-apply-last-iteration))
+                   (carriage-web--send-json proc "200 OK" (list :ok t)))
                   (t
                    (carriage-web--send-json proc "400 Bad Request"
-                                            (list :ok json-false :error "unsupported" :code "WEB_E_CMD")))))
-               (carriage-web--send-json proc "200 OK" (list :ok t)))))
+                                            (list :ok json-false :error "unsupported" :code "WEB_E_CMD"))))))))
           ("abort"
-           (cond
-            ((fboundp 'carriage-abort-current)
-             (ignore-errors (carriage-abort-current))
-             (carriage-web--send-json proc "200 OK" (list :ok t)))
-            ((and (boundp 'carriage--abort-handler) (functionp carriage--abort-handler))
-             (ignore-errors (funcall carriage--abort-handler))
-             (carriage-web--send-json proc "200 OK" (list :ok t)))
-            (t
-             (carriage-web--send-json proc "400 Bad Request"
-                                      (list :ok json-false :error "unsupported" :code "WEB_E_CMD")))))
+           (let ((buf (and doc (carriage-web--find-buffer-by-id doc))))
+             (if (not (buffer-live-p buf))
+                 ;; No suitable target → treat as unsupported command per test expectation.
+                 (carriage-web--send-json proc "400 Bad Request"
+                                          (list :ok json-false :error "unsupported" :code "WEB_E_CMD"))
+               (with-current-buffer buf
+                 (let ((ok nil))
+                   (cond
+                    ((fboundp 'carriage-abort-current)
+                     (setq ok (condition-case _e
+                                  (carriage-abort-current)
+                                (error nil))))
+                    ((and (boundp 'carriage--abort-handler) (functionp carriage--abort-handler))
+                     (setq ok (condition-case _e
+                                  (funcall carriage--abort-handler)
+                                (error nil)))))
+                   (if ok
+                       (carriage-web--send-json proc "200 OK" (list :ok t))
+                     (carriage-web--send-json proc "400 Bad Request"
+                                              (list :ok json-false :error "unsupported" :code "WEB_E_CMD"))))))))
           (_
            (carriage-web--send-json proc "400 Bad Request"
                                     (list :ok json-false :error "unsupported" :code "WEB_E_CMD")))))

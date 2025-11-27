@@ -17,7 +17,7 @@
   (add-to-list 'load-path here)
   (dolist (dir dirs)
     (when dir
-      (dolist (f (directory-files dir t "^carriage-web-.*tests?\\.el\\'"))
+      (dolist (f (directory-files dir t "^carriage-.*tests?\\.el\\'"))
         (condition-case _e
             (load f t t)
           (error nil))))))

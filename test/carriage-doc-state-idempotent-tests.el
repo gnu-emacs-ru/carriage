@@ -45,7 +45,13 @@
     (save-excursion
       (goto-char (point-min))
       (re-search-forward "^[ \t]*#\\+begin_carriage\\b" nil t)
-      (should (re-search-forward "^CARRIAGE_MODE[ \t]+t\\b" nil t)))))
+      (let ((ok (progn
+                  (goto-char (point-min))
+                  (or (re-search-forward "^CARRIAGE_MODE[ \t]+t\\b" nil t)
+                      (progn
+                        (goto-char (point-min))
+                        (re-search-forward "^CAR_MODE[ \t]+t\\b" nil t))))))
+        (should ok)))))
 
 (provide 'carriage-doc-state-idempotent-tests)
 ;;; carriage-doc-state-idempotent-tests.el ends here

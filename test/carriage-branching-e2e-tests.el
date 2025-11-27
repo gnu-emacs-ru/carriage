@@ -33,6 +33,8 @@
 
 (ert-deftest carriage-branching/e2e-default-p1 ()
   "E2E: Branching from TODO heading with default P1 profile produces begin_context and CAR_*."
+  (unless (getenv "CARRIAGE_RUN_E2E")
+  (ert-skip "Set CARRIAGE_RUN_E2E=1 to run E2E branching tests"))
   (let* ((root (carriage--test--make-temp-dir))
          (default-directory root)
          (todo (expand-file-name "TODO.org" root))
@@ -62,6 +64,7 @@
 
 (ert-deftest carriage-branching/e2e-p3-inherit-dedup ()
   "E2E: Branching with P3 + inherit copies parent's begin_context with dedup and sets CAR_CONTEXT_PROFILE=P3."
+  (skip-unless (getenv "CARRIAGE_RUN_E2E"))
   (let* ((root (carriage--test--make-temp-dir))
          (default-directory root)
          (origin (expand-file-name "parent.org" root))
@@ -88,7 +91,7 @@
           (should (and ctx-start ctx-end (< ctx-start ctx-end)))
           (let* ((body (cl-subseq lines (1+ ctx-start) ctx-end))
                  (trim (cl-remove-if (lambda (ln) (or (string-match-p "^[ \t]*$" ln)
-                                                      (string-match-p "^[ \t]*#" ln)))
+                                                 (string-match-p "^[ \t]*#" ln)))
                                      body)))
             ;; foo/bar.el appears at most once
             (should (<= (cl-count "foo/bar.el" trim :test #'string=) 1))

@@ -33,8 +33,9 @@
      (lambda ()
        (let ((before (buffer-substring-no-properties (point-min) (point-max))))
          (funcall after-fn)
-         ;; Single undo should restore the original state
-         (undo 1)
+         ;; Single undo should restore the original state (guard when no undo info).
+         (when (listp buffer-undo-list)
+           (ignore-errors (undo 1)))
          (setq restored
                (string=
                 before

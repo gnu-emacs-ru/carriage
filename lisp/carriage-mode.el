@@ -428,7 +428,6 @@ Consults engine capabilities; safe when registry is not yet loaded."
     ;; Legacy bindings:
     ;; - C-c C-c → apply at point/region ONLY on patch blocks; otherwise delegate to Org
     ;; - C-c !   → apply last iteration (override org-time-stamp in carriage-mode buffers)
-    (define-key carriage-mode-map (kbd "C-c e s") #'carriage-save-settings)
     (define-key carriage-mode-map (kbd "C-c !") #'carriage-apply-last-iteration)
     (when (and (boundp 'carriage-enable-legacy-bindings) carriage-enable-legacy-bindings)
       (define-key carriage-mode-map (kbd "C-c C-c") #'carriage-ctrl-c-ctrl-c))

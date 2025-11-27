@@ -123,7 +123,8 @@ Each value is a plist with :add and/or :remove lists of (:id ID :keys (..)).")
     (:id assist-context-delta :cmd carriage-ui-context-delta-assist :keys ("x c") :contexts (carriage org) :section act :desc-key :assist-context-delta)
     (:id insert-menu  :cmd carriage-insert-transient        :keys ("x x")   :contexts (carriage org) :section act :desc-key :insert-assist-menu)
     ;; Engine
-    (:id engine       :cmd carriage-select-apply-engine     :keys ("E")  :contexts (carriage) :section tools :desc-key :engine))
+    (:id engine       :cmd carriage-select-apply-engine     :keys ("E")  :contexts (carriage) :section tools :desc-key :engine)
+    (:id save-settings :cmd carriage-save-settings          :keys ("s")  :contexts (carriage org global) :section tools :desc-key :save-settings :label "Save settings"))
   "Keyspec: list of action plists with :id :cmd :keys :contexts :section :desc-key.
 All keys are relative to carriage-keys-prefix (default \"C-c e \").")
 

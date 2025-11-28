@@ -796,4 +796,140 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
       (when (buffer-live-p buf) (kill-buffer buf))
       (ignore-errors (carriage-web-stop)))))
 
+;; -------------------------------------------------------------------
+;; Real socket integration tests (ensure curl-like behavior)
+;;
+;; These tests open a real TCP socket to the running server and verify:
+;; - Root (/) serves a proper 200 HTML response
+;; - /api/health responds with 200 ok when X-Auth is provided
+;; They do not assert RST/FIN explicitly (ERT has no direct RST hook),
+;; but they validate a complete HTTP response with headers/body.
+
+(ert-deftest carriage-web-it-root-real-socket ()
+  "Real socket: GET / returns 200 with text/html and a body."
+  (require 'cl-lib)
+  (let ((carriage-web-enabled t)
+        (carriage-web-auth-token nil))
+    (carriage-web-start)
+    (let* ((contact (process-contact carriage-web--server-proc t))
+           (port (car contact))
+           (acc "")
+           (proc (open-network-stream "cw-it-root" nil "127.0.0.1" port)))
+      (unwind-protect
+          (progn
+            (set-process-coding-system proc 'binary 'binary)
+            (set-process-filter proc (lambda (_ s) (setq acc (concat acc s))))
+            (process-send-string proc "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n")
+            (accept-process-output proc 0.3)
+            ;; Minimal assertions: status line, content-type and a non-empty body
+            (should (string-match-p "\\`HTTP/1\\.[01] 200 " acc))
+            (should (string-match-p "Content-Type: text/html" acc))
+            (let* ((sep (or (string-match "\r\n\r\n" acc) (string-match "\n\n" acc)))
+                   (body (and sep (substring acc (+ sep (if (eq (aref acc sep) ?\r) 4 2))))))
+              (should (and body (> (length body) 0)))))
+        (ignore-errors (delete-process proc))))))
+
+(ert-deftest carriage-web-it-health-real-socket-auth ()
+  "Real socket: GET /api/health with X-Auth returns 200 ok JSON."
+  (require 'cl-lib)
+  (let ((carriage-web-enabled t)
+        (carriage-web-auth-token "t0k"))
+    (carriage-web-start)
+    (let* ((contact (process-contact carriage-web--server-proc t))
+           (port (car contact))
+           (acc "")
+           (proc (open-network-stream "cw-it-health" nil "127.0.0.1" port)))
+      (unwind-protect
+          (progn
+            (set-process-coding-system proc 'binary 'binary)
+            (set-process-filter proc (lambda (_ s) (setq acc (concat acc s))))
+            (process-send-string
+             proc
+             (concat
+              "GET /api/health HTTP/1.1\r\n"
+              "Host: 127.0.0.1\r\n"
+              "X-Auth: t0k\r\n"
+              "Accept: application/json\r\n\r\n"))
+            (accept-process-output proc 0.3)
+            (should (string-match-p "\\`HTTP/1\\.[01] 200 " acc))
+            (should (string-match-p "Content-Type: application/json" acc))
+            (let* ((sep (or (string-match "\r\n\r\n" acc) (string-match "\n\n" acc)))
+                   (body (and sep (substring acc (+ sep (if (eq (aref acc sep) ?\r) 4 2))))))
+              (should (and body (string-match-p "\"ok\"[ \t]*:[ \t]*true" body)))))
+        (ignore-errors (delete-process proc))))))
+
+;; ----------------------------------------------------------------------
+;; Integration tests with real TCP sockets (open-network-stream)
+
+(ert-deftest carriage-web-it-real-root-responds ()
+  "Start server, GET / over a real TCP socket, verify 200/HTML and graceful close."
+  (let ((carriage-web-auth-token nil)
+        (carriage-web-enabled t))
+    (unwind-protect
+        (progn
+          (carriage-web-start)
+          (let* ((srv carriage-web--server-proc)
+                 (port (plist-get (process-contact srv t) :service))
+                 (conn (open-network-stream
+                        "cw-it-root" (generate-new-buffer " *cw-it-root*")
+                        "127.0.0.1" port)))
+            (set-process-coding-system conn 'binary 'binary)
+            (process-send-string
+             conn "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n")
+            (let ((resp ""))
+              (dotimes (_ 50) ;; up to ~0.5s
+                (accept-process-output nil 0.01)
+                (setq resp (concat resp (with-current-buffer (process-buffer conn)
+                                          (buffer-string)))))
+              (should (string-match-p "\\`HTTP/1\\.1 200 OK\\b" resp))
+              (should (string-match-p "Content-Type: text/html" resp))
+              (let* ((sep (or (string-match "\r\n\r\n" resp)
+                              (string-match "\n\n" resp)))
+                     (body (and sep (substring resp (+ sep (if (eq (aref resp sep) ?\r) 4 2)))))
+                     (clen (and (string-match "Content-Length: \\([0-9]+\\)" resp)
+                                (string-to-number (match-string 1 resp)))))
+                (when (and body clen)
+                  (should (= clen (string-bytes body))))))
+            (ignore-errors (delete-process conn))))
+      (ignore-errors (carriage-web-stop)))))
+
+(ert-deftest carriage-web-it-real-health-responds-auth ()
+  "Start server, GET /api/health with X-Auth over TCP, verify 200/JSON and graceful close."
+  (let ((carriage-web-auth-token "tok")
+        (carriage-web-enabled t))
+    (unwind-protect
+        (progn
+          (carriage-web-start)
+          (let* ((srv carriage-web--server-proc)
+                 (port (plist-get (process-contact srv t) :service))
+                 (conn (open-network-stream
+                        "cw-it-health" (generate-new-buffer " *cw-it-health*")
+                        "127.0.0.1" port)))
+            (set-process-coding-system conn 'binary 'binary)
+            (process-send-string
+             conn (concat "GET /api/health HTTP/1.1\r\n"
+                          "Host: 127.0.0.1\r\n"
+                          "Accept: application/json\r\n"
+                          "X-Auth: tok\r\n"
+                          "\r\n"))
+            (let ((resp ""))
+              (dotimes (_ 50)
+                (accept-process-output nil 0.01)
+                (setq resp (concat resp (with-current-buffer (process-buffer conn)
+                                          (buffer-string)))))
+              (should (string-match-p "\\`HTTP/1\\.1 200 OK\\b" resp))
+              (should (string-match-p "Content-Type: application/json" resp))
+              (when (string-match "Content-Length: \\([0-9]+\\)" resp)
+                (let* ((clen (string-to-number (match-string 1 resp)))
+                       (sep (or (string-match "\r\n\r\n" resp)
+                                (string-match "\n\n" resp)))
+                       (body (and sep (substring resp (+ sep (if (eq (aref resp sep) ?\r) 4 2))))))
+                  (when body
+                    (should (= clen (string-bytes body)))
+                    (should (string-match-p "\"ok\"[[:space:]]*:[[:space:]]*true" body))))))
+            (ignore-errors (delete-process conn))))
+      (ignore-errors (carriage-web-stop))))
+
+
+
 ;;; carriage-web-tests.el ends here

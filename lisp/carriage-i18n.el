@@ -95,6 +95,8 @@
     (:intent-ask         . ((ru . "Вопрос")                    (en . "Ask")))
     (:intent-code        . ((ru . "Код")                       (en . "Code")))
     (:intent-hybrid      . ((ru . "Гибрид")                    (en . "Hybrid")))
+    ;; Save settings
+    (:save-settings      . ((ru . "Сохранить настройки")       (en . "Save settings")))
     (:ctx-toggle         . ((ru . "Контекст gptel")            (en . "gptel context")))
     (:files-toggle       . ((ru . "Файлы из документа")        (en . "Document files")))
     (:ctx-tooltip        . ((ru . "Переключить gptel-контекст") (en . "Toggle gptel-context")))

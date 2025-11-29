@@ -37,7 +37,7 @@
                     :parent-context '()
                     :inherited (list :begin-context nil :car-flags nil))))
     (dolist (tid '(task/default task/decomposition task/implementation-step
-                    test/plan debug/protocol design/adr bug/incident))
+                                test/plan debug/protocol design/adr bug/incident))
       (let* ((s (carriage-templates-render tid ctx)))
         (should (stringp s))
         (should (> (length s) 0))
@@ -51,11 +51,11 @@
                           :label "Tmp"
                           :render "Title: {{title|foo}}"))))
     (carriage--tests--with-templates tmp
-      (lambda ()
-        (let ((ctx (list :title "T" :today "2025-01-01")))
-          (should-error
-           (carriage-templates-render 'tmp/unknown-filter ctx)
-           :type 'error))))))
+                                     (lambda ()
+                                       (let ((ctx (list :title "T" :today "2025-01-01")))
+                                         (should-error
+                                          (carriage-templates-render 'tmp/unknown-filter ctx)
+                                          :type 'error))))))
 
 (ert-deftest carriage-templates/error-on-io-in-render ()
   "Any I/O attempt in :render must be refused with TEMPLATE_E_IO_ATTEMPT."
@@ -67,11 +67,11 @@
                                     (write-region "x" nil (make-temp-file "carriage-io-") nil 'silent)
                                     "should-not-happen")))))
     (carriage--tests--with-templates tmp
-      (lambda ()
-        (let ((ctx (list :title "T" :today "2025-01-01")))
-          (should-error
-           (carriage-templates-render 'tmp/io-attempt ctx)
-           :type 'error))))))
+                                     (lambda ()
+                                       (let ((ctx (list :title "T" :today "2025-01-01")))
+                                         (should-error
+                                          (carriage-templates-render 'tmp/io-attempt ctx)
+                                          :type 'error))))))
 
 (ert-deftest carriage-templates/lookup-precedence ()
   "Project > User > Built-in precedence is respected by carriage-templates-refresh."
@@ -100,7 +100,7 @@
         ;; Built-in remains for x/b, user wins for x/c, project provides x/d
         (should (equal (funcall lab 'x/b) "B"))
         (should (equal (funcall lab 'x/c) "U"))
-        (should (equal (funcall lab 'x/d) "P")))))
+        (should (equal (funcall lab 'x/d) "P"))))))
 
 (ert-deftest carriage-templates/refresh-no-disk ()
   "Refresh should honor in-memory project/user registries without touching disk."
@@ -132,7 +132,7 @@
         (should (equal (funcall label-of 'x/a) "P"))
         (should (equal (funcall label-of 'x/b) "B"))
         (should (equal (funcall label-of 'x/c) "U"))
-        (should (equal (funcall label-of 'x/d) "P")))))
+        (should (equal (funcall label-of 'x/d) "P"))))))
 
 (ert-deftest carriage-templates/lint-builtins-ok ()
   "Built-in templates should lint without issues."

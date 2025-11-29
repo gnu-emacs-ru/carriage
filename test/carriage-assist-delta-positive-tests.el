@@ -60,7 +60,7 @@
                 (undo 1)
               (error (ert-skip "No undo information in this buffer"))))
           (when (listp buffer-undo-list)
-            (should (string= before (carriage--tests--buffer-string))))))))))
+            (should (string= before (carriage--tests--buffer-string)))))))))
 
 (provide 'carriage-assist-delta-positive-tests)
 ;;; carriage-assist-delta-positive-tests.el ends here

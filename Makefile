@@ -1,6 +1,6 @@
 EMACS ?= emacs
 
-.PHONY: test byte-compile clean lint checkdoc compile-strict qa
+.PHONY: test byte-compile clean lint checkdoc compile-strict qa smoke-web test-web
 
 # Run all ERT tests via our test runner
 test:
@@ -28,3 +28,12 @@ clean:
 
 # Full QA sweep
 qa: clean byte-compile test lint checkdoc compile-strict
+
+# Smoke test (curl against a running Emacs daemon)
+smoke-web:
+	@echo "Running smoke web test with curl..."
+	@bash scripts/smoke-web.sh
+
+# Run only web-related ERT tests (selector: carriage-web-)
+test-web:
+	ERT_SELECTOR='carriage-web-' $(EMACS) -Q --batch -L lisp -l ert -l test/ert-runner.el -f ert-run-tests-batch-and-exit

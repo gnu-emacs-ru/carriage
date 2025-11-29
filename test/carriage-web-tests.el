@@ -457,21 +457,20 @@
           (should scheduled)
           (should (member carriage-web-close-delay (mapcar #'car scheduled))))
         (when (process-live-p p) (ignore-errors (delete-process p)))
-        (when (buffer-live-p buf) (kill-buffer buf)))))))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
 
-(ert-deftest carriage-web--bad-request-immediate-close ()
-  "Malformed start-line should yield 400 JSON and immediate close (delete-process).
-This reproduces the path that can cause a TCP RST if the peer is too fast."
+(ert-deftest carriage-web--bad-request-graceful-close ()
+  "Malformed start-line should yield 400 JSON and schedule graceful close (EOF), not immediate delete."
   (require 'cl-lib)
   (let ((outs '())
-        (deleted '())
-        (scheduled '()))
+        (scheduled '())
+        (deleted '()))
     (cl-letf (((symbol-function 'process-send-string)
                (lambda (_proc s) (push s outs)))
-              ;; In the bad-request path we do not want graceful close scheduling.
+              ;; For graceful close we expect scheduling via run-at-time and EOF, not immediate delete.
               ((symbol-function 'run-at-time)
-               (lambda (_sec _repeat _fn &rest _args)
-                 (push :scheduled scheduled)
+               (lambda (sec _repeat fn &rest args)
+                 (push (list sec fn args) scheduled)
                  nil))
               ((symbol-function 'delete-process)
                (lambda (p) (push (process-name p) deleted)))
@@ -489,10 +488,9 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
                 (should (string-match-p "\\`HTTP/1.1 400 Bad Request" resp))
                 (should (string-match-p "application/json" resp))
                 (should (string-match-p "\"code\":\"WEB_E_PAYLOAD\"" resp)))
-              ;; Expect immediate delete (RST risk in real socket)
-              (should (member "cw-test-bad" deleted))
-              ;; And importantly, no graceful scheduling expected
-              (should (null scheduled)))
+              ;; Expect graceful close scheduled (EOF), not immediate delete
+              (should scheduled)
+              (should (null deleted)))
           (when (process-live-p p) (ignore-errors (delete-process p)))
           (when (buffer-live-p buf) (kill-buffer buf)))))))
 
@@ -566,11 +564,17 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
               (sleep-for 0.05)
               (should (string-match-p "\\`HTTP/1\\.1 200 OK" out))
               (should (string-match-p "Content-Type: application/json" out))
-              ;; Body should be a compact JSON envelope; we validate structure lightly
+              ;; Body should be a compact JSON envelope; validate by parsing JSON
               (let* ((parts (split-string out "\r\n\r\n\\|\n\n"))
                      (body (or (cadr parts) "")))
-                (should (string-match-p "\"ok\"\\s-*:\\s-*true" body))
-                (should (string-match-p "\"version\"\\s-*:\\s*\"[^\"]+\"" body))))
+                (let ((json-object-type 'plist)
+                      (json-array-type 'list)
+                      (json-false nil))
+                  (let ((parsed (ignore-errors (json-read-from-string body))))
+                    (should (plist-get parsed :ok))
+                    (let ((data (plist-get parsed :data)))
+                      (should (stringp (plist-get data :version)))
+                      (should (plist-get data :engine)))))))
             ))
       (when (process-live-p carriage-web--server-proc)
         (ignore-errors (carriage-web-stop))))))
@@ -655,8 +659,14 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
               ;; Body should be a compact JSON envelope; validate structure lightly
               (let* ((parts (split-string out "\r\n\r\n\\|\n\n"))
                      (body (or (cadr parts) "")))
-                (should (string-match-p "\"ok\"\\s-*:\\s-*true" body))
-                (should (string-match-p "\"version\"\\s-*:\\s*\"[^\"]+\"" body))))
+                (let ((json-object-type 'plist)
+                      (json-array-type 'list)
+                      (json-false nil))
+                  (let ((parsed (ignore-errors (json-read-from-string body))))
+                    (should (plist-get parsed :ok))
+                    (let ((data (plist-get parsed :data)))
+                      (should (stringp (plist-get data :version)))
+                      (should (plist-get data :engine)))))))
             ))
       (when (process-live-p carriage-web--server-proc)
         (ignore-errors (carriage-web-stop))))))
@@ -664,38 +674,6 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
 ;; -------------------------------------------------------------------
 ;; Additional integration tests: detect real TCP resets (RST) via sentinel
 
-(ert-deftest carriage-web-it-root-no-rst ()
-  "Real socket: GET / returns 200 and connection closes without TCP RST."
-  (require 'carriage-web)
-  (let* ((carriage-web-auth-token nil)
-         ;; Increase close delay to reduce race of early close during test
-         (carriage-web-close-delay 1.0)
-         (port nil)
-         (status nil)
-         (resp "")
-         (buf (generate-new-buffer " *cw-it-root*"))
-         (p nil))
-    (unwind-protect
-        (progn
-          (carriage-web-start)
-          (setq port (cadr (process-contact carriage-web--server-proc t)))
-          (setq p (open-network-stream "cw-it-root" buf "127.0.0.1" port :type 'plain))
-          (set-process-coding-system p 'binary 'binary)
-          (set-process-filter p (lambda (_proc s) (setq resp (concat resp s))))
-          (set-process-sentinel p (lambda (_proc s) (setq status (concat (or status "") s))))
-          ;; Send HTTP/1.1 request
-          (process-send-string p "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n")
-          ;; Allow server to respond and then close gracefully
-          (accept-process-output p 0.2)
-          (accept-process-output p carriage-web-close-delay)
-          (accept-process-output p 0.3)
-          ;; Assertions
-          (should (string-match-p "HTTP/1\\.1 200 OK" resp))
-          ;; No 'reset'/'broken' keywords in sentinel status
-          (should-not (and status (string-match-p "\\(reset\\|broken\\)" status))))
-      (when (process-live-p p) (ignore-errors (delete-process p)))
-      (kill-buffer buf)
-      (ignore-errors (carriage-web-stop)))))
 
 (ert-deftest carriage-web-it-health-no-rst ()
   "Real socket: GET /api/health with token returns 200 and no TCP RST."
@@ -710,7 +688,7 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
     (unwind-protect
         (progn
           (carriage-web-start)
-          (setq port (cadr (process-contact carriage-web--server-proc t)))
+          (setq port (plist-get (process-contact carriage-web--server-proc t) :service))
           (setq p (open-network-stream "cw-it-health" buf "127.0.0.1" port :type 'plain))
           (set-process-coding-system p 'binary 'binary)
           (set-process-filter p (lambda (_proc s) (setq resp (concat resp s))))
@@ -748,7 +726,7 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
     (unwind-protect
         (progn
           (carriage-web-start)
-          (setq port (cadr (process-contact carriage-web--server-proc t)))
+          (setq port (plist-get (process-contact carriage-web--server-proc t) :service))
           (setq p (open-network-stream "cw-it-root" buf "127.0.0.1" port :type 'plain))
           (set-process-coding-system p 'binary 'binary)
           (set-process-filter p (lambda (_proc s) (setq resp (concat resp s))))
@@ -764,7 +742,7 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
       (when (buffer-live-p buf) (kill-buffer buf))
       (ignore-errors (carriage-web-stop)))))
 
-(ert-deftest carriage-web-it-health-no-rst ()
+(ert-deftest carriage-web-it-health-no-rst-json ()
   "Real socket: GET /api/health with token returns 200 JSON and no TCP RST."
   (let* ((carriage-web-auth-token "tok")
          (carriage-web-close-delay 1.0)
@@ -928,8 +906,6 @@ This reproduces the path that can cause a TCP RST if the peer is too fast."
                     (should (= clen (string-bytes body)))
                     (should (string-match-p "\"ok\"[[:space:]]*:[[:space:]]*true" body))))))
             (ignore-errors (delete-process conn))))
-      (ignore-errors (carriage-web-stop))))
-
-
+      (ignore-errors (carriage-web-stop)))))
 
 ;;; carriage-web-tests.el ends here

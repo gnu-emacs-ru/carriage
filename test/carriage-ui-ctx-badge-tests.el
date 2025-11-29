@@ -35,7 +35,7 @@
         (let* ((badge (carriage-ui--compute-context-badge inc-doc inc-gpt inc-vis inc-patched))
                (help (and (consp badge) (cdr badge))))
           (should (stringp help))
-          (should (string-match-p "Профиль: P1" help))))))
+          (should (string-match-p "Профиль: P1" help)))))))
 
 (provide 'carriage-ui-ctx-badge-tests)
 ;;; carriage-ui-ctx-badge-tests.el ends here

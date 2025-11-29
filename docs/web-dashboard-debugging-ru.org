@@ -1,0 +1,84 @@
+#+title: Руководство: отладка и тестирование web-дашборда Carriage
+#+language: ru
+#+author: Carriage Team
+
+Цель
+- Практические шаги для отладки сетевого слоя, API и SSE в локальном дашборде.
+- Как автоматизировать проверки и распознавать типовые симптомы.
+
+Быстрый запуск
+1) В Emacs:
+   - M-: (setq carriage-web-enabled t
+               carriage-web-bind "127.0.0.1"
+               carriage-web-port 8787
+               carriage-web-close-delay 0.0)
+   - M-: (carriage-web-start)
+   - Проверить порт: M-: carriage-web-port
+2) В браузере: http://127.0.0.1:PORT/
+   - Должны увидеть HTML и мгновенное закрытие соединения.
+3) curl:
+   - curl -sv http://127.0.0.1:PORT/api/health
+   - При токене: curl -sv -H "X-Auth: TOK" http://127.0.0.1:PORT/api/health
+4) SSE:
+   - Без токена: curl -svN http://127.0.0.1:PORT/stream
+   - С токеном:  curl -svN -H "X-Auth: TOK" http://127.0.0.1:PORT/stream
+   - Ожидайте заголовки text/event-stream и событие hello.
+
+Автотесты
+- Запуск только web-тестов ERT:
+  - make test-web
+  - или: ERT_SELECTOR='carriage-web-' emacs -Q --batch -L lisp -l test/ert-runner.el -f ert-run-tests-batch-and-exit
+- Smoke с curl:
+  - make smoke-web
+  - переменная окружения для токена: CARRIAGE_WEB_TOKEN=tok make smoke-web
+  - Скрипт: scripts/smoke-web.sh (поднимает daemon, узнаёт порт, дергает / и /api/health, закрывает daemon)
+
+Типовые симптомы и решения
+1) “Висит” в браузере/curl
+   - Проверьте, что открываете фактический порт: M-: carriage-web-port
+   - Сделайте немедленное закрытие обычных ответов: (setq carriage-web-close-delay 0.0), перезапустите сервер.
+   - Проверьте Messages:
+     - web: accept: … — клиент принят
+     - web: dispatch: … — запрос разобран и маршрутизирован
+     - web: send-response: … — ответ отправлен (статус/байты)
+   - Для диагностики разделителя заголовков попробуйте:
+     printf 'GET / HTTP/1.1\r\nHost: x\r\n\r\n' | nc 127.0.0.1 PORT
+
+2) 401 Unauthorized
+   - В Emacs установлен токен? (setq carriage-web-auth-token "t0k")
+   - Передавайте X-Auth: curl -H 'X-Auth: t0k' …
+   - Для SSE допускается query-параметр ?token=, но лучше X-Auth.
+
+3) Несовпадение Content-Length и тела
+   - Клиент будет ждать окончания. Убедитесь, что длина по заголовку равна байтовой длине тела.
+   - В smoke-тесте это проверяется автоматически.
+
+4) Ошибка “Servname not supported for ai_socktype”
+   - В тестах для подключения используйте числовой порт из (plist-get (process-contact srv t) :service), а не car/cadr от произвольной структуры.
+   - В актуальной версии тесты поправлены на plist-get.
+
+5) Ошибки таймера “wrong-number-of-arguments …”
+   - Возникает, если в run-at-time передали функцию, ожидающую аргументы, но их не передали.
+   - Для отладки: (setq debug-on-error t), посмотрите backtrace, убедитесь, что при планировании передаётся нужный параметр (или лямбда без аргументов).
+
+SSE: что считать нормой
+- /stream — долгоживущие соединения; “висящее” подключение ожидаемо.
+- Сервер может слать heartbeat, чтобы соединение не простаивало.
+- Клиенты (EventSource) автоматически переподключаются при разрыве.
+
+Практика разработки и запуска
+- Связать старт сервера с global-mode: если carriage-web-enabled t, стартовать в (carriage-global-mode 1).
+- Логи: смотрите *Messages*, помечены префиксом web: …
+- Ограничения по безопасности: по умолчанию bind на 127.0.0.1; токен — опционален, но рекомендуется.
+- Ограничения по объёму: carriage-web-max-json-bytes — для срезания больших payload.
+
+Выборочные ERT
+- Один тест:
+  - ERT_SELECTOR='^carriage-web-it-stream-hello$' emacs -Q --batch -L lisp -l test/ert-runner.el
+- В тестах можно временно “подменять” process-send-string/run-at-time через cl-letf для детерминированности (см. unit-тесты).
+
+Чек-лист перед отладкой
+- Удостовериться, что сервер жив: (process-live-p carriage-web--server-proc)
+- Порт из process-contact: (plist-get (process-contact carriage-web--server-proc t) :service)
+- Для быстрых HTTP-ответов держать close-delay = 0.0
+- Для SSE — не ожидать закрытия, а ориентироваться на события.

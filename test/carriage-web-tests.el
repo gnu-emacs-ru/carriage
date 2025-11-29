@@ -908,4 +908,174 @@
             (ignore-errors (delete-process conn))))
       (ignore-errors (carriage-web-stop)))))
 
+;; Additional tests: favicon 204 and session detail (ephemeral) OK
+
+(ert-deftest carriage-web--favicon-204 ()
+  "GET /favicon.ico returns 204 No Content and schedules graceful close."
+  (require 'cl-lib)
+  (let ((outs '())
+        (scheduled '()))
+    (cl-letf (((symbol-function 'process-send-string)
+               (lambda (_proc s) (push s outs)))
+              ((symbol-function 'run-at-time)
+               (lambda (sec _repeat fn &rest args)
+                 (push (list sec fn args) scheduled)
+                 nil))
+              ((symbol-function 'process-send-eof)
+               (lambda (&rest _args) (push :eof outs))))
+      (let* ((p (make-pipe-process :name "cw-test-favicon" :noquery t))
+             (buf (generate-new-buffer " *cw-favicon*")))
+        (unwind-protect
+            (progn
+              (set-process-buffer p buf)
+              (carriage-web--process-filter
+               p "GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n")
+              (let ((resp (apply #'concat (nreverse outs))))
+                (should (string-match-p "\\`HTTP/1\\.1 204 No Content" resp))
+                (should (string-match-p "Connection: close" resp))))
+          (when (process-live-p p) (ignore-errors (delete-process p)))
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
+
+(ert-deftest carriage-web--session-ephemeral-ok ()
+  "GET /api/session/<ephemeral-id> returns 200 with a data payload."
+  (let (cap-status cap-payload)
+    (with-temp-buffer
+      (rename-buffer (generate-new-buffer-name "cw-ephemeral") t)
+      ;; Force compute ephemeral id
+      (let ((id (carriage-web--buffer-id (current-buffer))))
+        (should (and (stringp id) (string-match-p "\\`ephemeral:" id)))
+        (cl-letf (((symbol-function 'carriage-web--send-json)
+                   (lambda (_proc status payload)
+                     (setq cap-status status
+                           cap-payload payload))))
+          (carriage-web--dispatch-request
+           nil (list :method "GET"
+                     :path (concat "/api/session/" id)
+                     :query nil :headers '() :body "")))
+        (should (equal cap-status "200 OK"))
+        (should (eq (plist-get cap-payload :ok) t))
+        (let ((data (plist-get cap-payload :data)))
+          (should (listp data))
+          (should (equal (plist-get data :id) id))
+          (should (plist-get data :state))))))
+;; ---------------------------------------------------------------------
+;; Additional positive tests: /api/report/last success (limit) and /api/cmd with whitelist enabled.
+
+(ert-deftest carriage-web--report-last-success-limit ()
+  "GET /api/report/last returns 200 with limited items when a report is cached."
+  (let* ((doc "ephemeral:test-doc")
+         (sum (list :ok 2 :fail 1 :skipped 0 :total 3))
+         (items (list (list :op 'create :file "a")
+                      (list :op 'patch :path "b")
+                      (list :op 'delete :file "c"))))
+    ;; Seed in-memory cache used by /api/report/last
+    (puthash doc (list :summary sum :items items)
+             carriage-web--last-report-full-by-doc)
+    (let (cap-status cap-payload)
+      (cl-letf (((symbol-function 'carriage-web--send-json)
+                 (lambda (_proc status payload)
+                   (setq cap-status status
+                         cap-payload payload))))
+        ;; Ask for limit=1
+        (carriage-web--dispatch-request
+         nil (list :method "GET" :path "/api/report/last"
+                   :query `(("doc" . ,doc) ("limit" . "1"))
+                   :headers '())))
+      (should (equal cap-status "200 OK"))
+      (should (eq (plist-get cap-payload :ok) t))
+      (let* ((data (plist-get cap-payload :data))
+             (ret-sum (plist-get data :summary))
+             (ret-items (plist-get data :items)))
+        (should (equal (plist-get ret-sum :ok) 2))
+        (should (equal (plist-get ret-sum :fail) 1))
+        (should (equal (plist-get ret-sum :skipped) 0))
+        (should (equal (plist-get ret-sum :total) 3))
+        (should (listp ret-items))
+        (should (= (length ret-items) 1))))))
+
+(ert-deftest carriage-web--dispatch-cmd-abort-enabled ()
+  "POST /api/cmd abort succeeds when whitelist is enabled and buffer is found."
+  (let* ((carriage-web-api-commands-enabled t)
+         (abort-called nil))
+    (unwind-protect
+        (with-temp-buffer
+          ;; Give this buffer a stable ephemeral id
+          (rename-buffer (generate-new-buffer-name "cw-ephemeral-cmd") t)
+          (let* ((id (carriage-web--buffer-id (current-buffer))))
+            (should (and (stringp id) (string-match-p "\\`ephemeral:" id)))
+            (let (cap-status cap-payload)
+              (cl-letf
+                  ;; Call abort immediately without scheduling
+                  (((symbol-function 'run-at-time)
+                    (lambda (_sec _repeat fn &rest _args)
+                      (funcall fn)
+                      nil))
+                   ;; Stub abort function
+                   ((symbol-function 'carriage-abort-current)
+                    (lambda () (setq abort-called t))))
+                (let* ((body (json-encode `(:cmd "abort" :doc ,id))))
+                  (cl-letf (((symbol-function 'carriage-web--send-json)
+                             (lambda (_proc status payload)
+                               (setq cap-status status
+                                     cap-payload payload))))
+                    (carriage-web--dispatch-request
+                     nil (list :method "POST" :path "/api/cmd" :query nil
+                               :headers '(("content-type" . "application/json"))
+                               :body body))))))
+            (should (equal cap-status "200 OK"))
+            (should (eq (plist-get cap-payload :ok) t))
+            (should abort-called)))
+      (setq carriage-web-api-commands-enabled nil))))
+
+;; ---------------------------------------------------------------------
+;; Additional metrics and SSE auth-header tests
+
+(ert-deftest carriage-web--dispatch-metrics-ok ()
+  "GET /api/metrics returns ok envelope with counters."
+  (let (cap-status cap-payload)
+    (cl-letf (((symbol-function 'carriage-web--send-json)
+               (lambda (_proc status payload)
+                 (setq cap-status status
+                       cap-payload payload))))
+      (carriage-web--dispatch-request
+       nil (list :method "GET" :path "/api/metrics" :query nil :headers '())))
+    (should (equal cap-status "200 OK"))
+    (should (eq (plist-get cap-payload :ok) t))
+    (let ((data (plist-get cap-payload :data)))
+      (should (listp data))
+      (should (numberp (plist-get data :published)))
+      (should (numberp (plist-get data :truncated)))
+      (should (numberp (plist-get data :clients)))
+      (should (numberp (plist-get data :ts))))))
+
+(ert-deftest carriage-web--http-sse-auth-header-ok ()
+  "Authorized SSE handshake via X-Auth header responds with event-stream headers."
+  (require 'cl-lib)
+  (let ((outs '())
+        (scheduled '())
+        (carriage-web-auth-token "tok"))
+    (cl-letf (((symbol-function 'process-send-string)
+               (lambda (_proc s) (push s outs)))
+              ((symbol-function 'run-at-time)
+               (lambda (sec _repeat fn &rest args)
+                 (push (list sec fn args) scheduled)
+                 nil))
+              ((symbol-function 'process-send-eof)
+               (lambda (&rest _args) (push :eof outs))))
+      (let* ((p (make-pipe-process :name "cw-test-sse-auth" :noquery t))
+             (buf (generate-new-buffer " *cw-sse-auth*")))
+        (unwind-protect
+            (progn
+              (set-process-buffer p buf)
+              (carriage-web--process-filter
+               p "GET /stream HTTP/1.1\r\nHost: x\r\nX-Auth: tok\r\n\r\n")
+              (let ((resp (apply #'concat (nreverse outs))))
+                (should (string-match-p "HTTP/1.1 200 OK" resp))
+                (should (string-match-p "text/event-stream" resp))
+                (should (string-match-p "event: hello" resp)))
+              ;; For SSE we must not schedule a close
+              (should (null scheduled)))
+          (when (process-live-p p) (ignore-errors (delete-process p)))
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
+
 ;;; carriage-web-tests.el ends here

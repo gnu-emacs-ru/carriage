@@ -506,6 +506,22 @@ Adds :type TYPE to payload and debounces delivery."
     (carriage-web--send-json proc "200 OK"
                              (list :ok t :data (list :version "v1" :engine engine :ts (float-time))))))
 
+(defun carriage-web--handle-metrics (proc _req)
+  "Return lightweight counters for observability."
+  (let ((published (or carriage-web--metrics-published 0))
+        (truncated (or carriage-web--metrics-truncated 0))
+        (clients   (condition-case _e
+                       (length carriage-web--clients)
+                     (error 0))))
+    (carriage-web--send-json
+     proc "200 OK"
+     (list :ok t
+           :data (list
+                  :published published
+                  :truncated truncated
+                  :clients clients
+                  :ts (float-time))))))
+
 (defun carriage-web--handle-sessions (proc _req)
   "Collect lightweight session snapshots for visible Carriage-related buffers."
   (let* ((res
@@ -833,6 +849,12 @@ Adds :type TYPE to payload and debounces delivery."
    ((and (string= method "GET") (string= path "/api/report/last"))
     (if (carriage-web--auth-ok headers query nil)
         (carriage-web--handle-report-last proc (list :query query))
+      (carriage-web--send-json proc "401 Unauthorized"
+                               (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))))
+
+   ((and (string= method "GET") (string= path "/api/metrics"))
+    (if (carriage-web--auth-ok headers query nil)
+        (carriage-web--handle-metrics proc nil)
       (carriage-web--send-json proc "401 Unauthorized"
                                (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))))
 

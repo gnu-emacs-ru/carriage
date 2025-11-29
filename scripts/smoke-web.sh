@@ -154,4 +154,113 @@ else
   fi
 fi
 
+echo ">>> GET /favicon.ico"
+if ! curl "${curl_common[@]}" "${base_url}/favicon.ico" -o "${tmp_health_body}" -D "${tmp_health_hdrs}"; then
+  echo "[smoke-web] ERROR: curl to /favicon.ico failed" >&2
+  exit 1
+fi
+if ! grep -qE '^HTTP/1\.[01] 204' "${tmp_health_hdrs}"; then
+  echo "[smoke-web] ERROR: /favicon.ico status is not 204" >&2
+  sed -n '1,80p' "${tmp_health_hdrs}" >&2
+  exit 1
+fi
+
+echo ">>> GET /api/metrics"
+if ! curl "${curl_common[@]}" "${base_url}/api/metrics" -o "${tmp_health_body}" -D "${tmp_health_hdrs}" "${auth_header[@]}"; then
+  echo "[smoke-web] ERROR: curl to /api/metrics failed" >&2
+  exit 1
+fi
+if ! grep -qE '^HTTP/1\.[01] 200' "${tmp_health_hdrs}"; then
+  echo "[smoke-web] ERROR: /api/metrics status is not 200" >&2
+  sed -n '1,80p' "${tmp_health_hdrs}" >&2
+  exit 1
+fi
+if ! grep -qi '^Content-Type:.*application/json' "${tmp_health_hdrs}"; then
+  echo "[smoke-web] ERROR: /api/metrics Content-Type is not application/json" >&2
+  sed -n '1,80p' "${tmp_health_hdrs}" >&2
+  exit 1
+fi
+if ! grep -q '"ok"[[:space:]]*:[[:space:]]*true' "${tmp_health_body}"; then
+  echo "[smoke-web] ERROR: /api/metrics body missing ok:true" >&2
+  sed -n '1,120p' "${tmp_health_body}" >&2
+  exit 1
+fi
+
+# Optional SSE checks
+if [[ -n "${CARRIAGE_WEB_TOKEN:-}" ]]; then
+  echo ">>> GET /stream (unauthorized, no header)"
+  if curl "${curl_common[@]}" "${base_url}/stream" -o /dev/null -D - >/tmp/cw_sse_unauth_hdrs 2>/dev/null; then
+    :
+  fi
+  if ! grep -qE '^HTTP/1\.[01] 401' /tmp/cw_sse_unauth_hdrs; then
+    echo "[smoke-web] ERROR: /stream without token should be 401" >&2
+    sed -n '1,80p' /tmp/cw_sse_unauth_hdrs >&2
+    exit 1
+  fi
+
+  echo ">>> GET /stream (authorized)"
+  if ! curl "${curl_common[@]}" "${base_url}/stream" -o /dev/null -D - "${auth_header[@]}" >/tmp/cw_sse_auth_hdrs 2>/dev/null; then
+    echo "[smoke-web] ERROR: curl to /stream (auth) failed" >&2
+    exit 1
+  fi
+  if ! grep -qE '^HTTP/1\.[01] 200' /tmp/cw_sse_auth_hdrs; then
+    echo "[smoke-web] ERROR: /stream status is not 200 (auth)" >&2
+    sed -n '1,80p' /tmp/cw_sse_auth_hdrs >&2
+    exit 1
+  fi
+  if ! grep -qi '^Content-Type:.*text/event-stream' /tmp/cw_sse_auth_hdrs; then
+    echo "[smoke-web] ERROR: /stream Content-Type is not text/event-stream (auth)" >&2
+    sed -n '1,80p' /tmp/cw_sse_auth_hdrs >&2
+    exit 1
+  fi
+else
+  echo ">>> GET /stream (no token required)"
+  if ! curl "${curl_common[@]}" "${base_url}/stream" -o /dev/null -D - >/tmp/cw_sse_hdrs 2>/dev/null; then
+    echo "[smoke-web] ERROR: curl to /stream failed" >&2
+    exit 1
+  fi
+  if ! grep -qE '^HTTP/1\.[01] 200' /tmp/cw_sse_hdrs; then
+    echo "[smoke-web] ERROR: /stream status is not 200" >&2
+    sed -n '1,80p' /tmp/cw_sse_hdrs >&2
+    exit 1
+  fi
+  if ! grep -qi '^Content-Type:.*text/event-stream' /tmp/cw_sse_hdrs; then
+    echo "[smoke-web] ERROR: /stream Content-Type is not text/event-stream" >&2
+    sed -n '1,80p' /tmp/cw_sse_hdrs >&2
+    exit 1
+  fi
+fi
+
+echo ">>> GET /favicon.ico"
+if ! curl "${curl_common[@]}" "${base_url}/favicon.ico" -o "${tmp_health_body}" -D "${tmp_health_hdrs}"; then
+  echo "[smoke-web] ERROR: curl to /favicon.ico failed" >&2
+  exit 1
+fi
+if ! grep -qE '^HTTP/1\.[01] 204' "${tmp_health_hdrs}"; then
+  echo "[smoke-web] ERROR: /favicon.ico status is not 204" >&2
+  sed -n '1,80p' "${tmp_health_hdrs}" >&2
+  exit 1
+fi
+
+echo ">>> GET /api/metrics"
+if ! curl "${curl_common[@]}" "${base_url}/api/metrics" -o "${tmp_health_body}" -D "${tmp_health_hdrs}" "${auth_header[@]}"; then
+  echo "[smoke-web] ERROR: curl to /api/metrics failed" >&2
+  exit 1
+fi
+if ! grep -qE '^HTTP/1\.[01] 200' "${tmp_health_hdrs}"; then
+  echo "[smoke-web] ERROR: /api/metrics status is not 200" >&2
+  sed -n '1,80p' "${tmp_health_hdrs}" >&2
+  exit 1
+fi
+if ! grep -qi '^Content-Type:.*application/json' "${tmp_health_hdrs}"; then
+  echo "[smoke-web] ERROR: /api/metrics Content-Type is not application/json" >&2
+  sed -n '1,80p' "${tmp_health_hdrs}" >&2
+  exit 1
+fi
+if ! grep -q '"ok"[[:space:]]*:[[:space:]]*true' "${tmp_health_body}"; then
+  echo "[smoke-web] ERROR: /api/metrics body missing ok:true" >&2
+  sed -n '1,120p' "${tmp_health_body}" >&2
+  exit 1
+fi
+
 echo "[smoke-web] OK"

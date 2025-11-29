@@ -64,6 +64,28 @@ Default is nil to keep test suite expectations (WEB_E_CMD for most ops)."
   (let ((msg (apply #'format fmt args)))
     (ignore-errors (message "web: %s" msg))))
 
+;; Maintenance: remove accidental/leftover debug advices on the process filter.
+(defun carriage-web-clear-debug-advices ()
+  "Remove known carriage-web debug advices from `carriage-web--process-filter'.
+Returns the number of removed advices."
+  (interactive)
+  (let ((removed 0))
+    (condition-case _e
+        (progn
+          (advice-mapc
+           (lambda (a _p)
+             (when (and (symbolp a)
+                        (string-match-p "\\`carriage-web--adv-" (symbol-name a)))
+               (ignore-errors
+                 (advice-remove 'carriage-web--process-filter a)
+                 (setq removed (1+ removed)))))
+           'carriage-web--process-filter)
+          (carriage-web--log "clear-adv: removed=%d" removed)
+          removed)
+      (error
+       (carriage-web--log "clear-adv: error while removing advices")
+       removed))))
+
 ;; Utilities
 
 (defun carriage-web--http-date ()
@@ -298,7 +320,7 @@ Return an alist of (downcased-name . value)."
    "function api(path,opt={}){ opt.headers=Object.assign({},opt.headers||{},headers()); return fetch(path,opt); }"
    "function json(r){ return r.ok ? r.json() : r.text().then(t=>{throw new Error(t||('HTTP '+r.status))}); }"
    "function el(tag,cls,text){ const e=document.createElement(tag); if(cls) e.className=cls; if(text!=null) e.textContent=text; return e; }"
-   "function choose(doc){ if(!doc) return; S.doc=doc; $('#selId').textContent = doc; highlight(doc); loadSession(doc); }"
+   "function choose(doc){ if(!doc) return; S.doc=doc; $('#selId').textContent = doc; highlight(doc); loadSession(doc); connect(); }"
    "function highlight(doc){ const rows=document.querySelectorAll('.side .row.item'); rows.forEach(r=>{ if(r.dataset.doc===doc) r.classList.add('active'); else r.classList.remove('active'); }); }"
    "function renderList(items){ const box=$('#list'); box.innerHTML=''; S.list=items||[]; S.byId={};"
    " S.list.forEach(it=>{ S.byId[it.id]=it; const r=el('div','row item'); r.dataset.doc=it.id;"
@@ -317,7 +339,8 @@ Return an alist of (downcased-name . value)."
    "function refreshList(){ api('/api/sessions').then(json).then(o=>{ if(o&&o.ok) renderList(o.data||[]); }).catch(()=>{}); }"
    "function loadSession(doc){ api('/api/session/'+encodeURIComponent(doc)).then(json).then(o=>{ if(o&&o.ok) updateSessionCard(o.data); }).catch(()=>{}); }"
    "function connect(){ try{ if(S.es){ try{S.es.close();}catch(e){} S.es=null; }"
-   " const url = '/stream' + (S.token?('?token='+encodeURIComponent(S.token)):'');"
+   " const params = []; if (S.doc) params.push('doc='+encodeURIComponent(S.doc)); if (S.token) params.push('token='+encodeURIComponent(S.token));"
+   " const url = '/stream' + (params.length?('?'+params.join('&')):'');"
    " const es = new EventSource(url); S.es=es; setStatus('connecting');"
    " es.addEventListener('open', ()=>setStatus('online'));"
    " es.addEventListener('error', ()=>setStatus('error'));"
@@ -414,7 +437,7 @@ Return an alist of (downcased-name . value)."
                 (when (or (null flt) (null doc) (string= flt doc))
                   (setf (plist-get cli :last-ts) now)
                   (carriage-web--sse-send proc etype ev)
-                  (cl-incf carriage-web--metrics-published)))))))))))
+                  (cl-incf carriage-web--metrics-published))))))))))
 
 (defun carriage-web-pub (type payload)
   "Publish SSE event with TYPE and PAYLOAD plist.
@@ -493,6 +516,142 @@ Adds :type TYPE to payload and debounces delivery."
       (and (stringp (or hdr qtok))
            (string= carriage-web-auth-token (or hdr qtok))))))
 
+;; -------- Snapshot helpers (refactor of large handlers) --------
+
+(defun carriage-web--count-patches-in-buffer (&optional buffer)
+  "Count occurrences of #+begin_patch in BUFFER (case-insensitive)."
+  (with-current-buffer (or buffer (current-buffer))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (let ((case-fold-search t) (n 0))
+          (while (re-search-forward "^[ \t]*#\\+begin_patch\\b" nil t)
+            (setq n (1+ n)))
+          n)))))
+
+(defun carriage-web--buffer-ui-state (&optional buffer)
+  "Return plist (:phase :tooltip) for BUFFER UI state."
+  (with-current-buffer (or buffer (current-buffer))
+    (let* ((st (and (boundp 'carriage--ui-state) carriage--ui-state))
+           (phase (if (symbolp st) (format "%s" st) (or (and st (format "%s" st)) "idle")))
+           (tooltip (and (boundp 'carriage--ui-state-tooltip) carriage--ui-state-tooltip)))
+      (list :phase phase :tooltip tooltip))))
+
+(defun carriage-web--buffer-engine-string (&optional buffer)
+  "Return engine string for BUFFER based on carriage-apply-engine and policy."
+  (with-current-buffer (or buffer (current-buffer))
+    (let* ((eng (and (boundp 'carriage-apply-engine) carriage-apply-engine)))
+      (cond
+       ((eq eng 'git)
+        (let ((pol (and (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)))
+          (format "git:%s" (if pol (format "%s" pol) ""))))
+       ((symbolp eng) (format "%s" eng))
+       ((stringp eng) eng)
+       (t "emacs")))))
+
+(defun carriage-web--gather-context-info (&optional buffer)
+  "Return plist (:count N :sources list-or-nil) describing BUFFER context."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((count 0) (sources nil))
+      (condition-case _e
+          (progn
+            (require 'carriage-context nil t)
+            (when (fboundp 'carriage-context-count)
+              (let* ((res (carriage-context-count (current-buffer) nil)))
+                (setq count (or (and (listp res) (plist-get res :count)) 0))
+                (setq sources (and (listp res) (plist-get res :sources))))))
+        (error nil))
+      (list :count count :sources sources))))
+
+(defun carriage-web--buffer-session-snapshot (buffer)
+  "Build lightweight snapshot plist for BUFFER for /api/sessions."
+  (with-current-buffer buffer
+    (let* ((id (ignore-errors (carriage-web--buffer-id buffer))))
+      (when id
+        (let* ((title (or (and buffer-file-name (file-name-nondirectory buffer-file-name))
+                          (buffer-name buffer)))
+               (root  (or (and (fboundp 'carriage-project-root)
+                               (ignore-errors (carriage-project-root)))
+                          default-directory))
+               (project (ignore-errors
+                          (file-name-nondirectory (directory-file-name (or root default-directory)))))
+               (mode  (format "%s" major-mode))
+               (intent (cond
+                        ((and (boundp 'carriage-mode-intent) carriage-mode-intent)
+                         (format "%s" carriage-mode-intent))
+                        (t "Ask")))
+               (suite  (cond
+                        ((and (boundp 'carriage-mode-suite) carriage-mode-suite)
+                         (format "%s" carriage-mode-suite))
+                        (t "udiff")))
+               (engine (carriage-web--buffer-engine-string buffer))
+               (branch nil)
+               (ctx (carriage-web--gather-context-info buffer))
+               (patches-count (carriage-web--count-patches-in-buffer buffer))
+               (state (carriage-web--buffer-ui-state buffer)))
+          (list :id id
+                :title title
+                :project project
+                :mode mode
+                :intent intent
+                :suite suite
+                :engine engine
+                :branch branch
+                :ctx (list :count (plist-get ctx :count))
+                :patches (list :count patches-count)
+                :state state))))))
+
+(defun carriage-web--find-buffer-by-doc (doc)
+  "Find a live buffer whose carriage-web buffer id equals DOC."
+  (cl-find-if
+   (lambda (b)
+     (and (buffer-live-p b)
+          (string= (ignore-errors (carriage-web--buffer-id b)) doc)))
+   (buffer-list)))
+
+(defun carriage-web--buffer-session-detail (buffer)
+  "Build detailed snapshot plist for BUFFER for /api/session/:id."
+  (with-current-buffer buffer
+    (let* ((id (ignore-errors (carriage-web--buffer-id buffer)))
+           (title (or (and buffer-file-name (file-name-nondirectory buffer-file-name))
+                      (buffer-name buffer)))
+           (root  (or (and (fboundp 'carriage-project-root)
+                           (ignore-errors (carriage-project-root)))
+                      default-directory))
+           (project (ignore-errors
+                      (file-name-nondirectory (directory-file-name (or root default-directory)))))
+           (mode  (format "%s" major-mode))
+           (intent (cond
+                    ((and (boundp 'carriage-mode-intent) carriage-mode-intent)
+                     (format "%s" carriage-mode-intent))
+                    (t "Ask")))
+           (suite  (cond
+                    ((and (boundp 'carriage-mode-suite) carriage-mode-suite)
+                     (format "%s" carriage-mode-suite))
+                    (t "udiff")))
+           (engine (carriage-web--buffer-engine-string buffer))
+           (branch nil)
+           (ctx (carriage-web--gather-context-info buffer))
+           (patches-count (carriage-web--count-patches-in-buffer buffer))
+           (state (carriage-web--buffer-ui-state buffer))
+           (last-summary (and (hash-table-p carriage-web--last-report-by-doc)
+                              (gethash id carriage-web--last-report-by-doc))))
+      (list
+       :id id
+       :title title
+       :project project
+       :mode mode
+       :intent intent
+       :suite suite
+       :engine engine
+       :branch branch
+       :ctx (list :count (or (plist-get ctx :count) 0)
+                  :sources (plist-get ctx :sources))
+       :patches (list :count patches-count)
+       :state state
+       :apply (and last-summary (list :last last-summary))))))
+
 ;; Handlers
 
 (defun carriage-web--handle-root (proc _req)
@@ -524,77 +683,10 @@ Adds :type TYPE to payload and debounces delivery."
 
 (defun carriage-web--handle-sessions (proc _req)
   "Collect lightweight session snapshots for visible Carriage-related buffers."
-  (let* ((res
-          (cl-loop for b in (buffer-list)
-                   when (buffer-live-p b)
-                   do (ignore)
-                   collect
-                   (with-current-buffer b
-                     (let* ((id (ignore-errors (carriage-web--buffer-id b)))
-                            ;; title/project
-                            (title (or (and buffer-file-name (file-name-nondirectory buffer-file-name))
-                                       (buffer-name b)))
-                            (root  (or (and (fboundp 'carriage-project-root)
-                                            (ignore-errors (carriage-project-root)))
-                                       default-directory))
-                            (project (ignore-errors
-                                       (file-name-nondirectory (directory-file-name (or root default-directory)))))
-                            ;; mode/intent/suite
-                            (mode  (format "%s" major-mode))
-                            (intent (cond
-                                     ((and (boundp 'carriage-mode-intent) carriage-mode-intent)
-                                      (format "%s" carriage-mode-intent))
-                                     (t "Ask")))
-                            (suite  (cond
-                                     ((and (boundp 'carriage-mode-suite) carriage-mode-suite)
-                                      (format "%s" carriage-mode-suite))
-                                     (t "udiff")))
-                            ;; engine/branch
-                            (engine (let* ((eng (and (boundp 'carriage-apply-engine) carriage-apply-engine)))
-                                      (cond
-                                       ((eq eng 'git)
-                                        (let ((pol (and (boundp 'carriage-git-branch-policy)
-                                                        carriage-git-branch-policy)))
-                                          (format "git:%s" (if pol (format "%s" pol) ""))))
-                                       ((symbolp eng) (format "%s" eng))
-                                       ((stringp eng) eng)
-                                       (t "emacs"))))
-                            (branch nil) ;; light for now (avoid expensive VCS calls)
-                            ;; ctx/patches
-                            (ctx-count (condition-case _e
-                                           (progn
-                                             (require 'carriage-context nil t)
-                                             (let* ((res (and (fboundp 'carriage-context-count)
-                                                              (carriage-context-count b nil))))
-                                               (or (and (listp res) (plist-get res :count)) 0)))
-                                         (error 0)))
-                            (patches-count
-                             (save-excursion
-                               (save-restriction
-                                 (widen)
-                                 (goto-char (point-min))
-                                 (let ((case-fold-search t) (n 0))
-                                   (while (re-search-forward "^[ \t]*#\\+begin_patch\\b" nil t)
-                                     (setq n (1+ n)))
-                                   n))))
-                            ;; state
-                            (phase (let* ((st (and (boundp 'carriage--ui-state) carriage--ui-state)))
-                                     (if (symbolp st) (format "%s" st) (or (and st (format "%s" st)) "idle"))))
-                            (tooltip (and (boundp 'carriage--ui-state-tooltip) carriage--ui-state-tooltip)))
-                       ;; Only include buffers with a stable id
-                       (when id
-                         (list :id id
-                               :title title
-                               :project project
-                               :mode mode
-                               :intent intent
-                               :suite suite
-                               :engine engine
-                               :branch branch
-                               :ctx (list :count ctx-count)
-                               :patches (list :count patches-count)
-                               :state (list :phase phase :tooltip tooltip)))))))
-         ;; Drop nils (buffers without id)
+  (let* ((res (cl-loop for b in (buffer-list)
+                       when (buffer-live-p b)
+                       for snap = (ignore-errors (carriage-web--buffer-session-snapshot b))
+                       when snap collect snap))
          (data (cl-remove-if-not #'identity res)))
     (carriage-web--send-json proc "200 OK" (list :ok t :data data))))
 
@@ -602,85 +694,15 @@ Adds :type TYPE to payload and debounces delivery."
   "Return a detailed snapshot for a single session by its doc id."
   (let* ((path (plist-get req :path))
          (id (substring path (length "/api/session/")))
-         (buf (cl-find-if
-               (lambda (b)
-                 (and (buffer-live-p b)
-                      (string= (ignore-errors (carriage-web--buffer-id b)) id)))
-               (buffer-list))))
+         (buf (carriage-web--find-buffer-by-doc id)))
     (if (not (buffer-live-p buf))
         (carriage-web--send-json proc "404 Not Found"
                                  (list :ok json-false :error "not found" :code "WEB_E_NOT_FOUND"))
-      (with-current-buffer buf
-        (let* ((title (or (and buffer-file-name (file-name-nondirectory buffer-file-name))
-                          (buffer-name buf)))
-               (root  (or (and (fboundp 'carriage-project-root)
-                               (ignore-errors (carriage-project-root)))
-                          default-directory))
-               (project (ignore-errors
-                          (file-name-nondirectory (directory-file-name (or root default-directory)))))
-               (mode  (format "%s" major-mode))
-               (intent (cond
-                        ((and (boundp 'carriage-mode-intent) carriage-mode-intent)
-                         (format "%s" carriage-mode-intent))
-                        (t "Ask")))
-               (suite  (cond
-                        ((and (boundp 'carriage-mode-suite) carriage-mode-suite)
-                         (format "%s" carriage-mode-suite))
-                        (t "udiff")))
-               (engine (let* ((eng (and (boundp 'carriage-apply-engine) carriage-apply-engine)))
-                         (cond
-                          ((eq eng 'git)
-                           (let ((pol (and (boundp 'carriage-git-branch-policy)
-                                           carriage-git-branch-policy)))
-                             (format "git:%s" (if pol (format "%s" pol) ""))))
-                          ((symbolp eng) (format "%s" eng))
-                          ((stringp eng) eng)
-                          (t "emacs"))))
-               (branch nil)
-               ;; Context counts and sources
-               (ctx-count 0)
-               (ctx-sources nil))
-          (condition-case _e
-              (progn
-                (require 'carriage-context nil t)
-                (when (fboundp 'carriage-context-count)
-                  (let* ((res (carriage-context-count buf nil)))
-                    (setq ctx-count (or (and (listp res) (plist-get res :count)) 0))
-                    (setq ctx-sources (and (listp res) (plist-get res :sources))))))
-            (error nil))
-          (let* ((patches-count
-                  (save-excursion
-                    (save-restriction
-                      (widen)
-                      (goto-char (point-min))
-                      (let ((case-fold-search t) (n 0))
-                        (while (re-search-forward "^[ \t]*#\\+begin_patch\\b" nil t)
-                          (setq n (1+ n)))
-                        n))))
-                 (phase (let* ((st (and (boundp 'carriage--ui-state) carriage--ui-state)))
-                          (if (symbolp st) (format "%s" st) (or (and st (format "%s" st)) "idle"))))
-                 (tooltip (and (boundp 'carriage--ui-state-tooltip) carriage--ui-state-tooltip))
-                 (last-summary (and (boundp 'carriage-web--last-report-by-doc)
-                                    (hash-table-p carriage-web--last-report-by-doc)
-                                    (gethash id carriage-web--last-report-by-doc)))
-                 (payload
-                  (list
-                   :id id
-                   :title title
-                   :project project
-                   :mode mode
-                   :intent intent
-                   :suite suite
-                   :engine engine
-                   :branch branch
-                   :ctx (list :count ctx-count :sources ctx-sources)
-                   :patches (list :count patches-count)
-                   :state (list :phase phase :tooltip tooltip)
-                   :apply (and last-summary (list :last last-summary)))))
-            (carriage-web--send-json proc "200 OK"
-                                     (list :ok t :data payload)))))))
+      (let ((payload (carriage-web--buffer-session-detail buf)))
+        (carriage-web--send-json proc "200 OK" (list :ok t :data payload))))))
 
 (defun carriage-web--handle-report-last (proc req)
+  "Return last report summary/items for ?doc= with optional ?limit=N."
   (let* ((q (plist-get req :query))
          (doc (and (listp q) (assoc-default "doc" q)))
          (limit-str (and (listp q) (assoc-default "limit" q)))
@@ -703,6 +725,8 @@ Adds :type TYPE to payload and debounces delivery."
             (carriage-web--send-json proc "200 OK" (list :ok t :data payload))))))))
 
 (defun carriage-web--handle-cmd (proc req)
+  "Dispatch POST /api/cmd with strict whitelist semantics.
+Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structured envelope."
   (let* ((body (or (plist-get req :body) ""))
          (obj (condition-case _e
                   (let ((json-object-type 'hash-table)
@@ -714,18 +738,17 @@ Adds :type TYPE to payload and debounces delivery."
          (doc (and (hash-table-p obj) (gethash "doc" obj)))
          (key (and (hash-table-p obj) (gethash "key" obj))))
     (cond
-     ((not (and cmd (stringp cmd)))
+     ;; Bad payload: missing or non-string cmd
+     ((not (and (stringp cmd) (> (length cmd) 0)))
       (carriage-web--send-json proc "400 Bad Request"
                                (list :ok json-false :error "bad request" :code "WEB_E_PAYLOAD")))
+
+     ;; Toggle commands (no eval; guarded by fboundp)
      ((string= cmd "toggle")
-      (if (not (and key doc))
+      (if (not (and (stringp key) (stringp doc) (> (length doc) 0)))
           (carriage-web--send-json proc "400 Bad Request"
                                    (list :ok json-false :error "bad request" :code "WEB_E_PAYLOAD"))
-        (let* ((buf (cl-find-if
-                     (lambda (b)
-                       (and (buffer-live-p b)
-                            (string= (ignore-errors (carriage-web--buffer-id b)) doc)))
-                     (buffer-list)))
+        (let* ((buf (carriage-web--find-buffer-by-doc doc))
                (ok nil))
           (if (not (buffer-live-p buf))
               (carriage-web--send-json proc "404 Not Found"
@@ -755,20 +778,22 @@ Adds :type TYPE to payload and debounces delivery."
                            (carriage-toggle-context-profile) t)
                           (t nil))))
                       (_ nil))))
-              (if ok
-                  (carriage-web--send-json proc "200 OK" (list :ok t))
-                (carriage-web--send-json proc "400 Bad Request"
-                                         (list :ok json-false :error "unsupported" :code "WEB_E_CMD"))))))))
-     ((member cmd '("apply_last_iteration" "abort" "report_open" "commit_last" "commit_all" "wip"))
+            (if ok
+                (carriage-web--send-json proc "200 OK" (list :ok t))
+              (carriage-web--send-json proc "400 Bad Request"
+                                       (list :ok json-false :error "unsupported" :code "WEB_E_CMD")))))))
+
+     ;; Whitelisted action commands
+     ((or (string= cmd "apply_last_iteration")
+          (string= cmd "abort")
+          (string= cmd "report_open")
+          (string= cmd "commit_last")
+          (string= cmd "commit_all")
+          (string= cmd "wip"))
       (if (not carriage-web-api-commands-enabled)
-          ;; Keep minimal behavior unless explicitly enabled
           (carriage-web--send-json proc "400 Bad Request"
                                    (list :ok json-false :error "unsupported" :code "WEB_E_CMD"))
-        (let* ((buf (cl-find-if
-                     (lambda (b)
-                       (and (buffer-live-p b)
-                            (string= (ignore-errors (carriage-web--buffer-id b)) doc)))
-                     (buffer-list))))
+        (let* ((buf (carriage-web--find-buffer-by-doc doc)))
           (if (not (buffer-live-p buf))
               (carriage-web--send-json proc "404 Not Found"
                                        (list :ok json-false :error "not found" :code "WEB_E_NOT_FOUND"))
@@ -784,7 +809,6 @@ Adds :type TYPE to payload and debounces delivery."
                   ("report_open"
                    (setq ok (and (fboundp 'carriage-report-open)
                                  (progn (run-at-time 0 nil #'carriage-report-open) t))))
-                  ;; Commit/WIP left unsupported unless functions are available
                   ("commit_last"
                    (setq ok (and (fboundp 'carriage-commit-last-iteration)
                                  (progn (run-at-time 0 nil #'carriage-commit-last-iteration) t))))
@@ -799,6 +823,8 @@ Adds :type TYPE to payload and debounces delivery."
                   (carriage-web--send-json proc "200 OK" (list :ok t))
                 (carriage-web--send-json proc "400 Bad Request"
                                          (list :ok json-false :error "unsupported" :code "WEB_E_CMD"))))))))
+
+     ;; Unknown command
      (t
       (carriage-web--send-json proc "400 Bad Request"
                                (list :ok json-false :error "unknown" :code "WEB_E_CMD"))))))
@@ -1056,4 +1082,5 @@ Adds :type TYPE to payload and debounces delivery."
   t)
 
 (provide 'carriage-web)
+
 ;;; carriage-web.el ends here

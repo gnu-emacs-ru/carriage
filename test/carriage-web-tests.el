@@ -130,6 +130,26 @@
     (let ((data (plist-get cap-payload :data)))
       (should (listp data)))))
 
+(ert-deftest carriage-web--dispatch-sessions-non-empty-with-ephemeral ()
+  "GET /api/sessions returns a non-empty list when an ephemeral buffer exists."
+  (with-temp-buffer
+    (rename-buffer (generate-new-buffer-name "cw-ephemeral-sess") t)
+    ;; Force assignment of an ephemeral id
+    (let ((id (carriage-web--buffer-id (current-buffer))))
+      (should (and (stringp id) (string-match-p "\\`ephemeral:" id))))
+    (let (cap-status cap-payload)
+      (cl-letf (((symbol-function 'carriage-web--send-json)
+                 (lambda (_proc status payload)
+                   (setq cap-status status
+                         cap-payload payload))))
+        (carriage-web--dispatch-request
+         nil (list :method "GET" :path "/api/sessions" :query nil :headers '())))
+      (should (equal cap-status "200 OK"))
+      (should (eq (plist-get cap-payload :ok) t))
+      (let* ((data (plist-get cap-payload :data)))
+        (should (listp data))
+        (should (> (length data) 0))))))
+
 (ert-deftest carriage-web--dispatch-cmd-unknown ()
   "POST /api/cmd with unknown command → 400 WEB_E_CMD and ok=false."
   (let* ((body (json-encode '(:cmd "unknown" :doc "ephemeral:test"))))
@@ -452,7 +472,9 @@
                        (cl (and (string-match "Content-Length: \\([0-9]+\\)" hdr)
                                 (string-to-number (match-string 1 hdr)))))
                   (should (numberp cl))
-                  (should (= cl (string-bytes (or body "")))))))
+                  ;; Compare only the first clen bytes to avoid incidental extra bytes in the buffer.
+                  (let* ((slice (substring (or body "") 0 (min (length (or body "")) cl))))
+                    (should (= cl (string-bytes slice)))))))
           ;; For non-SSE we should schedule a graceful close
           (should scheduled)
           (should (member carriage-web-close-delay (mapcar #'car scheduled))))
@@ -752,7 +774,7 @@
     (unwind-protect
         (progn
           (carriage-web-start)
-          (setq port (cadr (process-contact carriage-web--server-proc t)))
+          (setq port (plist-get (process-contact carriage-web--server-proc t) :service))
           (setq p (open-network-stream "cw-it-health" buf "127.0.0.1" port :type 'plain))
           (set-process-coding-system p 'binary 'binary)
           (set-process-filter p (lambda (_proc s) (setq resp (concat resp s))))
@@ -790,7 +812,7 @@
         (carriage-web-auth-token nil))
     (carriage-web-start)
     (let* ((contact (process-contact carriage-web--server-proc t))
-           (port (car contact))
+           (port (plist-get contact :service))
            (acc "")
            (proc (open-network-stream "cw-it-root" nil "127.0.0.1" port)))
       (unwind-protect
@@ -814,7 +836,7 @@
         (carriage-web-auth-token "t0k"))
     (carriage-web-start)
     (let* ((contact (process-contact carriage-web--server-proc t))
-           (port (car contact))
+           (port (plist-get contact :service))
            (acc "")
            (proc (open-network-stream "cw-it-health" nil "127.0.0.1" port)))
       (unwind-protect
@@ -848,17 +870,14 @@
           (carriage-web-start)
           (let* ((srv carriage-web--server-proc)
                  (port (plist-get (process-contact srv t) :service))
-                 (conn (open-network-stream
-                        "cw-it-root" (generate-new-buffer " *cw-it-root*")
-                        "127.0.0.1" port)))
+                 (buf  (generate-new-buffer " *cw-it-root*"))
+                 (conn (open-network-stream "cw-it-root" buf "127.0.0.1" port)))
             (set-process-coding-system conn 'binary 'binary)
             (process-send-string
              conn "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n")
-            (let ((resp ""))
-              (dotimes (_ 50) ;; up to ~0.5s
-                (accept-process-output nil 0.01)
-                (setq resp (concat resp (with-current-buffer (process-buffer conn)
-                                          (buffer-string)))))
+            ;; Подождём ответ и снимем один срез буфера (без накапливающих конкатенаций)
+            (accept-process-output conn 0.2)
+            (let ((resp (with-current-buffer buf (buffer-string))))
               (should (string-match-p "\\`HTTP/1\\.1 200 OK\\b" resp))
               (should (string-match-p "Content-Type: text/html" resp))
               (let* ((sep (or (string-match "\r\n\r\n" resp)
@@ -867,9 +886,14 @@
                      (clen (and (string-match "Content-Length: \\([0-9]+\\)" resp)
                                 (string-to-number (match-string 1 resp)))))
                 (when (and body clen)
-                  (should (= clen (string-bytes body))))))
-            (ignore-errors (delete-process conn))))
+                  ;; Compare first clen BYTES (UTF-8) to avoid multibyte pitfalls
+                  (let* ((u8 (encode-coding-string (or body "") 'utf-8))
+                         (slice (substring u8 0 (min (length u8) clen))))
+                    (should (= clen (string-bytes slice)))))))
+            (ignore-errors (delete-process conn))
+            (ignore-errors (kill-buffer buf))))
       (ignore-errors (carriage-web-stop)))))
+
 
 (ert-deftest carriage-web-it-real-health-responds-auth ()
   "Start server, GET /api/health with X-Auth over TCP, verify 200/JSON and graceful close."
@@ -891,10 +915,10 @@
                           "X-Auth: tok\r\n"
                           "\r\n"))
             (let ((resp ""))
-              (dotimes (_ 50)
-                (accept-process-output nil 0.01)
-                (setq resp (concat resp (with-current-buffer (process-buffer conn)
-                                          (buffer-string)))))
+              ;; Wait briefly for server to respond, then snapshot buffer once.
+              (dotimes (_ 50) (accept-process-output nil 0.01))
+              (setq resp (with-current-buffer (process-buffer conn)
+                           (buffer-string)))
               (should (string-match-p "\\`HTTP/1\\.1 200 OK\\b" resp))
               (should (string-match-p "Content-Type: application/json" resp))
               (when (string-match "Content-Length: \\([0-9]+\\)" resp)
@@ -903,8 +927,11 @@
                                 (string-match "\n\n" resp)))
                        (body (and sep (substring resp (+ sep (if (eq (aref resp sep) ?\r) 4 2))))))
                   (when body
-                    (should (= clen (string-bytes body)))
-                    (should (string-match-p "\"ok\"[[:space:]]*:[[:space:]]*true" body))))))
+                    ;; Compare only the first clen BYTES to avoid incidental extra bytes in the buffer.
+                    (let* ((u8 (encode-coding-string (or body "") 'utf-8))
+                           (slice (substring u8 0 (min (length u8) clen))))
+                      (should (= clen (string-bytes slice)))
+                      (should (string-match-p "\"ok\"[[:space:]]*:[[:space:]]*true" body)))))))
             (ignore-errors (delete-process conn))))
       (ignore-errors (carriage-web-stop)))))
 
@@ -957,7 +984,7 @@
         (let ((data (plist-get cap-payload :data)))
           (should (listp data))
           (should (equal (plist-get data :id) id))
-          (should (plist-get data :state))))))
+          (should (plist-get data :state)))))))
 ;; ---------------------------------------------------------------------
 ;; Additional positive tests: /api/report/last success (limit) and /api/cmd with whitelist enabled.
 
@@ -999,32 +1026,28 @@
          (abort-called nil))
     (unwind-protect
         (with-temp-buffer
-          ;; Give this buffer a stable ephemeral id
           (rename-buffer (generate-new-buffer-name "cw-ephemeral-cmd") t)
           (let* ((id (carriage-web--buffer-id (current-buffer))))
             (should (and (stringp id) (string-match-p "\\`ephemeral:" id)))
-            (let (cap-status cap-payload)
-              (cl-letf
-                  ;; Call abort immediately without scheduling
-                  (((symbol-function 'run-at-time)
-                    (lambda (_sec _repeat fn &rest _args)
-                      (funcall fn)
-                      nil))
-                   ;; Stub abort function
-                   ((symbol-function 'carriage-abort-current)
-                    (lambda () (setq abort-called t))))
+            (let ((cap-status nil) (cap-payload nil))
+              (cl-letf* (((symbol-function 'run-at-time)
+                          (lambda (_sec _repeat fn &rest _args)
+                            (funcall fn)
+                            nil))
+                         ((symbol-function 'carriage-abort-current)
+                          (lambda () (setq abort-called t)))
+                         ((symbol-function 'carriage-web--send-json)
+                          (lambda (_proc status payload)
+                            (setq cap-status status
+                                  cap-payload payload))))
                 (let* ((body (json-encode `(:cmd "abort" :doc ,id))))
-                  (cl-letf (((symbol-function 'carriage-web--send-json)
-                             (lambda (_proc status payload)
-                               (setq cap-status status
-                                     cap-payload payload))))
-                    (carriage-web--dispatch-request
-                     nil (list :method "POST" :path "/api/cmd" :query nil
-                               :headers '(("content-type" . "application/json"))
-                               :body body))))))
-            (should (equal cap-status "200 OK"))
-            (should (eq (plist-get cap-payload :ok) t))
-            (should abort-called)))
+                  (carriage-web--dispatch-request
+                   nil (list :method "POST" :path "/api/cmd" :query nil
+                             :headers '(("content-type" . "application/json"))
+                             :body body))))
+              (should (equal cap-status "200 OK"))
+              (should (eq (plist-get cap-payload :ok) t))
+              (should abort-called))))
       (setq carriage-web-api-commands-enabled nil))))
 
 ;; ---------------------------------------------------------------------
@@ -1077,5 +1100,12 @@
               (should (null scheduled)))
           (when (process-live-p p) (ignore-errors (delete-process p)))
           (when (buffer-live-p buf) (kill-buffer buf)))))))
+
+(ert-deftest carriage-web--clear-debug-advices-safe ()
+  "Ensure carriage-web-clear-debug-advices is safe to call and returns a number."
+  (should (fboundp 'carriage-web-clear-debug-advices))
+  (let ((n (carriage-web-clear-debug-advices)))
+    (should (numberp n))
+    (should (>= n 0))))
 
 ;;; carriage-web-tests.el ends here

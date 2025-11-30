@@ -53,6 +53,7 @@ Normative Requirements
 - REQ-ui-004: Menu item labels MUST be non-empty after i18n/label fallbacks; no postfix bracketed key hints in labels (transient shows keys before labels).
 - REQ-ui-005: Context controls MUST be rendered in a dedicated “Context” column; its header SHOULD provide help-echo guiding two-stroke usage (“press t, then letter”).
 - REQ-ui-006: UI MUST provide an explicit “Save settings” control in the modeline and a default key binding C-c e s. Saving MUST be explicit; no automatic writes are performed unless the user opts in.
+- REQ-ui-007: UI SHOULD expose web daemon (webd) supervisor controls (start/stop/restart/status/tail-log) via menu or commands; these controls MUST NOT perform network operations on the main thread.
 
 Invariants
 - Anchor: INV

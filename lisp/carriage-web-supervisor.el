@@ -2,6 +2,12 @@
 
 ;; This file provides Elisp-only supervisor commands to run the HTTP/SSE server
 ;; in a separate Emacs process ("webd") and manage its lifecycle.
+;;
+;; Specifications:
+;;   spec/web-dashboard-v1.org
+;;   spec/webd-ops-v1.org
+;;   spec/code-style-v2.org
+;;   spec/code-style-essentials-v2.org
 
 ;;; Commentary:
 ;; - Start/stop/restart/status for external Emacs process hosting carriage-web.el.
@@ -228,7 +234,10 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
           (setq carriage-web-auth-token token)
           ;; Start idle snapshot publisher to keep webd sessions cache warm
           (when (fboundp 'carriage-web-snapshot-start)
-            (ignore-errors (carriage-web-snapshot-start)))))))
+            (ignore-errors (carriage-web-snapshot-start)))
+          ;; Seed initial snapshot immediately (best-effort, fire-and-forget)
+          (when (fboundp 'carriage-web--snapshot-publish-now)
+            (ignore-errors (carriage-web--snapshot-publish-now))))))
     proc))
 
 (defun carriage-webd--signal-pid (pid sig)

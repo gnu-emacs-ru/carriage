@@ -1156,4 +1156,91 @@
       (should (equal (plist-get st :phase) "apply"))))
   (setq carriage-web-auth-token nil))
 
+;; ---------------------------------------------------------------------
+;; Supervisor/webd: auto-switch to 'push and initial snapshot publish
+
+(require 'carriage-web-supervisor)
+
+(ert-deftest carriage-web--supervisor-switch-to-push ()
+  "carriage-webd-start switches publish backend to 'push and seeds a snapshot."
+  (let ((carriage-web-publish-backend 'local)
+        (carriage-web-bind "127.0.0.1")
+        (carriage-web-port 0)
+        (carriage-web-auth-token "tok")
+        (snap-called nil)
+        (idle-start-called nil))
+    (unwind-protect
+        (cl-letf* (((symbol-function 'make-process)
+                    (lambda (&rest _args)
+                      ;; Fake child process for webd
+                      (make-pipe-process :name "cw-test-webd" :noquery t)))
+                   ((symbol-function 'carriage-webd--write-file)
+                    (lambda (&rest _args) nil))
+                   ;; Immediately report resolved port via read-file helper
+                   ((symbol-function 'carriage-webd--read-file)
+                    (lambda (_file) "44777"))
+                   ;; Health becomes OK instantly
+                   ((symbol-function 'carriage-webd--wait-health)
+                    (lambda (_port) t))
+                   ;; Do not actually perform HTTP; only record calls
+                   ((symbol-function 'carriage-web--snapshot-publish-now)
+                    (lambda () (setq snap-called t)))
+                   ((symbol-function 'carriage-web-snapshot-start)
+                    (lambda () (setq idle-start-called t))))
+          (let ((proc (carriage-webd-start)))
+            (should proc)
+            (should (eq carriage-web-publish-backend 'push))
+            (should (equal carriage-web-bind "127.0.0.1"))
+            (should (numberp carriage-web-port))
+            (should (= carriage-web-port 44777))
+            (should idle-start-called)
+            (should snap-called))))
+      ;; Cleanup: try to kill fake process if alive
+      (dolist (p (process-list))
+        (when (and (process-live-p p)
+                   (string-prefix-p "cw-test-webd" (process-name p)))
+          (ignore-errors (delete-process p)))))))
+
+;; ---------------------------------------------------------------------
+;; /api/push snapshot → sessions cache update (webd path semantics)
+
+(ert-deftest carriage-web--push-snapshot-updates-sessions ()
+  "POST /api/push with type=snapshot updates sessions cache used by /api/sessions."
+  (let* ((carriage-web-auth-token "tok")
+         (hdrs '(("content-type" . "application/json") ("x-auth" . "tok")))
+         (snap `(:type "snapshot"
+                       :data [(:id "ephemeral:x"
+                               :title "Buf"
+                               :project "-"
+                               :mode "org-mode"
+                               :intent "Ask"
+                               :suite "aibo"
+                               :engine "emacs"
+                               :branch nil
+                               :ctx (:count 1)
+                               :patches (:count 0)
+                               :state (:phase "idle" :tooltip ""))]))
+         (body (json-encode snap))
+         cap-status cap-payload)
+    ;; Precondition: empty or non-matching cache
+    (setq carriage-web--sessions-cache nil)
+    ;; Push snapshot
+    (cl-letf (((symbol-function 'carriage-web--send-json)
+               (lambda (_proc status payload)
+                 (setq cap-status status cap-payload payload))))
+      (carriage-web--dispatch-request
+       nil (list :method "POST" :path "/api/push" :query nil
+                 :headers hdrs :body body)))
+    (should (equal cap-status "200 OK"))
+    (should (eq (plist-get cap-payload :ok) t))
+    ;; Cache must now contain exactly one session with the pushed id
+    (should (listp carriage-web--sessions-cache))
+    (should (= (length carriage-web--sessions-cache) 1))
+    (let* ((it (carriage-web--sessions-cache 0)))
+      (should (or (and (plistp it) (equal (plist-get it :id) "ephemeral:x"))
+                  ;; In some Emacs versions json-read may decode to alist
+                  (and (listp it) (equal (alist-get :id it) "ephemeral:x")))))
+    ;; Cleanup
+    (setq carriage-web-auth-token nil)))
+
 ;;; carriage-web-tests.el ends here

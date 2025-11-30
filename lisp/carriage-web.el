@@ -2,6 +2,13 @@
 
 ;; Stable, test-oriented HTTP/SSE server used by Carriage’s dashboard.
 ;; Focus: pass unit/integration tests in test/carriage-web-tests.el.
+;;
+;; Specifications:
+;;   spec/web-dashboard-v1.org
+;;   spec/webd-ops-v1.org
+;;   spec/ui-v2.org
+;;   spec/code-style-v2.org
+;;   spec/code-style-essentials-v2.org
 
 (require 'cl-lib)
 (require 'json)
@@ -45,6 +52,11 @@ Default is nil to keep test suite expectations (WEB_E_CMD for most ops)."
 
 (defcustom carriage-web-sse-idle-timeout 180
   "Idle timeout (seconds) for SSE clients; idle ones are pruned."
+  :type 'integer :group 'carriage-web)
+
+(defcustom carriage-web-max-sse-clients 16
+  "Maximum number of concurrent SSE clients.
+When the limit is reached, new /stream handshakes are rejected with 503."
   :type 'integer :group 'carriage-web)
 
 ;; State
@@ -392,7 +404,7 @@ Return an alist of (downcased-name . value)."
    " $('#tgProfile').onclick=()=>cmd('toggle',{key:'profile'}).catch(()=>{});"
    " const saved = (function(){ try{return localStorage.getItem('cw_token')||'';}catch(e){return '';} })();"
    " S.token = saved; $('#tok').value = saved; }"
-   "function init(){ bind(); refreshList(); connect(); setInterval(refreshList, 5000); }"
+   "function init(){ bind(); refreshList(); connect(); setInterval(refreshList, 10000); }"
    "document.addEventListener('DOMContentLoaded', init);"
    "})();</script>"
    "</body></html>"))
@@ -876,12 +888,22 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
           (carriage-web--send-json proc "401 Unauthorized"
                                    (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))
           t)
-      (carriage-web--send-sse-headers proc)
-      (let ((cli (list :proc proc :last-ts (float-time) :filter (assoc-default "doc" q))))
-        (push cli carriage-web--clients)
-        (setq carriage-web--metrics-clients (length carriage-web--clients)))
-      (carriage-web--sse-send proc "hello" (list :type "hello" :ts (float-time)))
-      t)))
+      ;; Enforce SSE client cap before accepting a new client
+      (let ((n (length carriage-web--clients)))
+        (if (and (integerp carriage-web-max-sse-clients)
+                 (>= n carriage-web-max-sse-clients))
+            (progn
+              (carriage-web--send-json proc "503 Service Unavailable"
+                                       (list :ok json-false
+                                             :error "too many clients" :code "WEB_E_CAP"))
+              (carriage-web--graceful-close proc)
+              t)
+          (carriage-web--send-sse-headers proc)
+          (let ((cli (list :proc proc :last-ts (float-time) :filter (assoc-default "doc" q))))
+            (push cli carriage-web--clients)
+            (setq carriage-web--metrics-clients (length carriage-web--clients)))
+          (carriage-web--sse-send proc "hello" (list :type "hello" :ts (float-time)))
+          t)))))
 
 ;; Internal push handler (for webd mode and external publishers)
 (defun carriage-web--handle-push (proc req)
@@ -925,6 +947,15 @@ REQ is a plist with :headers, :query and :body (JSON)."
                ;; Optionally notify SSE clients about new snapshot
                (carriage-web-pub "snapshot" (list :ts (float-time))))
              (carriage-web--send-json proc "200 OK" (list :ok t))))
+          ;; Transport: {:type "transport", :doc "...", :phase "...", :meta {...}}
+          ("transport"
+           (let ((ph (plist-get obj :phase))
+                 (meta (plist-get obj :meta)))
+             (when (stringp doc)
+               (carriage-web-pub "transport"
+                                 (append (list :doc doc :phase ph)
+                                         (and (listp meta) (list :meta meta))))))
+           (carriage-web--send-json proc "200 OK" (list :ok t)))
           ;; Generic passthrough
           (_
            (carriage-web-pub (or typ "message") (or obj (list)))
@@ -945,7 +976,7 @@ REQ is a plist with :headers, :query and :body (JSON)."
     (if (carriage-web--auth-ok headers query nil)
         (carriage-web--handle-health proc nil)
       (carriage-web--send-json proc "401 Unauthorized"
-                               (list :ok json-false :error "auth required" :code "WEB_E_PUSH_AUTH"))))
+                               (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))))
 
    ((and (string= method "GET") (string= path "/api/sessions"))
     (if (carriage-web--auth-ok headers query nil)
@@ -976,7 +1007,7 @@ REQ is a plist with :headers, :query and :body (JSON)."
     (if (carriage-web--auth-ok headers query nil)
         (carriage-web--handle-push proc (list :query query :headers headers :body body))
       (carriage-web--send-json proc "401 Unauthorized"
-                               (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))))
+                               (list :ok json-false :error "auth required" :code "WEB_E_PUSH_AUTH"))))
 
    ((and (string= method "POST") (string= path "/api/cmd"))
     (if (carriage-web--auth-ok headers query nil)
@@ -1099,7 +1130,7 @@ REQ is a plist with :headers, :query and :body (JSON)."
   "Start server if not already running; return process.
 In main Emacs this is disabled; use `carriage-webd-start'."
   (interactive)
-  (unless carriage-web-daemon-p
+  (unless (or carriage-web-daemon-p carriage-web-enabled)
     (user-error "carriage-web: in-process HTTP/SSE is disabled; use `carriage-webd-start'"))
   (if (and carriage-web--server-proc (process-live-p carriage-web--server-proc))
       (progn

@@ -1,0 +1,54 @@
+#+title: Carriage Web Daemon (webd) Operations v1
+
+Status: draft
+Owner: Carriage
+
+1. Purpose
+- Define operational model and supervisor commands for running the Carriage web server as a separate Emacs process (webd).
+- Elisp-only solution: the main Emacs does not host HTTP/SSE; webd does.
+
+2. Operational invariants
+- HTTP/SSE server runs exclusively in a separate Emacs process (webd).
+- All HTTP handlers respond from caches (O(1)); no heavy scans in request filters.
+- State flows from the main Emacs to webd via a private push API (loopback + token).
+
+3. Supervisor commands (Elisp, main Emacs)
+- carriage-webd-start: spawn child Emacs with:
+  - -Q --quick, -L lisp, -l carriage-webd.el, --eval '(carriage-webd-main)'
+  - env: BIND, PORT (0=ephemeral), TOKEN, RUNTIME_DIR
+  - writes PID and (upon server ready) PORT files into RUNTIME_DIR
+- carriage-webd-stop: stop process if live; cleanup PID/PORT files
+- carriage-webd-restart: stop → start
+- carriage-webd-status: report pid/live/port; health probe GET /api/health with short timeout
+- carriage-webd-tail-log: show live stdout/stderr buffers
+- carriage-webd-kill-stale: remove stale PID/PORT on crashed daemons
+
+4. Runtime files (in XDG_RUNTIME_DIR or /tmp)
+- carriage-webd.pid: OS PID of the child Emacs
+- carriage-webd.port: current listening port for HTTP
+- carriage-webd.token: shared secret for /api/push
+
+5. Private push API (served by webd)
+- POST /api/push (loopback only, requires X-Auth: <token>)
+  - body: JSON {"type":"ui|apply|report|transport|snapshot", "payload":{...}}
+  - errors:
+    - 401 WEB_E_PUSH_AUTH when missing/invalid token
+    - 400 WEB_E_PAYLOAD for malformed/oversized payload
+
+6. Health and metrics
+- GET /api/health: 200 OK when server accepts requests
+- GET /api/metrics: JSON counters for published/truncated/clients etc.
+
+7. Testing and conformance
+- Integration tests MUST run against webd (external Emacs process).
+- Unit tests for HTTP parsing/JSON truncation remain pure Elisp without sockets.
+- Push → cache → SSE fan-out MUST be covered by tests.
+
+8. Migration notes
+- In-process HTTP/SSE in the main Emacs is forbidden.
+- Main Emacs publishes events and snapshots via /api/push only.
+- Web dashboard polling frequency can be reduced; SSE events provide freshness.
+
+9. Security
+- /api/push requires loopback bind and a strong token (not logged).
+- Enforce Content-Length limits; reject oversized bodies with 413/400.

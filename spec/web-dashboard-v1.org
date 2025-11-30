@@ -53,6 +53,8 @@ Scope
   (apply/abort/toggles/report-open), minimal static HTML/JS page.
 - Out of scope: multi-user auth and ACL, remote exposure beyond loopback, heavy SPA/graphing
   (may be added via optional Guile proxy).
+- Note: in-process HTTP/SSE in the main Emacs is forbidden; the server runs exclusively as a separate
+  Emacs web daemon (webd). All browser/API traffic terminates at webd.
 
 Terms
 - Anchor: TERMS
@@ -82,6 +84,8 @@ Normative Requirements
   real-time stream, and command endpoint.
 - REQ-web-009: The server MUST tolerate reconnects (SSE idempotency) and close stale/inactive clients.
 - REQ-web-010: When an optional X-Auth token is configured, all API and stream requests MUST validate it.
+- REQ-web-011: The HTTP/SSE server MUST run in a separate Emacs process; the main Emacs MUST NOT serve HTTP/SSE connections.
+- REQ-web-012: HTTP/SSE handlers MUST answer from cached state; heavy snapshot building MUST NOT run in process filters; it SHALL be performed by idle timers or via push updates.
 
 Invariants
 - Anchor: INV
@@ -154,11 +158,21 @@ Interfaces/Contracts
       * "wip"
       * "toggle" with {"key":"ctx|files|visible|patched|profile"}
     - 200: {"ok":true} or 400/500 with error envelope
+  - POST /api/push (internal; loopback+token only)
+    - Input: {"type":"ui|apply|report|snapshot|transport","doc":"<id>","state|summary|data":{...}}
+    - 200: {"ok":true} or 400 with {"ok":false,"code":"WEB_E_PAYLOAD"} or 401 {"ok":false,"code":"WEB_E_PUSH_AUTH"}
+    - Effect: update daemon-side caches and fan-out SSE to matching clients
   - GET /stream[?doc=<id>]
     - SSE events:
       * event: ui|apply|report|transport|heartbeat
       * id: <seq>
       * data: <JSON payload per SCHEMA>
+- Elisp supervisor commands (webd):
+  - carriage-webd-start — start external web daemon (another Emacs) with current settings.
+  - carriage-webd-stop — stop the running daemon process.
+  - carriage-webd-restart — restart daemon (stop → start).
+  - carriage-webd-status — show plist with :alive/:pid/:command/:bind/:port.
+  - carriage-webd-tail-log — open daemon log buffer for live debugging.
 - Security headers (SHOULD):
   - X-Frame-Options: DENY
   - X-Content-Type-Options: nosniff
@@ -190,6 +204,7 @@ Errors and Diagnostics
 - Stability: stable
 - Pack-Priority: P2
 - WEB_E_AUTH — invalid or missing X-Auth token (severity=error).
+- WEB_E_PUSH_AUTH — invalid or missing X-Auth token for /api/push (severity=error).
 - WEB_E_CMD — unknown or disallowed command (severity=error).
 - WEB_E_PAYLOAD — malformed payload (severity=error).
 - WEB_E_NOT_FOUND — requested session/report not found (severity=error).
@@ -217,6 +232,7 @@ Performance and Asynchrony
 - SSE SHOULD be used by default for simplicity; WebSocket MAY be added.
 - Debounce and batch small updates; coalesce bursts; enforce client caps.
 - Record minimal observability: elapsed-ms for heavy operations when available.
+- In ‘webd’ mode all HTTP/SSE handlers MUST answer from cached state (O(1)); building snapshots over buffer lists MUST be performed by idle workers or via /api/push updates, never in process filters.
 
 UI/UX
 - Anchor: UI
@@ -266,13 +282,17 @@ Testing and Conformance
   - CHK-web-003: Commands validated against whitelist; unknown→WEB_E_CMD.
   - CHK-web-004: Token (when set) enforced on all endpoints; invalid→WEB_E_AUTH.
   - CHK-web-005: Payloads truncated to max-json-bytes; WEB_W_TRUNCATED may be signaled/logged.
+  - CHK-web-006: /api/push accepts valid payloads with token and updates caches; invalid token → WEB_E_PUSH_AUTH.
 - Test Matrix:
+  - Integration tests are run against the external web daemon (webd) only; in-process HTTP/SSE
+    paths are forbidden and not covered by integration scenarios.
   - TST-web-001: GET /api/health returns ok with version/engine.
   - TST-web-002: GET /api/sessions returns list; fields populated.
   - TST-web-003: GET /api/session/<id> augments last report summary.
   - TST-web-004: POST /api/cmd apply_last_iteration executes and returns ok.
   - TST-web-005: POST /api/cmd unknown → 400 with WEB_E_CMD.
   - TST-web-006: GET /stream emits ui/apply/report/transport events on state changes.
+  - TST-web-007: POST /api/push with valid token updates daemon caches and fans out SSE; with invalid token → 401 WEB_E_PUSH_AUTH.
 
 Cross-References and Anchors
 - Anchor: XREF
@@ -284,7 +304,8 @@ Cross-References and Anchors
   - spec/observability-v2.org
   - spec/logging-v2.org
 - Code:
-  - lisp/carriage-web.el (new module; HTTP/SSE server, pub/sub bus, API)
+  - lisp/carriage-web.el (HTTP/SSE server, pub/sub bus, API)
+  - lisp/carriage-webd.el (supervisor for external Emacs web daemon)
   - lisp/carriage-apply.el (hooks)
   - lisp/carriage-report.el (hooks)
   - lisp/transports/carriage-transport.el (hooks)

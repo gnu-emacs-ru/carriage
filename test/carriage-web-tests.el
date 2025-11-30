@@ -22,6 +22,14 @@
 (require 'ert)
 (require 'carriage-web)
 
+;; Helper macro: allow in-process server only inside tests by locally
+;; setting `carriage-web-daemon-p' so that carriage-web-start does not
+;; error. This keeps tests compatible after moving HTTP/SSE to webd.
+(defmacro cw-with-inprocess-server (&rest body)
+  "Evaluate BODY with in-process web server allowed for tests."
+  `(let ((carriage-web-daemon-p t))
+     ,@body))
+
 (ert-deftest carriage-web--parse-start-line-basic ()
   "Parse a simple HTTP start line with query."
   (let* ((triple (carriage-web--parse-start-line "GET /api/health?x=1&y=foo HTTP/1.1"))
@@ -529,7 +537,7 @@
          (server-started nil))
     (unwind-protect
         (progn
-          (setq server-started (carriage-web-start))
+          (setq server-started (cw-with-inprocess-server (carriage-web-start)))
           (should server-started)
           (should (process-live-p carriage-web--server-proc))
           (let* ((svc (or (ignore-errors (process-contact carriage-web--server-proc :service))
@@ -709,7 +717,7 @@
          (p nil))
     (unwind-protect
         (progn
-          (carriage-web-start)
+          (cw-with-inprocess-server (carriage-web-start))
           (setq port (plist-get (process-contact carriage-web--server-proc t) :service))
           (setq p (open-network-stream "cw-it-health" buf "127.0.0.1" port :type 'plain))
           (set-process-coding-system p 'binary 'binary)
@@ -1107,5 +1115,45 @@
   (let ((n (carriage-web-clear-debug-advices)))
     (should (numberp n))
     (should (>= n 0))))
+
+;; ---------------------------------------------------------------------
+;; /api/push unit tests (auth + payload)
+
+(ert-deftest carriage-web--push-unauthorized ()
+  "POST /api/push without X-Auth must return 401 WEB_E_PUSH_AUTH."
+  (let* ((carriage-web-auth-token "tok")
+         cap-status cap-payload
+         (body (json-encode '(:type "ui" :doc "ephemeral:x" :state (:phase "idle")))))
+    (cl-letf (((symbol-function 'carriage-web--send-json)
+               (lambda (_proc status payload)
+                 (setq cap-status status cap-payload payload))))
+      (carriage-web--dispatch-request
+       nil (list :method "POST" :path "/api/push" :query nil
+                 :headers '(("content-type" . "application/json"))
+                 :body body)))
+    (should (equal cap-status "401 Unauthorized"))
+    (should (eq (plist-get cap-payload :ok) json-false))
+    (should (equal (plist-get cap-payload :code) "WEB_E_PUSH_AUTH")))
+  (setq carriage-web-auth-token nil))
+
+(ert-deftest carriage-web--push-ui-updates-cache ()
+  "POST /api/push with type=ui updates daemon-side UI cache."
+  (let* ((carriage-web-auth-token "tok")
+         (hdrs '(("content-type" . "application/json") ("x-auth" . "tok")))
+         (doc "ephemeral:doc-1")
+         (body (json-encode `(:type "ui" :doc ,doc :state (:phase "apply" :tooltip "x"))))
+         cap-status cap-payload)
+    (puthash doc nil carriage-web--ui-by-doc)
+    (cl-letf (((symbol-function 'carriage-web--send-json)
+               (lambda (_proc status payload)
+                 (setq cap-status status cap-payload payload))))
+      (carriage-web--dispatch-request
+       nil (list :method "POST" :path "/api/push" :query nil :headers hdrs :body body)))
+    (should (equal cap-status "200 OK"))
+    (should (eq (plist-get cap-payload :ok) t))
+    (let ((st (gethash doc carriage-web--ui-by-doc)))
+      (should (listp st))
+      (should (equal (plist-get st :phase) "apply"))))
+  (setq carriage-web-auth-token nil))
 
 ;;; carriage-web-tests.el ends here

@@ -162,6 +162,15 @@ Interfaces/Contracts
     - Input: {"type":"ui|apply|report|snapshot|transport","doc":"<id>","state|summary|data":{...}}
     - 200: {"ok":true} or 400 with {"ok":false,"code":"WEB_E_PAYLOAD"} or 401 {"ok":false,"code":"WEB_E_PUSH_AUTH"}
     - Effect: update daemon-side caches and fan-out SSE to matching clients
+  - GET /api/metrics
+    - 200: {"ok":true,"data":{
+            "published": int,          ; SSE deliveries (best-effort)
+            "truncated": int,          ; JSON truncations due to size limits
+            "clients": int,            ; current SSE clients
+            "sessions_count": int,     ; entries in sessions cache
+            "sessions_age_ms": number|null, ; age of sessions cache in ms (null when unknown)
+            "ts": number               ; server timestamp (unix, float)
+          }}
   - GET /stream[?doc=<id>]
     - SSE events:
       * event: ui|apply|report|transport|heartbeat

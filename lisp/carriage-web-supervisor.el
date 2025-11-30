@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'url)
+(require 'browse-url)
 
 (defgroup carriage-webd nil
   "Supervisor for Carriage web daemon."
@@ -216,7 +217,7 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
     ;; Wait for health quickly (best effort).
     (let* ((resolved-port
             (or (and (numberp port) (> port 0) port)
-                (let ((tries 15) (pval nil))
+                (let ((tries 30) (pval nil))
                   (while (and (not pval) (> tries 0))
                     (setq pval (string-to-number (or (carriage-webd--read-file (carriage-webd--port-file)) "0")))
                     (unless (> pval 0) (setq tries (1- tries)) (sleep-for 0.1)))
@@ -287,13 +288,14 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
   (interactive)
   (let* ((pid (carriage-webd--read-pid))
          (alive (and pid (carriage-webd--alive-pid-p pid)))
+         (bind carriage-webd-default-bind)
          (port (let ((s (carriage-webd--read-file (carriage-webd--port-file))))
                  (and s (string-match-p "^[0-9]+$" s) (string-to-number s))))
          (health (and port (carriage-webd--probe-health port))))
-    (message "webd status: pid=%s alive=%s port=%s health=%s runtime=%s"
-             (or pid 'nil) (if alive 't 'nil) (or port 'nil) (if health 't 'nil)
+    (message "webd status: pid=%s alive=%s bind=%s port=%s health=%s runtime=%s"
+             (or pid 'nil) (if alive 't 'nil) bind (or port 'nil) (if health 't 'nil)
              (carriage-webd--runtime-dir))
-    (list :pid pid :alive alive :port port :health health :runtime (carriage-webd--runtime-dir))))
+    (list :pid pid :alive alive :bind bind :port port :health health :runtime (carriage-webd--runtime-dir))))
 
 ;;;###autoload
 (defun carriage-webd-tail-log ()
@@ -307,18 +309,63 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
 
 ;;;###autoload
 (defun carriage-webd-kill-stale ()
-  "Clean up stale webd PID files and try to kill leftover processes."
+  "Clean up stale webd PID/PORT files and try to kill leftover processes."
   (interactive)
   (let* ((pid (carriage-webd--read-pid))
-         (alive (and pid (carriage-webd--alive-pid-p pid))))
+         (alive (and pid (carriage-webd--alive-pid-p pid)))
+         (pidf (carriage-webd--pid-file))
+         (portf (carriage-webd--port-file)))
+    ;; If PID is not alive, remove pidfile.
     (unless alive
-      (ignore-errors (delete-file (carriage-webd--pid-file))))
+      (when (file-readable-p pidf)
+        (ignore-errors (delete-file pidf))
+        (message "webd: cleaned stale pidfile")))
     (when (and pid (not alive))
       (message "webd: PID %d not alive, cleaned pidfile" pid))
-    (when (file-readable-p (carriage-webd--port-file))
-      (ignore-errors (delete-file (carriage-webd--port-file))))
-    (message "webd: stale cleanup done"))
+    ;; Remove stale port file as well.
+    (when (file-readable-p portf)
+      (ignore-errors (delete-file portf))
+      (message "webd: cleaned stale portfile"))
+    (message "webd: stale cleanup done")))
 
+
+;;;###autoload
+(defun carriage-webd-open-dashboard ()
+  "Open the web daemon (webd) dashboard root page in the default browser.
+Uses the last known bind/port from runtime files when available."
+  (interactive)
+  (let* ((bind (or carriage-webd-default-bind "127.0.0.1"))
+         (port (or (let ((s (carriage-webd--read-file (carriage-webd--port-file))))
+                     (and s (string-match-p "^[0-9]+$" s)
+                          (string-to-number s)))
+                   carriage-webd-default-port
+                   8787))
+         (url (format "http://%s:%s/" bind port)))
+    (browse-url url)))
+
+;; Autostart (optional)
+(defcustom carriage-webd-autostart nil
+  "When non-nil, attempt to start the web daemon (webd) automatically after Emacs startup.
+Runs only in interactive sessions and skips when a webd process is already alive."
+  :type 'boolean
+  :group 'carriage-webd)
+
+(defcustom carriage-webd-autostart-delay 1.0
+  "Delay in seconds before attempting webd autostart."
+  :type 'number
+  :group 'carriage-webd)
+
+(defun carriage-webd--maybe-autostart ()
+  "Autostart webd when `carriage-webd-autostart' is non-nil."
+  (when (and (not noninteractive)
+             carriage-webd-autostart
+             (not (carriage-webd--live-proc)))
+    (run-at-time (or carriage-webd-autostart-delay 1.0) nil
+                 (lambda ()
+                   (ignore-errors
+                     (carriage-webd-start))))))
+
+(add-hook 'emacs-startup-hook #'carriage-webd--maybe-autostart)
 
 (provide 'carriage-web-supervisor)
 

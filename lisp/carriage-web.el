@@ -50,6 +50,11 @@ Default is nil to keep test suite expectations (WEB_E_CMD for most ops)."
   "Cap for JSON responses; payloads are truncated beyond this limit."
   :type 'integer :group 'carriage-web)
 
+(defcustom carriage-web-max-request-bytes 131072
+  "Maximum allowed size (in bytes) for JSON request bodies (e.g., /api/push).
+Oversized payloads are rejected with a client error to prevent UI stalls."
+  :type 'integer :group 'carriage-web)
+
 (defcustom carriage-web-sse-idle-timeout 180
   "Idle timeout (seconds) for SSE clients; idle ones are pruned."
   :type 'integer :group 'carriage-web)
@@ -75,6 +80,8 @@ no buffer-list scans or heavy work are allowed in handlers.")
   "Total number of JSON truncations due to carriage-web-max-json-bytes.")
 (defvar carriage-web--metrics-clients 0
   "Current number of connected SSE clients (best-effort).")
+(defvar carriage-web--metrics-rejected-cap 0
+  "Total number of SSE handshake rejections due to client cap.")
 
 ;; UI/report state cache (for push mode and faster lookups)
 (defvar carriage-web--ui-by-doc (make-hash-table :test 'equal)
@@ -340,6 +347,10 @@ Return an alist of (downcased-name . value)."
    "<div style='font-weight:600;margin-bottom:.4rem'>Last report summary</div>"
    "<div id='repSummary' class='muted'>—</div>"
    "</div>"
+   "<div class='card'>"
+   "<div style='font-weight:600;margin-bottom:.4rem'>Metrics</div>"
+   "<div>Pub: <span id='mPublished'>0</span> · Trunc: <span id='mTruncated'>0</span> · Clients: <span id='mClients'>0</span> · Rejected: <span id='mRejected'>0</span> · Sessions: <span id='mSessions'>0</span></div>"
+   "</div>"
    "<div style='margin-top:.6rem' class='muted'>"
    "Tip: save token to use auth‑gated APIs; SSE accepts ?token= as well."
    "</div>"
@@ -370,7 +381,7 @@ Return an alist of (downcased-name . value)."
    " updateState(x.state||{});"
    " const ap = (x.apply&&x.apply.last)||null;"
    " $('#repSummary').textContent = ap?('ok:'+ (ap.ok||0)+' fail:'+(ap.fail||0)+' skipped:'+(ap.skipped||0)+' total:'+(ap.total||0)):'—'; }"
-   "function refreshList(){ api('/api/sessions').then(json).then(o=>{ if(o&&o.ok) renderList(o.data||[]); }).catch(()=>{}); }"
+   "function refreshList(){ api('/api/sessions').then(json).then(o=>{ if(o&&o.ok) renderList(o.data||[]); }).catch(()=>{}); api('/api/metrics').then(json).then(o=>{ if(o&&o.ok){ const d=o.data||{}; $('#mPublished').textContent = d.published||0; $('#mTruncated').textContent = d.truncated||0; $('#mClients').textContent = d.clients||0; $('#mRejected').textContent = d.rejected_by_cap||0; $('#mSessions').textContent = d.sessions_count||0; }}).catch(()=>{}); }"
    "function loadSession(doc){ api('/api/session/'+encodeURIComponent(doc)).then(json).then(o=>{ if(o&&o.ok) updateSessionCard(o.data); }).catch(()=>{}); }"
    "function connect(){ try{ if(S.es){ try{S.es.close();}catch(e){} S.es=null; }"
    " const params = []; if (S.doc) params.push('doc='+encodeURIComponent(S.doc)); if (S.token) params.push('token='+encodeURIComponent(S.token));"
@@ -382,8 +393,9 @@ Return an alist of (downcased-name . value)."
    "   if(tp==='ui' && S.doc===doc){ updateState(d.state||{}); }"
    "   if((tp==='apply'||tp==='report') && S.doc===doc){ const ap=d.summary||null; if(ap){"
    "       $('#repSummary').textContent = 'ok:'+(ap.ok||0)+' fail:'+(ap.fail||0)+' skipped:'+(ap.skipped||0)+' total:'+(ap.total||0); } }"
+   "   if(tp==='snapshot'){ try{ refreshList(); }catch(_e){} }"
    " }catch(e){} }"
-   " ;['hello','ui','apply','report','transport','heartbeat','message'].forEach(t=>es.addEventListener(t,onAny));"
+   " ;['hello','ui','apply','report','transport','heartbeat','snapshot','message'].forEach(t=>es.addEventListener(t,onAny));"
    " } catch(e){ setStatus('error'); } }"
    "function cmd(name, payload){ if(!S.doc && (!payload||!payload.doc)) return;"
    " const body = Object.assign({cmd:name, doc:S.doc}, payload||{});"
@@ -436,7 +448,8 @@ Return an alist of (downcased-name . value)."
         (setf (plist-get cli :last-ts) now)
         (when (process-live-p proc)
           (carriage-web--sse-send proc "heartbeat"
-                                  (list :type "heartbeat" :ts now)))))))
+                                  (list :type "heartbeat" :ts now))
+          (cl-incf carriage-web--metrics-published))))))
 
 ;; Event bus (debounced) and lightweight last-report cache
 
@@ -701,11 +714,19 @@ Adds :type TYPE to payload and debounces delivery."
 
 (defun carriage-web--handle-metrics (proc _req)
   "Return lightweight counters for observability."
-  (let ((published (or carriage-web--metrics-published 0))
-        (truncated (or carriage-web--metrics-truncated 0))
-        (clients   (condition-case _e
-                       (length carriage-web--clients)
-                     (error 0))))
+  (let* ((published (or carriage-web--metrics-published 0))
+         (truncated (or carriage-web--metrics-truncated 0))
+         (clients   (condition-case _e
+                        (length carriage-web--clients)
+                      (error 0)))
+         (rejected (or carriage-web--metrics-rejected-cap 0))
+         (now (float-time))
+         (cache-age-ms (when (and (numberp carriage-web--sessions-cache-time)
+                                  (> carriage-web--sessions-cache-time 0))
+                         (max 0.0 (* 1000.0 (- now carriage-web--sessions-cache-time)))))
+         (sessions-count (condition-case _e
+                             (length (or carriage-web--sessions-cache '()))
+                           (error 0))))
     (carriage-web--send-json
      proc "200 OK"
      (list :ok t
@@ -713,7 +734,10 @@ Adds :type TYPE to payload and debounces delivery."
                   :published published
                   :truncated truncated
                   :clients clients
-                  :ts (float-time))))))
+                  :rejected_by_cap rejected
+                  :sessions_count sessions-count
+                  :sessions_age_ms cache-age-ms
+                  :ts now)))))
 
 (defun carriage-web--handle-sessions (proc _req)
   "Return sessions snapshot from cache.
@@ -747,11 +771,44 @@ legacy in-process mode a small TTL cache MAY be refreshed by scanning."
   (let* ((path (plist-get req :path))
          (id (substring path (length "/api/session/")))
          (buf (carriage-web--find-buffer-by-doc id)))
-    (if (not (buffer-live-p buf))
-        (carriage-web--send-json proc "404 Not Found"
-                                 (list :ok json-false :error "not found" :code "WEB_E_NOT_FOUND"))
+    (cond
+     ((buffer-live-p buf)
       (let ((payload (carriage-web--buffer-session-detail buf)))
-        (carriage-web--send-json proc "200 OK" (list :ok t :data payload))))))
+        (carriage-web--send-json proc "200 OK" (list :ok t :data payload))))
+     ;; In daemon mode we cannot access main-Emacs buffers; answer from cache.
+     (carriage-web-daemon-p
+      (let* ((snap (cl-find-if
+                    (lambda (it)
+                      (cond
+                       ;; plist case (from json-read with json-object-type 'plist)
+                       ((and (listp it) (plist-get it :id))
+                        (string= (plist-get it :id) id))
+                       ;; alist case (keywords as keys)
+                       ((and (listp it) (consp (car it)))
+                        (let ((kid (alist-get :id it)))
+                          (and (stringp kid) (string= kid id))))
+                       (t nil)))
+                    carriage-web--sessions-cache))
+             ;; Normalize to plist for response
+             (snap-plist (cond
+                          ((and (listp snap) (plist-get snap :id)) snap)
+                          ((and (listp snap) (consp (car snap)))
+                           (let (acc)
+                             (dolist (kv snap acc)
+                               (setq acc (plist-put acc (car kv) (cdr kv))))))
+                          (t nil)))
+             (sum (and (hash-table-p carriage-web--last-report-by-doc)
+                       (gethash id carriage-web--last-report-by-doc))))
+        (if (not snap-plist)
+            (carriage-web--send-json proc "404 Not Found"
+                                     (list :ok json-false :error "not found" :code "WEB_E_NOT_FOUND"))
+          (let ((payload (copy-sequence snap-plist)))
+            (when sum
+              (setq payload (plist-put payload :apply (list :last sum))))
+            (carriage-web--send-json proc "200 OK" (list :ok t :data payload))))))
+     (t
+      (carriage-web--send-json proc "404 Not Found"
+                               (list :ok json-false :error "not found" :code "WEB_E_NOT_FOUND"))))))
 
 (defun carriage-web--handle-report-last (proc req)
   "Return last report summary/items for ?doc= with optional ?limit=N."
@@ -893,6 +950,7 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
         (if (and (integerp carriage-web-max-sse-clients)
                  (>= n carriage-web-max-sse-clients))
             (progn
+              (cl-incf carriage-web--metrics-rejected-cap)
               (carriage-web--send-json proc "503 Service Unavailable"
                                        (list :ok json-false
                                              :error "too many clients" :code "WEB_E_CAP"))
@@ -910,12 +968,36 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
   "Handle POST /api/push from a trusted publisher (loopback + token).
 REQ is a plist with :headers, :query and :body (JSON)."
   (let* ((body (or (plist-get req :body) ""))
+         (hdrs (plist-get req :headers))
+         (ctype (and (listp hdrs) (assoc-default "content-type" hdrs)))
+         ;; Enforce request size limits to avoid blocking the UI with large payloads.
+         ;; Status chosen as 400 with WEB_E_PAYLOAD to keep tests simple; 413 is also acceptable per spec.
+         (_size-ok (if (and (integerp carriage-web-max-request-bytes)
+                            (> (string-bytes body) carriage-web-max-request-bytes))
+                       (progn
+                         (carriage-web--send-json proc "400 Bad Request"
+                                                  (list :ok json-false
+                                                        :error "payload too large"
+                                                        :code "WEB_E_PAYLOAD"))
+                         ;; Early return by short-circuiting the function body.
+                         (cl-return-from carriage-web--handle-push t))
+                     t))
+         ;; Content-Type must be application/json
+         (_ct-ok (if (and (stringp ctype)
+                          (string-match-p "\\`application/json\\b" (downcase ctype)))
+                     t
+                   (progn
+                     (carriage-web--send-json proc "400 Bad Request"
+                                              (list :ok json-false
+                                                    :error "bad content-type"
+                                                    :code "WEB_E_PAYLOAD"))
+                     (cl-return-from carriage-web--handle-push t))))
          (obj (condition-case _e
                   (let ((json-object-type 'plist)
                         (json-array-type 'list)
-                        (json-false :false)))
-                    (json-read-from-string body))
-                (error nil)))
+                        (json-false :false))
+                    (json-read-from-string body)))
+              (error nil)))
     (if (not (and (listp obj)
                   (plist-get obj :type)))
         (carriage-web--send-json proc "400 Bad Request"
@@ -960,6 +1042,8 @@ REQ is a plist with :headers, :query and :body (JSON)."
           (_
            (carriage-web-pub (or typ "message") (or obj (list)))
            (carriage-web--send-json proc "200 OK" (list :ok t))))))))
+
+
 
 ;; Dispatcher
 
@@ -1254,6 +1338,11 @@ ON-DONE is an optional callback invoked with (status buffer) when request comple
          (url (format "http://%s:%s%s" bind port path))
          (json (json-encode payload))
          (url-request-method "POST")
+         ;; Keep requests lean and non-blocking; never show minibuffer progress.
+         (url-show-status nil)
+         (url-automatic-caching nil)
+         ;; Short timeout to avoid UI stalls if webd is down.
+         (url-request-timeout 0.7)
          (url-request-extra-headers
           (append
            `(("Content-Type" . "application/json; charset=utf-8"))
@@ -1263,15 +1352,16 @@ ON-DONE is an optional callback invoked with (status buffer) when request comple
     (condition-case _e
         (url-retrieve
          url
-         (lambda (buf)
-           (unwind-protect
-               (when (functionp on-done)
-                 (with-current-buffer buf
-                   (goto-char (point-min))
-                   (let ((ok (and (re-search-forward "^HTTP/1\\.[01] \\([0-9]+\\)" nil t)
-                                  (string-to-number (match-string 1)))))
-                     (funcall on-done ok buf))))
-             (when (buffer-live-p buf) (kill-buffer buf))))
+         (lambda (status)
+           (let ((buf (current-buffer)))
+             (unwind-protect
+                 (when (functionp on-done)
+                   (with-current-buffer buf
+                     (goto-char (point-min))
+                     (let ((ok (and (re-search-forward "^HTTP/1\\.[01] \\([0-9]+\\)" nil t)
+                                    (string-to-number (match-string 1)))))
+                       (funcall on-done ok buf))))
+               (when (buffer-live-p buf) (kill-buffer buf)))))
          nil t)
       (error nil))))
 

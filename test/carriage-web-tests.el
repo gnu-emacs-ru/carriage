@@ -1077,7 +1077,12 @@
       (should (numberp (plist-get data :published)))
       (should (numberp (plist-get data :truncated)))
       (should (numberp (plist-get data :clients)))
-      (should (numberp (plist-get data :ts))))))
+      (should (numberp (plist-get data :ts)))
+      (should (numberp (plist-get data :sessions_count)))
+      (should (numberp (plist-get data :rejected_by_cap)))
+      (let ((age (plist-get data :sessions_age_ms)))
+        (should (or (null age) (numberp age)))))))
+
 
 (ert-deftest carriage-web--http-sse-auth-header-ok ()
   "Authorized SSE handshake via X-Auth header responds with event-stream headers."
@@ -1195,11 +1200,11 @@
             (should (= carriage-web-port 44777))
             (should idle-start-called)
             (should snap-called))))
-      ;; Cleanup: try to kill fake process if alive
-      (dolist (p (process-list))
-        (when (and (process-live-p p)
-                   (string-prefix-p "cw-test-webd" (process-name p)))
-          (ignore-errors (delete-process p)))))))
+    ;; Cleanup: try to kill fake process if alive
+    (dolist (p (process-list))
+      (when (and (process-live-p p)
+                 (string-prefix-p "cw-test-webd" (process-name p)))
+        (ignore-errors (delete-process p)))))))
 
 ;; ---------------------------------------------------------------------
 ;; /api/push snapshot → sessions cache update (webd path semantics)
@@ -1210,16 +1215,16 @@
          (hdrs '(("content-type" . "application/json") ("x-auth" . "tok")))
          (snap `(:type "snapshot"
                        :data [(:id "ephemeral:x"
-                               :title "Buf"
-                               :project "-"
-                               :mode "org-mode"
-                               :intent "Ask"
-                               :suite "aibo"
-                               :engine "emacs"
-                               :branch nil
-                               :ctx (:count 1)
-                               :patches (:count 0)
-                               :state (:phase "idle" :tooltip ""))]))
+                                   :title "Buf"
+                                   :project "-"
+                                   :mode "org-mode"
+                                   :intent "Ask"
+                                   :suite "aibo"
+                                   :engine "emacs"
+                                   :branch nil
+                                   :ctx (:count 1)
+                                   :patches (:count 0)
+                                   :state (:phase "idle" :tooltip ""))]))
          (body (json-encode snap))
          cap-status cap-payload)
     ;; Precondition: empty or non-matching cache
@@ -1242,5 +1247,89 @@
                   (and (listp it) (equal (alist-get :id it) "ephemeral:x")))))
     ;; Cleanup
     (setq carriage-web-auth-token nil)))
+
+(ert-deftest carriage-web--sse-cap-503-rejection ()
+  "SSE handshake is rejected with 503 when client cap is reached; metrics reflect rejection."
+  (require 'cl-lib)
+  (let ((outs1 '())
+        (outs2 '())
+        (scheduled '())
+        (carriage-web-auth-token nil)
+        (carriage-web-max-sse-clients 1)
+        ;; ensure clean slate
+        (carriage-web--clients nil)
+        (carriage-web--metrics-rejected-cap 0))
+    (cl-letf (((symbol-function 'process-send-string)
+               (lambda (proc s)
+                 (cond
+                  ((string-prefix-p "cw-sse-cap-1" (process-name proc))
+                   (push s outs1))
+                  ((string-prefix-p "cw-sse-cap-2" (process-name proc))
+                   (push s outs2))
+                  (t (push s outs2)))))
+              ((symbol-function 'run-at-time)
+               (lambda (sec _repeat fn &rest args)
+                 (push (list sec fn args) scheduled)
+                 nil))
+              ((symbol-function 'process-send-eof)
+               (lambda (&rest _args)
+                 ;; record EOF as a marker in both outs to avoid missing it
+                 (push :eof outs1)
+                 (push :eof outs2))))
+      (let* ((p1 (make-pipe-process :name "cw-sse-cap-1" :noquery t))
+             (p2 (make-pipe-process :name "cw-sse-cap-2" :noquery t))
+             (b1 (generate-new-buffer " *cw-sse-cap-1*"))
+             (b2 (generate-new-buffer " *cw-sse-cap-2*")))
+        (unwind-protect
+            (progn
+              (set-process-buffer p1 b1)
+              (set-process-buffer p2 b2)
+              ;; First client should be accepted (headers 200 + event-stream)
+              (carriage-web--process-filter
+               p1 "GET /stream HTTP/1.1\r\nHost: x\r\n\r\n")
+              (let ((resp1 (apply #'concat (nreverse outs1))))
+                (should (string-match-p "HTTP/1.1 200 OK" resp1))
+                (should (string-match-p "text/event-stream" resp1)))
+              ;; Second client exceeds cap and should be rejected with 503 JSON
+              (carriage-web--process-filter
+               p2 "GET /stream HTTP/1.1\r\nHost: x\r\n\r\n")
+              (let ((resp2 (apply #'concat (nreverse outs2))))
+                (should (string-match-p "HTTP/1.1 503 Service Unavailable" resp2))
+                (should (string-match-p "application/json" resp2))
+                (should (string-match-p "\"code\":\"WEB_E_CAP\"" resp2)))
+              ;; Metrics should reflect a single rejection
+              (let (cap-status cap-payload)
+                (cl-letf (((symbol-function 'carriage-web--send-json)
+                           (lambda (_proc status payload)
+                             (setq cap-status status
+                                   cap-payload payload))))
+                  (carriage-web--dispatch-request
+                   nil (list :method "GET" :path "/api/metrics" :query nil :headers '())))
+                (should (equal cap-status "200 OK"))
+                (let* ((data (plist-get cap-payload :data))
+                       (rej (plist-get data :rejected_by_cap)))
+                  (should (numberp rej))
+                  (should (>= rej 1)))))
+          (dolist (p (list p1 p2))
+            (ignore-errors (when (process-live-p p) (delete-process p))))
+          (dolist (b (list b1 b2))
+            (when (buffer-live-p b) (kill-buffer b)))))))
+
+(ert-deftest carriage-web--push-bad-content-type ()
+  "POST /api/push with wrong content-type returns 400 WEB_E_PAYLOAD."
+  (let* ((carriage-web-auth-token "tok")
+         cap-status cap-payload
+         (body (json-encode '(:type "ui" :doc "ephemeral:x" :state (:phase "idle")))))
+    (cl-letf (((symbol-function 'carriage-web--send-json)
+               (lambda (_proc status payload)
+                 (setq cap-status status cap-payload payload))))
+      (carriage-web--dispatch-request
+       nil (list :method "POST" :path "/api/push" :query nil
+                 :headers '(("content-type" . "text/plain") ("x-auth" . "tok"))
+                 :body body)))
+    (should (equal cap-status "400 Bad Request"))
+    (should (eq (plist-get cap-payload :ok) json-false))
+    (should (equal (plist-get cap-payload :code) "WEB_E_PAYLOAD")))
+  (setq carriage-web-auth-token nil))
 
 ;;; carriage-web-tests.el ends here

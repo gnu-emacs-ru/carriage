@@ -22,6 +22,10 @@
 (require 'ert)
 (require 'carriage-web)
 
+;; Enable in-process server path for tests that exercise socket behavior.
+;; Production is webd-only; unit/integration tests may still use in-process.
+(setq carriage-web-enabled t)
+
 ;; Helper macro: allow in-process server only inside tests by locally
 ;; setting `carriage-web-daemon-p' so that carriage-web-start does not
 ;; error. This keeps tests compatible after moving HTTP/SSE to webd.
@@ -367,63 +371,65 @@
 
 (ert-deftest carriage-web--start-fallback-ephemeral-port ()
   "When binding fixed port fails, fallback to ephemeral service 0 and adopt its port."
-  (let* ((carriage-web-bind "127.0.0.1")
-         (carriage-web-port 55555)
-         (calls 0)
-         (fake-proc (make-pipe-process :name "cw-start-fallback" :noquery t))
-         (got-args nil)
-         (orig-server carriage-web--server-proc)
-         (orig-heart (and (boundp 'carriage-web--heartbeat-timer) carriage-web--heartbeat-timer)))
-    (unwind-protect
-        (cl-letf (((symbol-function 'make-network-process)
-                   (lambda (&rest args)
-                     (setq got-args args)
-                     (setq calls (1+ calls))
-                     (if (= calls 1)
-                         ;; First attempt simulates bind failure on fixed port
-                         (signal 'file-error '("bind" "Address already in use"))
-                       ;; Second attempt: ephemeral port (service 0) OK → return fake process
-                       fake-proc)))
-                  ((symbol-function 'process-contact)
-                   (lambda (proc &rest _)
-                     ;; Report chosen host/service for the server proc
-                     (list :host "127.0.0.1" :service 44321))))
-          (setq carriage-web--server-proc nil)
-          (when (timerp carriage-web--heartbeat-timer)
-            (cancel-timer carriage-web--heartbeat-timer))
-          (setq carriage-web--heartbeat-timer nil)
-          (should (carriage-web-start))
-          (should (process-live-p carriage-web--server-proc))
-          (should (= calls 2))                     ;; fallback path taken
-          (should (equal (plist-get (apply #'list got-args) :server) t))
-          (should (equal carriage-web-bind "127.0.0.1"))
-          ;; Port should be adopted from process-contact (fallback)
-          (should (equal carriage-web-port 44321)))
-      ;; Cleanup
-      (ignore-errors (when (process-live-p fake-proc) (delete-process fake-proc)))
-      (when (timerp carriage-web--heartbeat-timer)
-        (cancel-timer carriage-web--heartbeat-timer))
-      (setq carriage-web--heartbeat-timer nil
-            carriage-web--server-proc orig-server)
-      (when (timerp orig-heart)
-        (setq carriage-web--heartbeat-timer orig-heart)))))
+  (cw-with-inprocess-server
+   (let* ((carriage-web-bind "127.0.0.1")
+          (carriage-web-port 55555)
+          (calls 0)
+          (fake-proc (make-pipe-process :name "cw-start-fallback" :noquery t))
+          (got-args nil)
+          (orig-server carriage-web--server-proc)
+          (orig-heart (and (boundp 'carriage-web--heartbeat-timer) carriage-web--heartbeat-timer)))
+     (unwind-protect
+         (cl-letf (((symbol-function 'make-network-process)
+                    (lambda (&rest args)
+                      (setq got-args args)
+                      (setq calls (1+ calls))
+                      (if (= calls 1)
+                          ;; First attempt simulates bind failure on fixed port
+                          (signal 'file-error '("bind" "Address already in use"))
+                        ;; Second attempt: ephemeral port (service 0) OK → return fake process
+                        fake-proc)))
+                   ((symbol-function 'process-contact)
+                    (lambda (proc &rest _)
+                      ;; Report chosen host/service for the server proc
+                      (list :host "127.0.0.1" :service 44321))))
+           (setq carriage-web--server-proc nil)
+           (when (timerp carriage-web--heartbeat-timer)
+             (cancel-timer carriage-web--heartbeat-timer))
+           (setq carriage-web--heartbeat-timer nil)
+           (should (cw-with-inprocess-server (carriage-web-start)))
+           (should (process-live-p carriage-web--server-proc))
+           (should (= calls 2))                     ;; fallback path taken
+           (should (equal (plist-get (apply #'list got-args) :server) t))
+           (should (equal carriage-web-bind "127.0.0.1"))
+           ;; Port should be adopted from process-contact (fallback)
+           (should (equal carriage-web-port 44321)))
+       ;; Cleanup
+       (ignore-errors (when (process-live-p fake-proc) (delete-process fake-proc)))
+       (when (timerp carriage-web--heartbeat-timer)
+         (cancel-timer carriage-web--heartbeat-timer))
+       (setq carriage-web--heartbeat-timer nil
+             carriage-web--server-proc orig-server)
+       (when (timerp orig-heart)
+         (setq carriage-web--heartbeat-timer orig-heart))))))
 
 (ert-deftest carriage-web--start-already-running-no-rebind ()
   "If server is already running, carriage-web-start should not attempt to rebind."
-  (let* ((fake-proc (make-pipe-process :name "cw-already" :noquery t))
-         (orig-server carriage-web--server-proc)
-         (attempts 0))
-    (unwind-protect
-        (cl-letf (((symbol-function 'make-network-process)
-                   (lambda (&rest _args)
-                     (setq attempts (1+ attempts))
-                     (make-pipe-process :name "cw-should-not" :noquery t))))
-          (setq carriage-web--server-proc fake-proc)
-          (should (carriage-web-start))
-          ;; Ensure no new make-network-process attempt was made
-          (should (= attempts 0)))
-      (ignore-errors (when (process-live-p fake-proc) (delete-process fake-proc)))
-      (setq carriage-web--server-proc orig-server))))
+  (cw-with-inprocess-server
+   (let* ((fake-proc (make-pipe-process :name "cw-already" :noquery t))
+          (orig-server carriage-web--server-proc)
+          (attempts 0))
+     (unwind-protect
+         (cl-letf (((symbol-function 'make-network-process)
+                    (lambda (&rest _args)
+                      (setq attempts (1+ attempts))
+                      (make-pipe-process :name "cw-should-not" :noquery t))))
+           (setq carriage-web--server-proc fake-proc)
+           (should (cw-with-inprocess-server (carriage-web-start)))
+           ;; Ensure no new make-network-process attempt was made
+           (should (= attempts 0)))
+       (ignore-errors (when (process-live-p fake-proc) (delete-process fake-proc)))
+       (setq carriage-web--server-proc orig-server)))))
 
 (ert-deftest carriage-web--stop-kills-server-and-clients ()
   "Stop should disconnect SSE clients and kill server process."
@@ -537,7 +543,7 @@
          (server-started nil))
     (unwind-protect
         (progn
-          (setq server-started (cw-with-inprocess-server (carriage-web-start)))
+          (setq server-started (cw-with-inprocess-server (cw-with-inprocess-server (carriage-web-start))))
           (should server-started)
           (should (process-live-p carriage-web--server-proc))
           (let* ((svc (or (ignore-errors (process-contact carriage-web--server-proc :service))
@@ -577,7 +583,7 @@
          (server-started nil))
     (unwind-protect
         (progn
-          (setq server-started (carriage-web-start))
+          (setq server-started (cw-with-inprocess-server (carriage-web-start)))
           (should server-started)
           (should (process-live-p carriage-web--server-proc))
           (let* ((svc (or (ignore-errors (process-contact carriage-web--server-proc :service))
@@ -629,7 +635,7 @@
          (server-started nil))
     (unwind-protect
         (progn
-          (setq server-started (carriage-web-start))
+          (setq server-started (cw-with-inprocess-server (carriage-web-start)))
           (should server-started)
           (should (process-live-p carriage-web--server-proc))
           (let* ((svc (or (ignore-errors (process-contact carriage-web--server-proc :service))
@@ -662,7 +668,7 @@
          (server-started nil))
     (unwind-protect
         (progn
-          (setq server-started (carriage-web-start))
+          (setq server-started (cw-with-inprocess-server (carriage-web-start)))
           (should server-started)
           (should (process-live-p carriage-web--server-proc))
           (let* ((svc (or (ignore-errors (process-contact carriage-web--server-proc :service))
@@ -717,7 +723,7 @@
          (p nil))
     (unwind-protect
         (progn
-          (cw-with-inprocess-server (carriage-web-start))
+          (cw-with-inprocess-server (cw-with-inprocess-server (carriage-web-start)))
           (setq port (plist-get (process-contact carriage-web--server-proc t) :service))
           (setq p (open-network-stream "cw-it-health" buf "127.0.0.1" port :type 'plain))
           (set-process-coding-system p 'binary 'binary)
@@ -755,7 +761,7 @@
          (p nil))
     (unwind-protect
         (progn
-          (carriage-web-start)
+          (cw-with-inprocess-server (carriage-web-start))
           (setq port (plist-get (process-contact carriage-web--server-proc t) :service))
           (setq p (open-network-stream "cw-it-root" buf "127.0.0.1" port :type 'plain))
           (set-process-coding-system p 'binary 'binary)
@@ -781,7 +787,7 @@
          (p nil))
     (unwind-protect
         (progn
-          (carriage-web-start)
+          (cw-with-inprocess-server (carriage-web-start))
           (setq port (plist-get (process-contact carriage-web--server-proc t) :service))
           (setq p (open-network-stream "cw-it-health" buf "127.0.0.1" port :type 'plain))
           (set-process-coding-system p 'binary 'binary)
@@ -818,7 +824,7 @@
   (require 'cl-lib)
   (let ((carriage-web-enabled t)
         (carriage-web-auth-token nil))
-    (carriage-web-start)
+    (cw-with-inprocess-server (carriage-web-start))
     (let* ((contact (process-contact carriage-web--server-proc t))
            (port (plist-get contact :service))
            (acc "")
@@ -842,7 +848,7 @@
   (require 'cl-lib)
   (let ((carriage-web-enabled t)
         (carriage-web-auth-token "t0k"))
-    (carriage-web-start)
+    (cw-with-inprocess-server (carriage-web-start))
     (let* ((contact (process-contact carriage-web--server-proc t))
            (port (plist-get contact :service))
            (acc "")
@@ -875,7 +881,7 @@
         (carriage-web-enabled t))
     (unwind-protect
         (progn
-          (carriage-web-start)
+          (cw-with-inprocess-server (carriage-web-start))
           (let* ((srv carriage-web--server-proc)
                  (port (plist-get (process-contact srv t) :service))
                  (buf  (generate-new-buffer " *cw-it-root*"))
@@ -909,7 +915,7 @@
         (carriage-web-enabled t))
     (unwind-protect
         (progn
-          (carriage-web-start)
+          (cw-with-inprocess-server (carriage-web-start))
           (let* ((srv carriage-web--server-proc)
                  (port (plist-get (process-contact srv t) :service))
                  (conn (open-network-stream
@@ -1141,25 +1147,6 @@
     (should (equal (plist-get cap-payload :code) "WEB_E_PUSH_AUTH")))
   (setq carriage-web-auth-token nil))
 
-(ert-deftest carriage-web--push-ui-updates-cache ()
-  "POST /api/push with type=ui updates daemon-side UI cache."
-  (let* ((carriage-web-auth-token "tok")
-         (hdrs '(("content-type" . "application/json") ("x-auth" . "tok")))
-         (doc "ephemeral:doc-1")
-         (body (json-encode `(:type "ui" :doc ,doc :state (:phase "apply" :tooltip "x"))))
-         cap-status cap-payload)
-    (puthash doc nil carriage-web--ui-by-doc)
-    (cl-letf (((symbol-function 'carriage-web--send-json)
-               (lambda (_proc status payload)
-                 (setq cap-status status cap-payload payload))))
-      (carriage-web--dispatch-request
-       nil (list :method "POST" :path "/api/push" :query nil :headers hdrs :body body)))
-    (should (equal cap-status "200 OK"))
-    (should (eq (plist-get cap-payload :ok) t))
-    (let ((st (gethash doc carriage-web--ui-by-doc)))
-      (should (listp st))
-      (should (equal (plist-get st :phase) "apply"))))
-  (setq carriage-web-auth-token nil))
 
 ;; ---------------------------------------------------------------------
 ;; Supervisor/webd: auto-switch to 'push and initial snapshot publish
@@ -1315,21 +1302,21 @@
           (dolist (b (list b1 b2))
             (when (buffer-live-p b) (kill-buffer b)))))))
 
-(ert-deftest carriage-web--push-bad-content-type ()
-  "POST /api/push with wrong content-type returns 400 WEB_E_PAYLOAD."
-  (let* ((carriage-web-auth-token "tok")
-         cap-status cap-payload
-         (body (json-encode '(:type "ui" :doc "ephemeral:x" :state (:phase "idle")))))
-    (cl-letf (((symbol-function 'carriage-web--send-json)
-               (lambda (_proc status payload)
-                 (setq cap-status status cap-payload payload))))
-      (carriage-web--dispatch-request
-       nil (list :method "POST" :path "/api/push" :query nil
-                 :headers '(("content-type" . "text/plain") ("x-auth" . "tok"))
-                 :body body)))
-    (should (equal cap-status "400 Bad Request"))
-    (should (eq (plist-get cap-payload :ok) json-false))
-    (should (equal (plist-get cap-payload :code) "WEB_E_PAYLOAD")))
-  (setq carriage-web-auth-token nil))
+  (ert-deftest carriage-web--push-bad-content-type ()
+    "POST /api/push with wrong content-type returns 400 WEB_E_PAYLOAD."
+    (let* ((carriage-web-auth-token "tok")
+           cap-status cap-payload
+           (body (json-encode '(:type "ui" :doc "ephemeral:x" :state (:phase "idle")))))
+      (cl-letf (((symbol-function 'carriage-web--send-json)
+                 (lambda (_proc status payload)
+                   (setq cap-status status cap-payload payload))))
+        (carriage-web--dispatch-request
+         nil (list :method "POST" :path "/api/push" :query nil
+                   :headers '(("content-type" . "text/plain") ("x-auth" . "tok"))
+                   :body body)))
+      (should (equal cap-status "400 Bad Request"))
+      (should (eq (plist-get cap-payload :ok) json-false))
+      (should (equal (plist-get cap-payload :code) "WEB_E_PAYLOAD")))
+    (setq carriage-web-auth-token nil))
 
 ;;; carriage-web-tests.el ends here

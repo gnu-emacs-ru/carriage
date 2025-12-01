@@ -314,7 +314,7 @@ Cross-References and Anchors
   - spec/logging-v2.org
 - Code:
   - lisp/carriage-web.el (HTTP/SSE server, pub/sub bus, API)
-  - lisp/carriage-webd.el (supervisor for external Emacs web daemon)
+  - lisp/carriage-web-supervisor.el (supervisor for external Emacs web daemon)
   - lisp/carriage-apply.el (hooks)
   - lisp/carriage-report.el (hooks)
   - lisp/transports/carriage-transport.el (hooks)

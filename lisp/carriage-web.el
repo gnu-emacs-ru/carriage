@@ -1143,7 +1143,8 @@ REQ is a plist with :headers, :query and :body (JSON)."
                        (process-name proc) (buffer-name buf))))
 
 (defun carriage-web--sentinel (proc msg)
-  (carriage-web--log "sentinel: %s %s" (process-name proc) (string-trim msg)))
+  (let ((m (if (stringp msg) (string-trim msg) (format "%S" msg))))
+    (carriage-web--log "sentinel: %s %s" (process-name proc) m)))
 
 (defun carriage-web--split-headers-and-body (data)
   "Return (HEAD . REST) where HEAD is header text and REST is body string."

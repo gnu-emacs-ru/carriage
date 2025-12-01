@@ -14,7 +14,7 @@ Owner: Carriage
 
 3. Supervisor commands (Elisp, main Emacs)
 - carriage-webd-start: spawn child Emacs with:
-  - -Q --quick, -L lisp, -l carriage-webd.el, --eval '(carriage-webd-main)'
+  - -Q --quick, -L lisp, -l carriage-web.el, --eval '(progn (setq carriage-web-daemon-p t) (carriage-web-start) (while t (sleep-for 3600)))'
   - env: BIND, PORT (0=ephemeral), TOKEN, RUNTIME_DIR
   - writes PID and (upon server ready) PORT files into RUNTIME_DIR
 - carriage-webd-stop: stop process if live; cleanup PID/PORT files
@@ -43,6 +43,31 @@ Owner: Carriage
 - Integration tests MUST run against webd (external Emacs process).
 - Unit tests for HTTP parsing/JSON truncation remain pure Elisp without sockets.
 - Push → cache → SSE fan-out MUST be covered by tests.
+- Roadmap (dialectic plan):
+  - Security/auth hardening:
+    - Enforce loopback bind, X-Auth on /api/push and restricted /api/cmd; no token in logs.
+    - Strict Content-Type=application/json and request-size limits; map violations to WEB_E_PAYLOAD.
+  - Cache and O(1) handlers:
+    - In daemon (webd) mode all GET/SSE handlers answer ONLY from caches; no buffer scans in filters.
+    - Snapshot population via /api/push (type="snapshot") and periodic idle publisher in the main Emacs.
+  - Publish pipeline:
+    - Main Emacs publishes ui/apply/report/transport and snapshot via short HTTP POST /api/push (fire-and-forget, short timeouts).
+    - Fallback to local path is deprecated; tests and docs reflect webd-only operation.
+  - Supervisor lifecycle:
+    - Start → wait health (short backoff) → switch publish-backend to 'push → seed initial snapshot.
+    - Stop/kill-stale clean PID/PORT files; Status prints pid/alive/bind/port/health.
+  - HTML/JS:
+    - Periodically fetch /api/metrics; refresh sessions on "snapshot" SSE event.
+  - CI and gating:
+    - Gate integration tests with webd; keep pure Elisp unit tests socket-free.
+    - Add checks for /api/push (ok/401/400), sessions from cache, SSE hello, metrics types.
+  - Migration:
+    - Remove in-process HTTP/SSE paths from production; keep only for limited unit scenarios if needed.
+    - Update specs and docs to reflect webd-only mode as the single supported path.
+  - Observability:
+    - Ensure metrics include published/truncated/clients/sessions_count/sessions_age_ms and, when applicable, rejected_by_cap.
+  - Cross-platform:
+    - Verify supervisor behavior on non-POSIX (signals fallback); ensure runtime dir logic degrades gracefully.
 
 8. Migration notes
 - In-process HTTP/SSE in the main Emacs is forbidden.

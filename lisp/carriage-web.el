@@ -416,7 +416,7 @@ Return an alist of (downcased-name . value)."
    " $('#tgProfile').onclick=()=>cmd('toggle',{key:'profile'}).catch(()=>{});"
    " const saved = (function(){ try{return localStorage.getItem('cw_token')||'';}catch(e){return '';} })();"
    " S.token = saved; $('#tok').value = saved; }"
-   "function init(){ bind(); refreshList(); connect(); setInterval(refreshList, 10000); }"
+   "function init(){ bind(); refreshList(); connect(); setInterval(refreshList, 15000); }"
    "document.addEventListener('DOMContentLoaded', init);"
    "})();</script>"
    "</body></html>"))
@@ -745,9 +745,14 @@ In daemon mode (`carriage-web-daemon-p') this handler MUST NOT scan buffers
 and SHALL only return the last pushed/assembled cache (or empty list). In
 legacy in-process mode a small TTL cache MAY be refreshed by scanning."
   (if carriage-web-daemon-p
-      ;; Daemon: answer strictly from cache (no scans).
-      (carriage-web--send-json proc "200 OK"
-                               (list :ok t :data (or carriage-web--sessions-cache '())))
+      (let* ((now (float-time))
+             (age-ms (when (and (numberp carriage-web--sessions-cache-time)
+                                (> carriage-web--sessions-cache-time 0))
+                       (max 0.0 (* 1000.0 (- now carriage-web--sessions-cache-time)))))
+             (cnt (condition-case _e (length (or carriage-web--sessions-cache '())) (error 0))))
+        (carriage-web--log "sessions: cache count=%d age_ms=%s" cnt (or age-ms "nil"))
+        (carriage-web--send-json proc "200 OK"
+                                 (list :ok t :data (or carriage-web--sessions-cache '()))))
     ;; Legacy in-process path (kept for tests/back-compat): refresh small TTL cache.
     (let* ((now (float-time))
            (ttl carriage-web-sessions-cache-ttl)
@@ -763,6 +768,8 @@ legacy in-process mode a small TTL cache MAY be refreshed by scanning."
                (data (cl-remove-if-not #'identity res)))
           (setq carriage-web--sessions-cache data
                 carriage-web--sessions-cache-time now)))
+      (carriage-web--log "sessions: legacy cache count=%d"
+                         (condition-case _e (length (or carriage-web--sessions-cache '())) (error 0)))
       (carriage-web--send-json proc "200 OK"
                                (list :ok t :data carriage-web--sessions-cache)))))
 
@@ -893,6 +900,14 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
                                        (list :ok json-false :error "unsupported" :code "WEB_E_CMD")))))))
 
      ;; Whitelisted action commands
+     ;; Allow drop_sse_clients unconditionally (internal maintenance), independent of carriage-web-api-commands-enabled.
+     ((string= cmd "drop_sse_clients")
+      (let ((ok (and (fboundp 'carriage-web-drop-sse-clients)
+                     (progn (run-at-time 0 nil #'carriage-web-drop-sse-clients) t))))
+        (if ok
+            (carriage-web--send-json proc "200 OK" (list :ok t))
+          (carriage-web--send-json proc "400 Bad Request"
+                                   (list :ok json-false :error "unsupported" :code "WEB_E_CMD")))))
      ((or (string= cmd "apply_last_iteration")
           (string= cmd "abort")
           (string= cmd "report_open")
@@ -942,6 +957,7 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
   (let* ((q (plist-get req :query)))
     (if (not (carriage-web--auth-ok (plist-get req :headers) q t))
         (progn
+          (carriage-web--log "sse: unauthorized (missing/bad token)")
           (carriage-web--send-json proc "401 Unauthorized"
                                    (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))
           t)
@@ -951,15 +967,18 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
                  (>= n carriage-web-max-sse-clients))
             (progn
               (cl-incf carriage-web--metrics-rejected-cap)
+              (carriage-web--log "sse: rejecting client due to cap (n=%d cap=%s)" n carriage-web-max-sse-clients)
               (carriage-web--send-json proc "503 Service Unavailable"
                                        (list :ok json-false
                                              :error "too many clients" :code "WEB_E_CAP"))
               (carriage-web--graceful-close proc)
               t)
           (carriage-web--send-sse-headers proc)
-          (let ((cli (list :proc proc :last-ts (float-time) :filter (assoc-default "doc" q))))
+          (let* ((flt (assoc-default "doc" q))
+                 (cli (list :proc proc :last-ts (float-time) :filter flt)))
             (push cli carriage-web--clients)
-            (setq carriage-web--metrics-clients (length carriage-web--clients)))
+            (setq carriage-web--metrics-clients (length carriage-web--clients))
+            (carriage-web--log "sse: accepted client (filter=%s total=%d)" (or flt "-") carriage-web--metrics-clients))
           (carriage-web--sse-send proc "hello" (list :type "hello" :ts (float-time)))
           t)))))
 
@@ -975,11 +994,12 @@ REQ is a plist with :headers, :query and :body (JSON)."
          (_size-ok (if (and (integerp carriage-web-max-request-bytes)
                             (> (string-bytes body) carriage-web-max-request-bytes))
                        (progn
+                         (carriage-web--log "push: payload too large bytes=%d limit=%d"
+                                            (string-bytes body) carriage-web-max-request-bytes)
                          (carriage-web--send-json proc "400 Bad Request"
                                                   (list :ok json-false
                                                         :error "payload too large"
                                                         :code "WEB_E_PAYLOAD"))
-                         ;; Early return by short-circuiting the function body.
                          (cl-return-from carriage-web--handle-push t))
                      t))
          ;; Content-Type must be application/json
@@ -987,6 +1007,7 @@ REQ is a plist with :headers, :query and :body (JSON)."
                           (string-match-p "\\`application/json\\b" (downcase ctype)))
                      t
                    (progn
+                     (carriage-web--log "push: bad content-type ctype=%S" ctype)
                      (carriage-web--send-json proc "400 Bad Request"
                                               (list :ok json-false
                                                     :error "bad content-type"
@@ -1004,6 +1025,8 @@ REQ is a plist with :headers, :query and :body (JSON)."
                                  (list :ok json-false :error "bad request" :code "WEB_E_PAYLOAD"))
       (let* ((typ (plist-get obj :type))
              (doc (plist-get obj :doc)))
+        (when (stringp typ)
+          (carriage-web--log "push: type=%s doc=%s" typ (or doc "-")))
         (pcase (and (stringp typ) typ)
           ;; UI state update: {:type "ui", :doc "...", :state {...}}
           ("ui"
@@ -1026,6 +1049,8 @@ REQ is a plist with :headers, :query and :body (JSON)."
              (when (listp data)
                (setq carriage-web--sessions-cache data)
                (setq carriage-web--sessions-cache-time (float-time))
+               (carriage-web--log "push: snapshot updated count=%d"
+                                  (condition-case _e (length data) (error 0)))
                ;; Optionally notify SSE clients about new snapshot
                (carriage-web-pub "snapshot" (list :ts (float-time))))
              (carriage-web--send-json proc "200 OK" (list :ok t))))
@@ -1381,27 +1406,37 @@ serving HTTP/SSE from the main Emacs."
 
 (defun carriage-web--snapshot-build ()
   "Build lightweight sessions snapshot (list of snapshots) in the main Emacs."
-  (let ((res (cl-loop for b in (buffer-list)
-                      when (buffer-live-p b)
-                      for snap = (ignore-errors (carriage-web--buffer-session-snapshot b))
-                      when snap collect snap)))
-    (cl-remove-if-not #'identity res)))
+  (let* ((res (cl-loop for b in (buffer-list)
+                       when (buffer-live-p b)
+                       for snap = (ignore-errors (carriage-web--buffer-session-snapshot b))
+                       when snap collect snap))
+         (data (cl-remove-if-not #'identity res)))
+    (carriage-web--log "snapshot-build: count=%d" (condition-case _e (length data) (error -1)))
+    data))
 
 (defun carriage-web--snapshot-publish-now ()
   "Publish a full sessions snapshot to webd immediately (type:\"snapshot\")."
   (let ((data (carriage-web--snapshot-build)))
-    (carriage-web--http-post-json "/api/push" (list :type "snapshot" :data data))))
+    (carriage-web--log "push: snapshot-build done, count=%d" (condition-case _e (length data) (error -1)))
+    (carriage-web--http-post-json
+     "/api/push" (list :type "snapshot" :data data)
+     (lambda (status _buf)
+       (if (and (numberp status) (= status 200))
+           (carriage-web--log "push: snapshot OK status=%s" status)
+         (carriage-web--log "push: snapshot FAIL status=%s" (or status "?"))))))))
 
 (defun carriage-web-snapshot-start ()
-  "Start idle snapshot publisher when using 'push backend and not in daemon."
+  "Start idle snapshot publisher when not in daemon (always push snapshot to webd)."
   (interactive)
   (when (and (not carriage-web-daemon-p)
-             (eq carriage-web-publish-backend 'push)
              (not (timerp carriage-web--snapshot-timer)))
-    (setq carriage-web--snapshot-timer
-          (run-with-idle-timer
-           (or carriage-web-snapshot-idle-interval 2.0) t
-           (lambda () (ignore-errors (carriage-web--snapshot-publish-now)))))))
+    (let ((intv (or carriage-web-snapshot-idle-interval 2.0)))
+      (carriage-web--log "snapshot-start: interval=%.2fs" intv)
+      (setq carriage-web--snapshot-timer
+            (run-with-idle-timer
+             intv t
+             (lambda ()
+               (ignore-errors (carriage-web--snapshot-publish-now))))))))
 
 (defun carriage-web-snapshot-stop ()
   "Stop idle snapshot publisher timer if active."
@@ -1409,6 +1444,14 @@ serving HTTP/SSE from the main Emacs."
   (when (timerp carriage-web--snapshot-timer)
     (cancel-timer carriage-web--snapshot-timer))
   (setq carriage-web--snapshot-timer nil))
+
+;; Utility: force-send a snapshot right now (interactive seed).
+(defun carriage-web-snapshot-seed ()
+  "Send a full sessions snapshot to webd immediately (interactive seed)."
+  (interactive)
+  (carriage-web--log "snapshot-seed: requested by user")
+  (ignore-errors (carriage-web--snapshot-publish-now))
+  (message "carriage-web: snapshot seed sent"))
 
 (provide 'carriage-web)
 

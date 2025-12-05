@@ -154,42 +154,74 @@ Resolution order:
   "Wait for health up to carriage-webd-wait-health-ms."
   (let* ((deadline (+ (float-time) (/ carriage-webd-wait-health-ms 1000.0)))
          (intv (/ carriage-webd-health-interval-ms 1000.0))
-         (ok nil))
+         (ok nil)
+         (tries 0))
     (while (and (not ok) (< (float-time) deadline))
       (setq ok (carriage-webd--probe-health port))
-      (unless ok (sleep-for intv)))
+      (unless ok
+        (setq tries (1+ tries))
+        (message "webd: health probe #%d failed, retrying..." tries)
+        (sleep-for intv)))
     ok))
 
 (defun carriage-webd--compute-entrypoint (bind port token)
-  "Produce Lisp sexp string to evaluate in child Emacs."
+  "Produce Lisp sexp string to evaluate in child Emacs.
+The sexp logs all major stages to stdout so that the supervisor can capture them."
   (let* ((bind-s (format "%S" bind))
          (port-s (format "%S" port))
          (tok-s  (format "%S" token)))
     (format "(progn
+ (setq message-log-max 10000
+       debug-on-error t
+       url-show-status nil)
+ (princ \"webd: init starting\\n\")
  (setq carriage-web-daemon-p t
        carriage-web-bind %s
        carriage-web-port %s
        carriage-web-auth-token %s)
- (carriage-web-start)
- (with-temp-file %S (insert (number-to-string (or carriage-web-port 0))))
+ (condition-case e
+     (progn
+       (princ \"webd: calling carriage-web-start\\n\")
+       (carriage-web-start)
+       (princ (format \"webd: started on %%s:%%s\\n\" carriage-web-bind carriage-web-port)))
+   (error
+    (princ (format \"webd: start error: %%S\\n\" e))
+    (kill-emacs 1)))
+ (with-temp-file %S
+   (princ (format \"webd: writing port file (%%s)\\n\" %S))
+   (insert (number-to-string (or carriage-web-port 0))))
+ (with-temp-file %S
+   (princ (format \"webd: writing pid file (%%s)\\n\" %S))
+   (insert (number-to-string (or (emacs-pid) 0))))
+ (princ \"webd: entering sleep loop\\n\")
  (while t (sleep-for 3600)))"
             bind-s port-s tok-s
-            (carriage-webd--port-file))))
+            (carriage-webd--port-file) (carriage-webd--port-file)
+            (carriage-webd--pid-file) (carriage-webd--pid-file))))
 
 (defun carriage-webd--start-process (bind port token)
   "Start external Emacs hosting webd, return process object."
   (let* ((lispdir (carriage-webd--repo-lisp-dir))
          (cmd (list (or (executable-find "emacs") "emacs")
-                    "-Q" "--quick"
+                    "-Q" "--quick" "--batch"
                     "-L" lispdir
                     "-l" "carriage-web.el"
                     "--eval" (carriage-webd--compute-entrypoint bind port token))))
+    (message "webd: spawning %S" cmd)
     (make-process
      :name carriage-webd--proc-name
      :buffer (get-buffer-create carriage-webd--out-buf)
      :stderr (get-buffer-create carriage-webd--err-buf)
      :command cmd
-     :noquery t)))
+     :noquery t
+     :sentinel (lambda (proc event)
+                 ;; Mirror child lifecycle into supervisor buffers and *Messages*
+                 (let ((out (get-buffer-create carriage-webd--out-buf)))
+                   (when (buffer-live-p out)
+                     (with-current-buffer out
+                       (goto-char (point-max))
+                       (insert (format "webd: child sentinel: %s %s" (process-name proc) event)))))
+                 (message "webd: child %s" (string-trim event))))))
 
 (defun carriage-webd--ensure-token (token)
   (or token
@@ -198,6 +230,7 @@ Resolution order:
             (carriage-webd--write-file (carriage-webd--token-file) tkn)
             tkn))))
 
+;;;###autoload
 ;;;###autoload
 (defun carriage-webd-start (&optional bind port token)
   "Start Carriage web daemon (webd) as a separate Emacs process.
@@ -217,13 +250,17 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
     ;; Wait for health quickly (best effort).
     (let* ((resolved-port
             (or (and (numberp port) (> port 0) port)
-                (let ((tries 30) (pval nil))
+                (let ((tries 50) (pval nil))
                   (while (and (not pval) (> tries 0))
-                    (setq pval (string-to-number (or (carriage-webd--read-file (carriage-webd--port-file)) "0")))
-                    (unless (> pval 0) (setq tries (1- tries)) (sleep-for 0.1)))
-                  (and (> (or pval 0) 0) pval))))
+                    (let ((s (carriage-webd--read-file (carriage-webd--port-file))))
+                      (setq pval (and s (string-to-number s))))
+                    (message "webd: waiting port file (%d)" tries)
+                    (unless (and (numberp pval) (> pval 0))
+                      (setq tries (1- tries))
+                      (sleep-for 0.1)))
+                  (and (numberp pval) (> pval 0) pval))))
            (ok (and resolved-port (carriage-webd--wait-health resolved-port))))
-      (message (if ok "webd: started on %s:%s" "webd: started (health not confirmed)")
+      (message (if ok "webd: started on %s:%s" "webd: started (health not confirmed) on %s:%s")
                bind resolved-port)
       ;; If daemon is healthy, switch publisher to 'push and seed state
       (when ok
@@ -251,6 +288,7 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
     (and s (string-match-p "^[0-9]+$" s) (string-to-number s))))
 
 ;;;###autoload
+;;;###autoload
 (defun carriage-webd-stop ()
   "Stop Carriage web daemon if running."
   (interactive)
@@ -272,6 +310,7 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
   (ignore-errors (delete-file (carriage-webd--port-file))))
 
 ;;;###autoload
+;;;###autoload
 (defun carriage-webd-restart ()
   "Restart Carriage web daemon."
   (interactive)
@@ -282,6 +321,7 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
 (defun carriage-webd--alive-pid-p (pid)
   (and pid (carriage-webd--signal-pid pid 0)))
 
+;;;###autoload
 ;;;###autoload
 (defun carriage-webd-status ()
   "Show Carriage web daemon status."
@@ -298,8 +338,9 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
     (list :pid pid :alive alive :bind bind :port port :health health :runtime (carriage-webd--runtime-dir))))
 
 ;;;###autoload
+;;;###autoload
 (defun carriage-webd-tail-log ()
-  "Show live logs of webd."
+  "Show live logs (stdout) of the web daemon (webd)."
   (interactive)
   (let ((b (get-buffer-create carriage-webd--out-buf)))
     (pop-to-buffer b)
@@ -307,6 +348,16 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
       (view-mode 1)
       (goto-char (point-max)))))
 
+(defun carriage-webd-tail-errors ()
+  "Show live error logs (stderr) of the web daemon (webd)."
+  (interactive)
+  (let ((b (get-buffer-create carriage-webd--err-buf)))
+    (pop-to-buffer b)
+    (with-current-buffer b
+      (view-mode 1)
+      (goto-char (point-max)))))
+
+;;;###autoload
 ;;;###autoload
 (defun carriage-webd-kill-stale ()
   "Clean up stale webd PID/PORT files and try to kill leftover processes."
@@ -355,6 +406,12 @@ Runs only in interactive sessions and skips when a webd process is already alive
   :type 'number
   :group 'carriage-webd)
 
+
+(defcustom carriage-webd-autostart-delay 1.0
+  "Delay in seconds before attempting webd autostart."
+  :type 'number
+  :group 'carriage-webd)
+
 (defun carriage-webd--maybe-autostart ()
   "Autostart webd when `carriage-webd-autostart' is non-nil."
   (when (and (not noninteractive)
@@ -366,6 +423,65 @@ Runs only in interactive sessions and skips when a webd process is already alive
                      (carriage-webd-start))))))
 
 (add-hook 'emacs-startup-hook #'carriage-webd--maybe-autostart)
+
+;; Utilities: copy token to kill-ring (without printing it)
+(defun carriage-webd-copy-token ()
+  "Copy current webd auth token (from runtime token file) to the kill-ring.
+For safety, the token is not printed to *Messages*."
+  (interactive)
+  (let ((tf (carriage-webd--token-file)))
+    (if (and tf (file-readable-p tf))
+        (let ((tok (carriage-webd--read-file tf)))
+          (when (and tok (> (length tok) 0))
+            (kill-new tok)
+            (message "webd: token copied to kill-ring")))
+      (message "webd: no token file found"))))
+
+(defun carriage-webd--api-cmd (command &optional payload)
+  "Send a command to webd via POST /api/cmd."
+  (let* ((bind (or carriage-webd-default-bind "127.0.0.1"))
+         (port-str (carriage-webd--read-file (carriage-webd--port-file)))
+         (port (and port-str (string-to-number port-str)))
+         (token (carriage-webd--ensure-token carriage-webd-auth-token))
+         (body (json-encode (append (list :cmd command) payload)))
+         (url (format "http://%s:%d/api/cmd" bind port))
+         (url-request-method "POST")
+         (url-show-status nil)
+         (url-request-extra-headers
+          `(("Content-Type" . "application/json; charset=utf-8")
+            ("X-Auth" . ,token)))
+         (url-request-data body))
+    (unless (and port token)
+      (error "webd not running or token not found"))
+    (url-retrieve
+     url
+     (lambda (status)
+       (with-current-buffer (current-buffer)
+         (let ((ok (string-match-p "^HTTP/1\\.[01] 200" (buffer-string))))
+           (message "webd cmd '%s': %s" command (if ok "ok" "failed"))
+           (kill-buffer (current-buffer))))))))
+
+;;;###autoload
+(defun carriage-webd-drop-sse-clients ()
+  "Tell webd to drop all connected SSE clients."
+  (interactive)
+  (if (not (carriage-webd--live-proc))
+      (message "webd is not running")
+    (carriage-webd--api-cmd "drop_sse_clients")
+    (message "webd: sent drop_sse_clients command")))
+
+;;;###autoload
+(defun carriage-webd-seed-snapshot ()
+  "Send a full sessions snapshot from the main Emacs to webd immediately.
+Useful when Sessions list is empty: seeds the cache in the daemon."
+  (interactive)
+  (if (fboundp 'carriage-web--snapshot-publish-now)
+      (progn
+        (message "webd: seeding snapshot…")
+        (ignore-errors (carriage-web--snapshot-publish-now))
+        (message "webd: snapshot seed triggered"))
+    (message "webd: snapshot function not available (carriage-web not loaded?)"))
+
 
 (provide 'carriage-web-supervisor)
 

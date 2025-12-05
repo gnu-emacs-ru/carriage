@@ -13,15 +13,16 @@ Owner: Carriage
 - State flows from the main Emacs to webd via a private push API (loopback + token).
 
 3. Supervisor commands (Elisp, main Emacs)
-- carriage-webd-start: spawn child Emacs with:
-  - -Q --quick, -L lisp, -l carriage-web.el, --eval '(progn (setq carriage-web-daemon-p t) (carriage-web-start) (while t (sleep-for 3600)))'
-  - env: BIND, PORT (0=ephemeral), TOKEN, RUNTIME_DIR
-  - writes PID and (upon server ready) PORT files into RUNTIME_DIR
-- carriage-webd-stop: stop process if live; cleanup PID/PORT files
-- carriage-webd-restart: stop → start
-- carriage-webd-status: report pid/live/port; health probe GET /api/health with short timeout
-- carriage-webd-tail-log: show live stdout/stderr buffers
-- carriage-webd-kill-stale: remove stale PID/PORT on crashed daemons
+- `carriage-webd-start`: Spawn and supervise the `webd` process.
+- `carriage-webd-stop`: Stop the `webd` process.
+- `carriage-webd-restart`: Restart the `webd` process.
+- `carriage-webd-status`: Report pid/live/port and probe health.
+- `carriage-webd-tail-log`: Show live stdout log buffer.
+- `carriage-webd-tail-errors`: Show live stderr log buffer.
+- `carriage-webd-kill-stale`: Clean up stale PID/PORT files from crashed daemons.
+- `carriage-webd-copy-token`: Copy the current auth token to the kill-ring.
+- `carriage-webd-open-dashboard`: Open the web dashboard in a browser.
+- `carriage-webd-drop-sse-clients`: Command `webd` to disconnect all SSE clients.
 
 4. Runtime files (in XDG_RUNTIME_DIR or /tmp)
 - carriage-webd.pid: OS PID of the child Emacs

@@ -28,6 +28,7 @@
 (require 'carriage-utils)
 (require 'carriage-llm-registry)
 (require 'carriage-perf nil t)
+(require 'carriage-transient-async nil t)
 (declare-function carriage-select-apply-engine "carriage-apply-engine" (&optional engine))
 
 (defgroup carriage-ui nil
@@ -2587,6 +2588,7 @@ Avoids heavy org computations on redisplay path."
 (carriage-ui--install-advices)
 (with-eval-after-load 'carriage-mode
   (ignore-errors (carriage-ui--install-advices)))
+
 
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

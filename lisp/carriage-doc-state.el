@@ -693,10 +693,34 @@ Returns an alist of (KEY . VAL) where KEY is the drawer-style key (e.g., \"CAR_M
           (forward-line 1))))
     (nreverse alist)))
 
+(defun carriage-doc-state--top-slot-position ()
+  "Return canonical insertion point for #+begin_carriage.
+The point is:
+- immediately after the contiguous top-of-file #+<KEYWORD> lines (including all #+PROPERTY),
+  even when the buffer begins with blank lines; or
+- at buffer start when no #+ header lines are present."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((case-fold-search t))
+        ;; Skip leading blank lines to find header cluster if any.
+        (while (looking-at "^[ \t]*$")
+          (forward-line 1))
+        (if (looking-at "^[ \t]*#\\+")
+            (progn
+              (while (looking-at "^[ \t]*#\\+")
+                (forward-line 1))
+              (point))
+          ;; No header keywords at the top — insert at absolute beginning.
+          (point-min))))))
+
 (defun carriage-doc-state--write-carriage-block (alist)
   "Upsert the begin_carriage block with ALIST of (KEY . VAL) pairs.
 Keys may be drawer-style (\"CAR_*\") or file-style (\"CARRIAGE_*\"); they are
-normalized to file-style CARRIAGE_* inside the block."
+normalized to file-style CARRIAGE_* inside the block, and the block is
+always placed at the very top of the document, directly under file
+#+PROPERTY (if present)."
   (let* ((norm
           (mapcar (lambda (cell)
                     (let* ((k (car cell))
@@ -713,25 +737,31 @@ normalized to file-style CARRIAGE_* inside the block."
     (save-excursion
       (save-restriction
         (widen)
-        (let ((range (carriage-doc-state--carriage-block-range)))
+        (let* ((inhibit-read-only t)
+               (ip (carriage-doc-state--top-slot-position))
+               ;; Full inclusive range of existing block (begin..end lines)
+               (full (carriage-doc-state--block-range-of 'carriage)))
           (cond
-           (range
-            (let ((beg (car range))
-                  (end (cdr range))
-                  (inhibit-read-only t))
-              ;; Replace body only
-              (delete-region beg end)
-              (goto-char beg)
-              (insert body "\n")
-              t))
+           (full
+            (let ((beg (car full))
+                  (end (cdr full)))
+              (if (= beg ip)
+                  ;; Already at canonical top slot: replace whole block idempotently
+                  (progn
+                    (delete-region beg end)
+                    (goto-char ip)
+                    (insert block)
+                    t)
+                ;; Relocate: delete old block and reinsert at top slot
+                (delete-region beg end)
+                (setq ip (carriage-doc-state--top-slot-position))
+                (goto-char ip)
+                (insert block)
+                t)))
            (t
-            ;; Insert near the very top: after initial #+ lines, before content
-            (goto-char (point-min))
-            (while (looking-at-p "^[ \t]*#\\+")
-              (forward-line 1))
-            (let ((inhibit-read-only t))
-              (unless (bolp) (insert "\n"))
-              (insert block))
+            ;; No block present: insert at canonical top slot
+            (goto-char ip)
+            (insert block)
             t)))))))
 
 (defun carriage-doc-state--hide-carriage-block ()

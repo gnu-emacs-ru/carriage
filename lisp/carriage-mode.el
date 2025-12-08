@@ -441,6 +441,14 @@ Consults engine capabilities; safe when registry is not yet loaded."
   "Enable Carriage mode in the current buffer (internal)."
   (carriage-mode--init-state)
   (carriage-mode--init-ui)
+  ;; Warm up common modules on idle to avoid cold-start delays in first send.
+  (run-at-time 0.2 nil
+               (lambda ()
+                 (ignore-errors (require 'carriage-intent-registry nil t))
+                 (ignore-errors (require 'carriage-op-sre nil t))
+                 (ignore-errors (require 'carriage-op-aibo nil t))
+                 (ignore-errors (require 'carriage-op-patch nil t))
+                 (ignore-errors (require 'carriage-op-file nil t))))
   ;; Restore state from document, persist snapshot, then fold the block; install save hook.
   (when (require 'carriage-doc-state nil t)
     (ignore-errors (carriage-doc-state-restore))
@@ -1104,64 +1112,78 @@ May include :context-text and :context-target per v1.1."
 (defun carriage-send-buffer ()
   "Send entire buffer to LLM according to current Intent/Suite."
   (interactive)
-  (let* ((backend carriage-mode-backend)
-         (model   carriage-mode-model)
-         (intent  carriage-mode-intent)
-         (suite   carriage-mode-suite)
-         (srcbuf  (current-buffer))
-         (origin-marker (copy-marker (point) t))
-         (ctx     (progn
-                    (carriage-ui-set-state 'context)
-                    (carriage--build-context 'buffer srcbuf)))
-         (built nil) (sys nil) (pr nil))
+  ;; Early, immediate feedback before any heavy preparation:
+  (carriage-ui-set-state 'sending)
+  (when (fboundp 'carriage--preloader-start)
+    (ignore-errors (carriage--preloader-start)))
+  ;; Give redisplay a chance right away
+  (sit-for 0)
+  ;; Defer heavy preparation to the next tick so UI updates (spinner/state) are visible instantly.
+  (let ((srcbuf (current-buffer))
+        (prefix current-prefix-arg))
+    (run-at-time
+     0 nil
+     (lambda ()
+       (let ((current-prefix-arg prefix))
+         (with-current-buffer srcbuf
+           (let* ((backend carriage-mode-backend)
+                  (model   carriage-mode-model)
+                  (intent  carriage-mode-intent)
+                  (suite   carriage-mode-suite)
+                  (origin-marker (copy-marker (point) t))
+                  (ctx     (carriage--build-context 'buffer srcbuf))
+                  (built nil) (sys nil) (pr nil))
+             (setq built (carriage-build-prompt intent suite ctx)
+                   sys   (plist-get built :system)
+                   pr    (plist-get built :prompt))
+             (carriage-ui-set-state 'dispatch)
+             (carriage-log "send-buffer: intent=%s suite=%s backend=%s model=%s"
+                           intent suite backend model)
+             (when (and carriage-mode-auto-open-log (not (bound-and-true-p noninteractive)))
+               (ignore-errors (carriage-show-log)))
+             (when (and carriage-mode-auto-open-traffic (not (bound-and-true-p noninteractive)))
+               (ignore-errors (carriage-show-traffic)))
 
-    (carriage-ui-set-state 'prompt)
-    (carriage-ui-set-state 'prompt)
-    (setq built (carriage-build-prompt intent suite ctx)
-          sys   (plist-get built :system)
-          pr    (plist-get built :prompt))
-    (carriage-ui-set-state 'dispatch)
-    (carriage-log "send-buffer: intent=%s suite=%s backend=%s model=%s"
-                  intent suite backend model)
-    (when (and carriage-mode-auto-open-log (not (bound-and-true-p noninteractive)))
-      (ignore-errors (carriage-show-log)))
-    (when (and carriage-mode-auto-open-traffic (not (bound-and-true-p noninteractive)))
-      (ignore-errors (carriage-show-traffic)))
-
-    (carriage--ensure-transport)
-    (carriage-stream-reset origin-marker)
-    (let* ((unreg (carriage-transport-begin)))
-      ;; Start lightweight preloader at insertion point until first stream chunk arrives.
-      (when (fboundp 'carriage--preloader-start)
-        (ignore-errors (carriage--preloader-start)))
-      (carriage-traffic-log 'out "request begin: source=buffer backend=%s model=%s"
-                            backend model)
-      (condition-case err
-          (progn
-            ;; Dispatch via transport (placeholder will log error if no adapter).
-            (carriage-transport-dispatch :source 'buffer
-                                         :backend backend
-                                         :model model
-                                         :prompt pr
-                                         :system sys
-                                         :buffer srcbuf
-                                         :mode (symbol-name (buffer-local-value 'major-mode srcbuf))
-                                         :insert-marker origin-marker)
-            t)
-        (quit
-         (carriage-log "send-buffer: keyboard-quit; aborting")
-         (ignore-errors (carriage-abort-current))
-         (ignore-errors (carriage-transport-complete t))
-         (carriage-ui-set-state 'idle)
-         nil)
-        (error
-         (carriage-log "send-buffer error: %s" (error-message-string err))
-         (carriage-transport-complete t))))))
+             (carriage--ensure-transport)
+             (carriage-stream-reset origin-marker)
+             (let* ((unreg (carriage-transport-begin)))
+               ;; Start lightweight preloader at insertion point until first stream chunk arrives.
+               (when (fboundp 'carriage--preloader-start)
+                 (ignore-errors (carriage--preloader-start)))
+               (carriage-traffic-log 'out "request begin: source=buffer backend=%s model=%s"
+                                     backend model)
+               (condition-case err
+                   (progn
+                     ;; Dispatch via transport (placeholder will log error if no adapter).
+                     (carriage-transport-dispatch :source 'buffer
+                                                  :backend backend
+                                                  :model model
+                                                  :prompt pr
+                                                  :system sys
+                                                  :buffer srcbuf
+                                                  :mode (symbol-name (buffer-local-value 'major-mode srcbuf))
+                                                  :insert-marker origin-marker)
+                     t)
+                 (quit
+                  (carriage-log "send-buffer: keyboard-quit; aborting")
+                  (ignore-errors (carriage-abort-current))
+                  (ignore-errors (carriage-transport-complete t))
+                  (carriage-ui-set-state 'idle)
+                  nil)
+                 (error
+                  (carriage-log "send-buffer error: %s" (error-message-string err))
+                  (carriage-transport-complete t)))))))))))
 
 ;;;###autoload
 (defun carriage-send-subtree ()
   "Send current org subtree to LLM according to current Intent/Suite."
   (interactive)
+  ;; Early, immediate feedback before any heavy preparation:
+  (carriage-ui-set-state 'sending)
+  (when (fboundp 'carriage--preloader-start)
+    (ignore-errors (carriage--preloader-start)))
+  ;; Give redisplay a chance right away
+  (sit-for 0)
   (let* ((backend carriage-mode-backend)
          (model   carriage-mode-model)
          (intent  carriage-mode-intent)
@@ -1169,7 +1191,8 @@ May include :context-text and :context-target per v1.1."
          (srcbuf  (current-buffer))
          (origin-marker (copy-marker (point) t))
          (ctx     (progn
-                    (carriage-ui-set-state 'context)
+                    ;; Keep spinner/active feedback during context build
+                    (carriage-ui-set-state 'sending)
                     (carriage--build-context 'subtree srcbuf)))
          (built nil) (sys nil) (pr nil))
 

@@ -25,6 +25,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'carriage-transient-async nil t)
 
 (autoload 'carriage-create-task-doc "carriage-task" "Create task document from the current heading." t)
 (autoload 'carriage-branching-transient "carriage-task" "Open Branching UI: choose template and inheritance." t)
@@ -90,12 +91,12 @@ Each value is a plist with :add and/or :remove lists of (:id ID :keys (..)).")
     (:id select-suite :cmd carriage-select-suite                 :keys ("S")   :contexts (carriage) :section tools :desc-key :select-suite)
     (:id toggle-intent :cmd carriage-toggle-intent               :keys ("i")   :contexts (carriage) :section tools :desc-key :toggle-intent)
     ;; Actions
-    (:id dry-run      :cmd carriage-dry-run-at-point        :keys ("d")     :contexts (carriage) :section act :desc-key :dry-run)
-    (:id apply        :cmd carriage-apply-at-point-or-region :keys ("a")     :contexts (carriage) :section act :desc-key :apply)
-    (:id apply-all    :cmd carriage-apply-last-iteration    :keys ("A")     :contexts (carriage) :section act :desc-key :apply-all)
+    (:id dry-run      :cmd carriage-menu-dry-run            :keys ("d")     :contexts (carriage) :section act :desc-key :dry-run)
+    (:id apply        :cmd carriage-menu-apply              :keys ("a")     :contexts (carriage) :section act :desc-key :apply)
+    (:id apply-all    :cmd carriage-menu-apply-all         :keys ("A")     :contexts (carriage) :section act :desc-key :apply-all)
     (:id abort        :cmd carriage-abort-current           :keys ("k")     :contexts (carriage) :section act :desc-key :abort)
-    (:id send-buffer  :cmd carriage-send-buffer             :keys ("RET")   :menu-key "RET" :contexts (carriage) :section act :desc-key :send-buffer)
-    (:id send-subtree :cmd carriage-send-subtree            :keys ("M-RET") :menu-key "M-RET" :contexts (carriage) :section act :desc-key :send-subtree)
+    (:id send-buffer  :cmd carriage-menu-send-buffer        :keys ("RET")   :menu-key "RET" :contexts (carriage) :section act :desc-key :send-buffer)
+    (:id send-subtree :cmd carriage-menu-send-subtree       :keys ("M-RET") :menu-key "M-RET" :contexts (carriage) :section act :desc-key :send-subtree)
     (:id report       :cmd carriage-report-open             :keys ("r")     :contexts (carriage) :section tools :desc-key :report)
     (:id clean        :cmd carriage-clear-patch-blocks     :keys ("D")     :contexts (carriage) :section act :desc-key :clean)
     ;; Report context actions (available in report buffers under the configured prefix)
@@ -127,6 +128,63 @@ Each value is a plist with :add and/or :remove lists of (:id ID :keys (..)).")
     (:id save-settings :cmd carriage-save-settings          :keys ("s")  :contexts (carriage org global) :section tools :desc-key :save-settings :label "Save settings"))
   "Keyspec: list of action plists with :id :cmd :keys :contexts :section :desc-key.
 All keys are relative to carriage-keys-prefix (default \"C-c e \").")
+
+;; Transient UX: close instantly and run the chosen action asynchronously.
+(defun carriage-keys--menu-run-async (cmd &optional state)
+  "Quit transient immediately and schedule CMD on the next tick.
+If STATE is non-nil, set UI state right away and start preloader when available."
+  (interactive)
+  ;; Close transient ASAP (prefer quit-all if available for nested stacks)
+  (ignore-errors
+    (when (featurep 'transient)
+      (if (fboundp 'transient-quit-all)
+          (transient-quit-all)
+        (transient-quit-one))))
+  ;; Early UI feedback (sending/apply/dry-run)
+  (when (and state (fboundp 'carriage-ui-set-state))
+    (ignore-errors (carriage-ui-set-state state)))
+  ;; Start preloader for streaming sends only (best-effort), then give redisplay a chance.
+  (when (and (eq state 'sending) (fboundp 'carriage--preloader-start))
+    (ignore-errors (carriage--preloader-start)))
+  (sit-for 0)
+  ;; Preserve current-prefix-arg for the scheduled interactive call.
+  (let ((prefix current-prefix-arg))
+    (run-at-time 0 nil
+                 (lambda ()
+                   (let ((current-prefix-arg prefix))
+                     (when (commandp cmd)
+                       (call-interactively cmd))))))
+  t)
+
+;;;###autoload
+(defun carriage-menu-send-buffer ()
+  "Wrapper for transient: close menu immediately and send buffer asynchronously."
+  (interactive)
+  (carriage-keys--menu-run-async #'carriage-send-buffer 'sending))
+
+;;;###autoload
+(defun carriage-menu-send-subtree ()
+  "Wrapper for transient: close menu immediately and send subtree asynchronously."
+  (interactive)
+  (carriage-keys--menu-run-async #'carriage-send-subtree 'sending))
+
+;;;###autoload
+(defun carriage-menu-dry-run ()
+  "Wrapper for transient: close menu immediately and start dry-run asynchronously."
+  (interactive)
+  (carriage-keys--menu-run-async #'carriage-dry-run-at-point 'dry-run))
+
+;;;###autoload
+(defun carriage-menu-apply ()
+  "Wrapper for transient: close menu immediately and apply asynchronously."
+  (interactive)
+  (carriage-keys--menu-run-async #'carriage-apply-at-point-or-region 'apply))
+
+;;;###autoload
+(defun carriage-menu-apply-all ()
+  "Wrapper for transient: close menu immediately and apply-all asynchronously."
+  (interactive)
+  (carriage-keys--menu-run-async #'carriage-apply-last-iteration 'apply))
 
 ;;;###autoload
 (defun carriage-keys-register-actions (actions)

@@ -178,15 +178,22 @@ ACTIVE is 'log or 'traffic to highlight current tab."
                              (_ #'ignore)))
                       (map (let ((m (make-sparse-keymap)))
                              ;; Bind both press and click to improve compatibility.
+                             ;; Support both header-line qualified events and plain mouse events
+                             ;; to accommodate different Emacs builds.
                              (define-key m [header-line mouse-1] cmd)
                              (define-key m [header-line down-mouse-1] cmd)
                              (define-key m [header-line mouse-2] cmd)
                              (define-key m [header-line down-mouse-2] cmd)
+                             (define-key m [mouse-1] cmd)
+                             (define-key m [down-mouse-1] cmd)
+                             (define-key m [mouse-2] cmd)
+                             (define-key m [down-mouse-2] cmd)
                              m)))
                  (propertize txt
                              'mouse-face 'mode-line-highlight
                              'help-echo (format "Switch to %s" label)
-                             'local-map map
+                             ;; Use 'keymap for header-line strings; some builds ignore 'local-map here.
+                             'keymap map
                              'follow-link t
                              'pointer 'hand
                              'face (when on 'mode-line-emphasis))))))

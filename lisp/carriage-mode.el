@@ -674,7 +674,9 @@ Consults engine capabilities; safe when registry is not yet loaded."
 
 (defun carriage-insert-inline-iteration-marker-now ()
   "Insert inline iteration marker immediately at a safe position if configured.
-Uses stream origin when available; never splits a patch block. Returns non-nil when inserted."
+Uses stream origin when available; never splits a patch block.
+Also adjusts stream origin to the next line after the marker so the spinner
+(preloader) appears strictly below it. Returns non-nil when inserted."
   (interactive)
   (when (and (boundp 'carriage-iteration-marker-placement)
              (eq carriage-iteration-marker-placement 'inline)
@@ -689,9 +691,14 @@ Uses stream origin when available; never splits a patch block. Returns non-nil w
                  ((and (markerp carriage--stream-beg-marker)
                        (buffer-live-p (marker-buffer carriage--stream-beg-marker)))
                   (marker-position carriage--stream-beg-marker))
-                 (t (point)))))
-      (ignore-errors
-        (carriage-iteration--write-inline-marker pos carriage--last-iteration-id))
+                 (t (point))))
+           (ins-pos (ignore-errors
+                      (carriage-iteration--write-inline-marker pos carriage--last-iteration-id))))
+      ;; After inserting the marker line (which includes a trailing newline),
+      ;; move the stream-origin to the beginning of the next line so the preloader
+      ;; spinner is rendered strictly below the CARRIAGE_ID line.
+      (when (numberp ins-pos)
+        (setq carriage--stream-origin-marker (copy-marker ins-pos t)))
       (setq carriage--iteration-inline-marker-inserted t)
       t)))
 
@@ -1114,8 +1121,6 @@ May include :context-text and :context-target per v1.1."
   (interactive)
   ;; Early, immediate feedback before any heavy preparation:
   (carriage-ui-set-state 'sending)
-  (when (fboundp 'carriage--preloader-start)
-    (ignore-errors (carriage--preloader-start)))
   ;; Give redisplay a chance right away
   (sit-for 0)
   ;; Defer heavy preparation to the next tick so UI updates (spinner/state) are visible instantly.
@@ -1147,9 +1152,6 @@ May include :context-text and :context-target per v1.1."
              (carriage--ensure-transport)
              (carriage-stream-reset origin-marker)
              (let* ((unreg (carriage-transport-begin)))
-               ;; Start lightweight preloader at insertion point until first stream chunk arrives.
-               (when (fboundp 'carriage--preloader-start)
-                 (ignore-errors (carriage--preloader-start)))
                (carriage-traffic-log 'out "request begin: source=buffer backend=%s model=%s"
                                      backend model)
                (condition-case err
@@ -1213,9 +1215,6 @@ May include :context-text and :context-target per v1.1."
     (carriage--ensure-transport)
     (carriage-stream-reset origin-marker)
     (let* ((unreg (carriage-transport-begin)))
-      ;; Start lightweight preloader at insertion point until first stream chunk arrives.
-      (when (fboundp 'carriage--preloader-start)
-        (ignore-errors (carriage--preloader-start)))
       (carriage-traffic-log 'out "request begin: source=subtree backend=%s model=%s"
                             backend model)
       (condition-case err

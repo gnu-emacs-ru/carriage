@@ -27,6 +27,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'carriage-ui)
+(require 'carriage-fast-transient nil t)
 (require 'carriage-logging)
 (require 'carriage-errors)
 ;; Break circular dependency with carriage-mode: call its fns via declare-function.

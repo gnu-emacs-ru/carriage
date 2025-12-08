@@ -172,17 +172,23 @@ ACTIVE is 'log or 'traffic to highlight current tab."
   (let* ((mk (lambda (label which)
                (let* ((on (eq active which))
                       (txt (format "[%s]" label))
+                      (cmd (pcase which
+                             ('log #'carriage-show-log)
+                             ('traffic #'carriage-show-traffic)
+                             (_ #'ignore)))
                       (map (let ((m (make-sparse-keymap)))
-                             (define-key m [header-line mouse-1]
-                                         (lambda (&rest _)
-                                           (pcase which
-                                             ('log (carriage-show-log))
-                                             ('traffic (carriage-show-traffic)))))
+                             ;; Bind both press and click to improve compatibility.
+                             (define-key m [header-line mouse-1] cmd)
+                             (define-key m [header-line down-mouse-1] cmd)
+                             (define-key m [header-line mouse-2] cmd)
+                             (define-key m [header-line down-mouse-2] cmd)
                              m)))
                  (propertize txt
                              'mouse-face 'mode-line-highlight
                              'help-echo (format "Switch to %s" label)
                              'local-map map
+                             'follow-link t
+                             'pointer 'hand
                              'face (when on 'mode-line-emphasis))))))
     (concat "Carriage: "
             (funcall mk "Log" 'log)

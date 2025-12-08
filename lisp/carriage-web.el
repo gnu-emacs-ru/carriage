@@ -1423,7 +1423,7 @@ serving HTTP/SSE from the main Emacs."
      (lambda (status _buf)
        (if (and (numberp status) (= status 200))
            (carriage-web--log "push: snapshot OK status=%s" status)
-         (carriage-web--log "push: snapshot FAIL status=%s" (or status "?"))))))))
+         (carriage-web--log "push: snapshot FAIL status=%s" (or status "?")))))))
 
 (defun carriage-web-snapshot-start ()
   "Start idle snapshot publisher when not in daemon (always push snapshot to webd)."

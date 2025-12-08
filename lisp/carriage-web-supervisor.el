@@ -480,8 +480,7 @@ Useful when Sessions list is empty: seeds the cache in the daemon."
         (message "webd: seeding snapshot…")
         (ignore-errors (carriage-web--snapshot-publish-now))
         (message "webd: snapshot seed triggered"))
-    (message "webd: snapshot function not available (carriage-web not loaded?)"))
-
+    (message "webd: snapshot function not available (carriage-web not loaded?)")))
 
 (provide 'carriage-web-supervisor)
 

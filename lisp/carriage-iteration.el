@@ -162,7 +162,8 @@ Returns buffer position after insertion."
       (let* ((case-fold-search t)
              (here (point))
              (beg-internal nil)
-             (end-before nil))
+             (end-before nil)
+             (end-forward nil))
         ;; Find nearest begin_patch above POS
         (save-excursion
           (when (re-search-backward "^[ \t]*#\\+begin_patch\\b" nil t)
@@ -171,9 +172,13 @@ Returns buffer position after insertion."
         (save-excursion
           (when (re-search-backward "^[ \t]*#\\+end_patch\\b" nil t)
             (setq end-before (line-beginning-position))))
-        ;; If inside a patch block (last begin after last end), insert above begin
+        ;; If inside a patch block (last begin after last end), prefer placing BELOW the block:
+        ;; jump to the end marker after POS and insert on the next line.
         (when (and beg-internal (or (null end-before) (> beg-internal end-before)))
-          (setq here beg-internal))
+          (save-excursion
+            (when (re-search-forward "^[ \t]*#\\+end_patch\\b" nil t)
+              (setq end-forward (line-end-position))))
+          (setq here (or end-forward here)))
         (goto-char here)
         (let ((bol (line-beginning-position)))
           (goto-char bol)

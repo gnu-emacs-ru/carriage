@@ -608,7 +608,9 @@ Consults engine capabilities; safe when registry is not yet loaded."
          (i (mod (or carriage--preloader-index 0) (max 1 n)))
          (frame (aref frames i)))
     (when (overlayp carriage--preloader-overlay)
-      (overlay-put carriage--preloader-overlay 'after-string (propertize frame 'face 'shadow))
+      (overlay-put carriage--preloader-overlay 'after-string nil)
+      (overlay-put carriage--preloader-overlay 'before-string
+                   (propertize (concat frame "\n") 'face 'shadow))
       ;; Refresh a visible window showing this buffer; avoid repainting all windows.
       (let ((w (get-buffer-window (current-buffer) t)))
         (when (window-live-p w)
@@ -628,6 +630,8 @@ Consults engine capabilities; safe when registry is not yet loaded."
            (timer nil))
       (setq carriage--preloader-index 0)
       (carriage--preloader--render pos)
+      ;; Place cursor at spinner line so it appears after the spinner (using before-string).
+      (when (numberp pos) (goto-char pos))
       (setq timer
             (run-at-time
              0 interval
@@ -1182,8 +1186,6 @@ May include :context-text and :context-target per v1.1."
   (interactive)
   ;; Early, immediate feedback before any heavy preparation:
   (carriage-ui-set-state 'sending)
-  (when (fboundp 'carriage--preloader-start)
-    (ignore-errors (carriage--preloader-start)))
   ;; Give redisplay a chance right away
   (sit-for 0)
   (let* ((backend carriage-mode-backend)

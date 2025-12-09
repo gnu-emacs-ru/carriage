@@ -74,6 +74,11 @@ By default (nil) Carriage will refuse to apply on branches named like
 If threads are unavailable or in batch mode, falls back to synchronous execution."
   :type 'boolean :group 'carriage)
 
+(defcustom carriage-apply-timeout-seconds 5
+  "Max seconds to wait in synchronous patch apply/dry-run loops before yielding back.
+Interactive sessions SHOULD prefer the async path; this setting caps residual sync waits."
+  :type 'integer :group 'carriage)
+
 (defun carriage--report-ok (op &rest kv)
   "Build ok report alist with OP and extra KV plist."
   (append (list :op op :status 'ok) kv))
@@ -131,7 +136,9 @@ for other ops → delegate to format registry."
           (while (and (not done) (< (float-time) deadline))
             (if (and proc (process-live-p proc))
                 (accept-process-output proc 0.05)
-              (accept-process-output nil 0.05)))
+              (accept-process-output nil 0.05))
+            ;; Yield briefly to the command loop to keep UI responsive.
+            (sit-for 0))
           (let* ((row (carriage--engine-row 'patch result t0
                                             "git apply --check ok"
                                             "git apply --check failed"
@@ -176,7 +183,9 @@ for other ops → delegate to format registry."
           (while (and (not done) (< (float-time) deadline))
             (if (and proc (process-live-p proc))
                 (accept-process-output proc 0.05)
-              (accept-process-output nil 0.05)))
+              (accept-process-output nil 0.05))
+            ;; Yield to command loop to avoid UI input stalls while waiting.
+            (sit-for 0))
           (carriage--engine-row 'patch result t0
                                 "Applied"
                                 "git apply failed"

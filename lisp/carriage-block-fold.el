@@ -158,19 +158,29 @@ Returns the overlay or nil if block is absent."
       ov)))
 
 (defun carriage-block-fold--cursor-ensure-visibility ()
-  "Reveal folded blocks when point enters them; hide back when point leaves."
+  "Reveal folded blocks when point enters them; hide back when point leaves.
+Avoid full rescans on every command: prefer existing overlays and only schedule
+a debounced refresh when overlays are missing."
   (when (and (derived-mode-p 'org-mode)
              (listp carriage-block-fold-kinds))
     (dolist (cell carriage-block-fold-kinds)
       (let* ((kind (car cell))
              (enabled (cdr cell)))
         (when enabled
-          (let ((rg (carriage-block-fold--block-range-of kind)))
-            (when rg
-              (let ((pos (point)) (beg (car rg)) (end (cdr rg)))
-                (if (and (>= pos beg) (<= pos end))
-                    (carriage-block-fold-reveal kind)
-                  (carriage-block-fold-hide kind))))))))))
+          (let ((ov (alist-get kind carriage-block-fold--overlays)))
+            (cond
+             ;; Fast path: use existing overlay bounds (O(1))
+             ((overlayp ov)
+              (let* ((pos (point))
+                     (beg (overlay-start ov))
+                     (end (overlay-end ov)))
+                (when (and (numberp beg) (numberp end))
+                  (if (and (>= pos beg) (<= pos end))
+                      (carriage-block-fold-reveal kind)
+                    (carriage-block-fold-hide kind)))))
+             ;; Overlay missing — avoid synchronous rescan; schedule a debounced refresh
+             (t
+              (carriage-block-fold-schedule-overlay-refresh 0.1)))))))))
 
 (defun carriage-block-fold-install-cursor-watch (&optional buffer)
   "Install buffer-local watcher to auto-reveal folded blocks on cursor enter."

@@ -2590,5 +2590,75 @@ Avoids heavy org computations on redisplay path."
   (ignore-errors (carriage-ui--install-advices)))
 
 
+;; Header-line refresh throttling and selection-aware gating
+;; - Update header-line only for the selected window (opt-in, default t).
+;; - Coalesce bursts via a per-window debounce timer.
+;; - Avoid scheduling repeated timers while one is pending.
+;;
+;; This reduces redisplay pressure when Carriage window is visible but point is
+;; in a different window, and prevents perceived "keyboard stalls" due to heavy
+;; header-line recomputation on every scroll/command in other windows.
+
+(defgroup carriage-ui-performance nil
+  "Performance-related settings for Carriage UI."
+  :group 'carriage)
+
+(defcustom carriage-ui-headerline-only-selected-window t
+  "When non-nil, update Carriage header-line only for the selected window."
+  :type 'boolean :group 'carriage-ui-performance)
+
+(defcustom carriage-ui-headerline-debounce-ms 120
+  "Minimum delay in milliseconds between header-line refreshes per window."
+  :type 'integer :group 'carriage-ui-performance)
+
+(defun carriage-ui--hl--selected-window-p (win)
+  "Return non-nil if WIN is the currently selected window."
+  (and (window-live-p win) (eq win (selected-window))))
+
+(defun carriage-ui--hl--window-from-args (args)
+  "Try to extract a window from ARGS; fallback to `selected-window'."
+  (let ((w (car args)))
+    (if (window-live-p w) w (selected-window))))
+
+(defun carriage-ui--hl--debounce (win fn args)
+  "Debounce FN ARGS for WIN using per-window timer."
+  (let ((timer (and (window-live-p win)
+                    (window-parameter win 'carriage-ui--hl-timer))))
+    (unless (timerp timer)
+      (let* ((delay (/ (max 0 (or carriage-ui-headerline-debounce-ms 0)) 1000.0))
+             (tm (run-at-time
+                  delay nil
+                  (lambda ()
+                    (when (window-live-p win)
+                      (set-window-parameter win 'carriage-ui--hl-timer nil)
+                      (when (or (not carriage-ui-headerline-only-selected-window)
+                                (carriage-ui--hl--selected-window-p win))
+                        (apply fn args))))))))
+      (when (window-live-p win)
+        (set-window-parameter win 'carriage-ui--hl-timer tm)))))
+
+;; Gate and coalesce header-line refresh requests.
+(ignore-errors
+  (advice-add
+   'carriage-ui--headerline-queue-refresh :around
+   (lambda (orig-fn &rest args)
+     (let ((win (carriage-ui--hl--window-from-args args)))
+       (if (and carriage-ui-headerline-only-selected-window
+                (not (carriage-ui--hl--selected-window-p win)))
+           ;; Skip refresh for non-selected windows entirely.
+           nil
+         ;; Coalesce bursts via debounce.
+         (carriage-ui--hl--debounce win orig-fn args))))))
+
+;; Avoid doing work on window-scroll for non-selected windows.
+(ignore-errors
+  (advice-add
+   'carriage-ui--headerline-window-scroll :around
+   (lambda (orig-fn &rest args)
+     (let ((win (carriage-ui--hl--window-from-args args)))
+       (when (or (not carriage-ui-headerline-only-selected-window)
+                 (carriage-ui--hl--selected-window-p win))
+         (apply orig-fn args))))))
+
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

@@ -262,20 +262,30 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
            (ok (and resolved-port (carriage-webd--wait-health resolved-port))))
       (message (if ok "webd: started on %s:%s" "webd: started (health not confirmed) on %s:%s")
                bind resolved-port)
-      ;; If daemon is healthy, switch publisher to 'push and seed state
+      ;; If daemon is healthy, rewire publisher to 'push using runtime files and seed state
       (when ok
         (with-demoted-errors "webd-start: %S"
-          ;; Configure publish backend and connection params for the main Emacs
-          (setq carriage-web-publish-backend 'push)
-          (setq carriage-web-bind bind)
-          (setq carriage-web-port resolved-port)
-          (setq carriage-web-auth-token token)
-          ;; Start idle snapshot publisher to keep webd sessions cache warm
-          (when (fboundp 'carriage-web-snapshot-start)
-            (ignore-errors (carriage-web-snapshot-start)))
-          ;; Seed initial snapshot immediately (best-effort, fire-and-forget)
-          (when (fboundp 'carriage-web--snapshot-publish-now)
-            (ignore-errors (carriage-web--snapshot-publish-now))))))
+          ;; Prefer explicit publish helpers; fall back to legacy path.
+          (require 'carriage-web-publish nil t)
+          (if (and (featurep 'carriage-web-publish)
+                   (fboundp 'carriage-web-publish-switch-to-push)
+                   (carriage-web-publish-switch-to-push))
+              (progn
+                ;; Idle snapshot publisher keeps webd sessions cache warm
+                (when (fboundp 'carriage-web-snapshot-start)
+                  (ignore-errors (carriage-web-snapshot-start)))
+                ;; Seed initial snapshot immediately (best-effort)
+                (when (fboundp 'carriage-web-publish-seed-snapshot)
+                  (ignore-errors (carriage-web-publish-seed-snapshot))))
+            ;; Legacy fallback: set vars directly and use older helpers
+            (setq carriage-web-publish-backend 'push)
+            (setq carriage-web-bind bind)
+            (setq carriage-web-port resolved-port)
+            (setq carriage-web-auth-token token)
+            (when (fboundp 'carriage-web-snapshot-start)
+              (ignore-errors (carriage-web-snapshot-start)))
+            (when (fboundp 'carriage-web--snapshot-publish-now)
+              (ignore-errors (carriage-web--snapshot-publish-now)))))))
     proc))
 
 (defun carriage-webd--signal-pid (pid sig)
@@ -481,6 +491,22 @@ Useful when Sessions list is empty: seeds the cache in the daemon."
         (ignore-errors (carriage-web--snapshot-publish-now))
         (message "webd: snapshot seed triggered"))
     (message "webd: snapshot function not available (carriage-web not loaded?)")))
+
+;;;###autoload
+(defun carriage-webd-publish-rewire ()
+  "Switch main Emacs publisher to 'push using webd runtime files and seed a snapshot.
+This is safe to call after webd is up (health OK)."
+  (interactive)
+  (require 'carriage-web-publish nil t)
+  (let ((ok1 (and (fboundp 'carriage-web-publish-switch-to-push)
+                  (carriage-web-publish-switch-to-push)))
+        (ok2 nil))
+    (when ok1
+      (setq ok2 (and (fboundp 'carriage-web-publish-seed-snapshot)
+                     (carriage-web-publish-seed-snapshot))))
+    (message "webd: publish rewire=%s seed=%s"
+             (if ok1 "ok" "no")
+             (if ok2 "ok" "no"))))
 
 (provide 'carriage-web-supervisor)
 

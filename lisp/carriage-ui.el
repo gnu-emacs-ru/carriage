@@ -2974,5 +2974,104 @@ a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
                     (let ((end (marker-position carriage--stream-end-marker)))
                       (move-overlay carriage--preloader-overlay end end)))))))
 
+;; Integrated guards and cursor policy for inline ID and streaming cursor behavior.
+
+(defvar-local carriage--inline-id-inserted nil
+  "Non-nil when the inline CARRIAGE_ITERATION_ID has already been inserted in this buffer for the current request.")
+
+(defun carriage--inline-id-reset (&rest _)
+  "Reset per-request inline-id flag."
+  (setq carriage--inline-id-inserted nil))
+
+;; Reset the flag whenever a new stream is initialized.
+(ignore-errors
+  (advice-add 'carriage-stream-reset :after #'carriage--inline-id-reset))
+
+(defun carriage--inline-id-around (orig-fun &rest args)
+  "Guard duplicate inline-id insertions. If already inserted, skip."
+  (if carriage--inline-id-inserted
+      ;; Return a sensible position for downstream code: prefer stream-origin,
+      ;; otherwise current point.
+      (or (and (boundp 'carriage--stream-origin-marker)
+               (markerp carriage--stream-origin-marker)
+               (marker-position carriage--stream-origin-marker))
+          (point))
+    (let ((res (apply orig-fun args)))
+      (setq carriage--inline-id-inserted t)
+      res)))
+
+(ignore-errors
+  ;; Ensure any late call to insert the marker becomes a no-op when already inserted.
+  (advice-add 'carriage-insert-inline-iteration-marker-now :around #'carriage--inline-id-around))
+
+;; Keep user cursor free during streaming unless explicitly enabled.
+(defvar carriage-mode-preloader-follow-point
+  (and (boundp 'carriage-mode-preloader-follow-point)
+       carriage-mode-preloader-follow-point)
+  "When non-nil, move point to the streaming tail on each chunk. Defaults to nil.")
+
+(defun carriage--stream-chunk-save-point (orig-fun &rest args)
+  "Call ORIG-FUN without moving point unless follow-point is enabled."
+  (if carriage-mode-preloader-follow-point
+      (apply orig-fun args)
+    (save-excursion
+      (apply orig-fun args))))
+
+(ignore-errors
+  (advice-add 'carriage-insert-stream-chunk :around #'carriage--stream-chunk-save-point))
+
+;;; Integrated guards: single inline-id insertion and free cursor during streaming
+
+(with-eval-after-load 'carriage-mode
+  ;; Buffer-local flag to prevent duplicate CARRIAGE_ID insertion
+  (defvar-local carriage--inline-id-inserted nil)
+
+  ;; Guard function: insert inline id at most once per iteration
+  (defun carriage--guard-inline-id (orig-fn &rest args)
+    (if carriage--inline-id-inserted
+        ;; Already inserted in this buffer/iteration: skip
+        nil
+      (prog1
+          (apply orig-fn args)
+        (setq carriage--inline-id-inserted t))))
+
+  ;; Reset flag on new stream
+  (defun carriage--reset-inline-id--around (orig-fn &rest args)
+    (setq carriage--inline-id-inserted nil)
+    (apply orig-fn args))
+
+  ;; Install advices safely if functions are present
+  ;; - carriage-insert-inline-iteration-marker-now (from carriage-iteration.el, often autoloaded via mode)
+  (ignore-errors
+    (when (fboundp 'carriage-insert-inline-iteration-marker-now)
+      (advice-remove 'carriage-insert-inline-iteration-marker-now 'carriage--guard-inline-id)
+      (advice-add    'carriage-insert-inline-iteration-marker-now :around #'carriage--guard-inline-id)))
+
+  ;; - low-level writer (defensive guard in case insertion happens there)
+  (ignore-errors
+    (when (fboundp 'carriage-iteration--write-inline-marker)
+      (advice-remove 'carriage-iteration--write-inline-marker 'carriage--guard-inline-id)
+      (advice-add    'carriage-iteration--write-inline-marker :around #'carriage--guard-inline-id)))
+
+  ;; - reset flag when stream is (re)initialized
+  (ignore-errors
+    (when (fboundp 'carriage-stream-reset)
+      (advice-remove 'carriage-stream-reset 'carriage--reset-inline-id--around)
+      (advice-add    'carriage-stream-reset :around #'carriage--reset-inline-id--around)))
+
+  ;; Keep cursor free while streaming: do not move point on each chunk unless user opted-in.
+  ;; We assume carriage-mode provides defcustom carriage-mode-preloader-follow-point (default should be nil).
+  (defun carriage--no-follow-point-around (orig-fn &rest args)
+    (if (and (boundp 'carriage-mode-preloader-follow-point)
+             carriage-mode-preloader-follow-point)
+        (apply orig-fn args)
+      (save-excursion
+        (apply orig-fn args))))
+
+  (ignore-errors
+    (when (fboundp 'carriage-insert-stream-chunk)
+      (advice-remove 'carriage-insert-stream-chunk 'carriage--no-follow-point-around)
+      (advice-add    'carriage-insert-stream-chunk :around #'carriage--no-follow-point-around))))
+
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

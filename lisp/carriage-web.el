@@ -1405,13 +1405,19 @@ serving HTTP/SSE from the main Emacs."
       (carriage-web--http-post-json "/api/push" pl))))
 
 (defun carriage-web--snapshot-build ()
-  "Build lightweight sessions snapshot (list of snapshots) in the main Emacs."
+  "Build lightweight sessions snapshot (list of snapshots) in the main Emacs.
+
+Only include Org buffers with carriage-mode enabled (a \"session\")."
   (let* ((res (cl-loop for b in (buffer-list)
-                       when (buffer-live-p b)
+                       when (and (buffer-live-p b)
+                                 (with-current-buffer b
+                                   (and (derived-mode-p 'org-mode)
+                                        (boundp 'carriage-mode)
+                                        carriage-mode))))
                        for snap = (ignore-errors (carriage-web--buffer-session-snapshot b))
                        when snap collect snap))
          (data (cl-remove-if-not #'identity res)))
-    (carriage-web--log "snapshot-build: count=%d" (condition-case _e (length data) (error -1)))
+    (carriage-web--log "snapshot-build: filtered-count=%d" (condition-case _e (length data) (error -1)))
     data))
 
 (defun carriage-web--snapshot-publish-now ()

@@ -2622,20 +2622,21 @@ Avoids heavy org computations on redisplay path."
 
 (defun carriage-ui--hl--debounce (win fn args)
   "Debounce FN ARGS for WIN using per-window timer."
-  (let ((timer (and (window-live-p win)
-                    (window-parameter win 'carriage-ui--hl-timer))))
-    (unless (timerp timer)
+  (let ((existing (and (window-live-p win)
+                       (window-parameter win 'carriage-ui--hl-timer))))
+    (unless (timerp existing)
       (let* ((delay (/ (max 0 (or carriage-ui-headerline-debounce-ms 0)) 1000.0))
-             (tm (run-at-time
-                  delay nil
-                  (lambda ()
-                    (when (window-live-p win)
-                      (set-window-parameter win 'carriage-ui--hl-timer nil)
-                      (when (or (not carriage-ui-headerline-only-selected-window)
-                                (carriage-ui--hl--selected-window-p win))
-                        (apply fn args))))))))
-      (when (window-live-p win)
-        (set-window-parameter win 'carriage-ui--hl-timer tm)))))
+             (timerobj
+              (run-at-time
+               delay nil
+               (lambda ()
+                 (when (window-live-p win)
+                   (set-window-parameter win 'carriage-ui--hl-timer nil)
+                   (when (or (not carriage-ui-headerline-only-selected-window)
+                             (carriage-ui--hl--selected-window-p win))
+                     (apply fn args)))))))
+        (when (window-live-p win)
+          (set-window-parameter win 'carriage-ui--hl-timer timerobj))))))
 
 ;; Gate and coalesce header-line refresh requests.
 (ignore-errors
@@ -2659,6 +2660,319 @@ Avoids heavy org computations on redisplay path."
        (when (or (not carriage-ui-headerline-only-selected-window)
                  (carriage-ui--hl--selected-window-p win))
          (apply orig-fn args))))))
+
+;; Header-line refresh throttling and selection gating
+;; Goal:
+;; - Update header line only when this buffer is shown in the selected window.
+;; - Debounce updates to avoid redisplay storms.
+;; - Still allow frequent enough updates for spinner animation while streaming.
+;;
+;; This layer wraps carriage-ui--headerline-queue-refresh with a small scheduler.
+;; It coalesces rapid calls and skips refresh when the buffer is not in the
+;; selected window, preventing heavy work while cursor is elsewhere.
+
+(defgroup carriage-ui-headerline nil
+  "Throttling and gating for Carriage header-line refresh."
+  :group 'carriage)
+
+(defcustom carriage-ui-headerline-debounce-ms 80
+  "Minimum debounce for header-line refresh in milliseconds.
+Keep small enough for spinner animation (60–120 ms)."
+  :type 'integer :group 'carriage-ui-headerline)
+
+(defcustom carriage-ui-headerline-streaming-debounce-ms 60
+  "Debounce for header-line during streaming/reasoning (ms)."
+  :type 'integer :group 'carriage-ui-headerline)
+
+(defvar-local carriage-ui--hl-refresh-timer nil
+  "Coalescing timer for header-line refresh in this buffer.")
+
+(defun carriage-ui--headerline--buffer-in-selected-window-p ()
+  "Return non-nil if current buffer is shown in the selected window."
+  (let ((w (get-buffer-window (current-buffer) t)))
+    (and (window-live-p w)
+         (eq w (selected-window)))))
+
+(defun carriage-ui--headerline--streaming-p ()
+  "Best-effort check: return non-nil when UI is in streaming/reasoning/sending phase.
+We avoid hard deps; rely on public note fns to set state elsewhere.
+Fallback to nil when state is unavailable."
+  (condition-case _e
+      (let* ((sym (and (boundp 'carriage-ui--state) 'carriage-ui--state))
+             (st  (and sym (symbol-value sym)))
+             (ph  (and (listp st) (plist-get st :phase))))
+        (memq ph '(sending streaming reasoning)))
+    (error nil)))
+
+(defun carriage-ui--headerline--schedule (thunk)
+  "Schedule THUNK with debounce; coalesce rapid calls for this buffer."
+  (let* ((delay-ms (if (carriage-ui--headerline--streaming-p)
+                       carriage-ui-headerline-streaming-debounce-ms
+                     carriage-ui-headerline-debounce-ms))
+         (delay (max 0.01 (/ (float (or delay-ms 80)) 1000.0))))
+    (unless (timerp carriage-ui--hl-refresh-timer)
+      (setq carriage-ui--hl-refresh-timer
+            (run-at-time
+             delay nil
+             (lambda (buf)
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (setq carriage-ui--hl-refresh-timer nil)
+                   ;; Refresh only if this buffer is visible in the selected window
+                   (when (carriage-ui--headerline--buffer-in-selected-window-p)
+                     (condition-case err
+                         (funcall thunk)
+                       (error
+                        (ignore-errors
+                          (when (fboundp 'carriage-log)
+                            (carriage-log "headerline refresh error: %s"
+                                          (error-message-string err))))))))))
+             (current-buffer))))))
+
+(defun carriage-ui--headerline--advice-queue (orig-fn &rest args)
+  "Around advice for `carriage-ui--headerline-queue-refresh'.
+- Skip when buffer is not in selected window (no need to update header-line).
+- Debounce calls to avoid redisplay storms.
+- While streaming, use a slightly faster debounce for spinner."
+  (if (not (carriage-ui--headerline--buffer-in-selected-window-p))
+      ;; Not the selected window — skip refresh entirely.
+      nil
+    ;; Selected window — coalesce via timer.
+    (carriage-ui--headerline--schedule (lambda () (apply orig-fn args)))))
+
+;; Install advice if the function is present
+(when (fboundp 'carriage-ui--headerline-queue-refresh)
+  (advice-add 'carriage-ui--headerline-queue-refresh :around
+              #'carriage-ui--headerline--advice-queue))
+
+;; Header-line refresh throttling and selection gating (no unnecessary updates
+;; when this buffer is not in the selected window; coalesce bursts).
+(defgroup carriage-ui-headerline nil
+  "Throttle and gating options for Carriage header-line updates."
+  :group 'carriage)
+
+(defcustom carriage-ui-headerline-debounce-ms 80
+  "Minimum milliseconds between header-line refreshes in the selected window.
+Small values (e.g., 60–120 ms) allow spinner animation while avoiding heavy redisplay."
+  :type 'integer :group 'carriage-ui-headerline)
+
+(defvar-local carriage-ui--headerline-last-run 0.0
+  "Timestamp (float-time) of the last executed header-line refresh in this buffer.")
+
+(defvar-local carriage-ui--headerline-timer nil
+  "Pending timer object to coalesce header-line refresh requests in this buffer.")
+
+(defun carriage-ui--headerline--selected-buffer-p ()
+  "Return non-nil when current buffer is the buffer of the selected window."
+  (let ((sel (selected-window)))
+    (and (window-live-p sel)
+         (eq (current-buffer) (window-buffer sel)))))
+
+(defun carriage-ui--headerline--coalesced-call (orig args)
+  "Coalesce header-line refresh calls to avoid over-refreshing.
+Execute ORIG with ARGS either immediately (if outside the debounce window) or schedule
+a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
+  (let* ((now (float-time))
+         (last (or carriage-ui--headerline-last-run 0.0))
+         (deb (max 0.0 (/ (float (or carriage-ui-headerline-debounce-ms 80)) 1000.0)))
+         (elapsed (- now last)))
+    (if (>= elapsed deb)
+        (progn
+          (setq carriage-ui--headerline-last-run now)
+          (apply orig args))
+      ;; Schedule one delayed run; cancel any previous pending timer.
+      (when (timerp carriage-ui--headerline-timer)
+        (ignore-errors (cancel-timer carriage-ui--headerline-timer)))
+      (let* ((delay (max 0.0 (- deb elapsed)))
+             (buf (current-buffer)))
+        (setq carriage-ui--headerline-timer
+              (run-at-time
+               delay nil
+               (lambda ()
+                 (when (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (setq carriage-ui--headerline-timer nil)
+                     (setq carriage-ui--headerline-last-run (float-time))
+                     (apply orig args))))))))
+    ;; Return nil (advice wrapper does not need to return anything specific)
+    nil))
+
+;; Around advice for queue refresh: run only when this buffer is in the selected window
+;; and coalesce rapid calls to keep redisplay fast and keyboard responsive.
+(when (fboundp 'carriage-ui--headerline-queue-refresh)
+  (advice-add
+   'carriage-ui--headerline-queue-refresh :around
+   (lambda (orig &rest args)
+     (when (carriage-ui--headerline--selected-buffer-p)
+       (carriage-ui--headerline--coalesced-call orig args)))))
+
+;; Optional gating for scroll-driven refreshers as well (only in selected window).
+(when (fboundp 'carriage-ui--headerline-window-scroll)
+  (advice-add
+   'carriage-ui--headerline-window-scroll :around
+   (lambda (orig &rest args)
+     (when (carriage-ui--headerline--selected-buffer-p)
+       (carriage-ui--headerline--coalesced-call orig args)))))
+
+;; Integrated robust spinner/header-line safeguards (formerly carriage-preloader-hotfix)
+
+(defun carriage-ui--hl--debounce-safe (win fn args)
+  "Safe debounce implementation for header-line refresh, avoiding void vars."
+  (let ((existing (and (window-live-p win)
+                       (window-parameter win 'carriage-ui--hl-timer))))
+    (unless (timerp existing)
+      (let* ((ms (or (and (boundp 'carriage-ui-headerline-debounce-ms)
+                          carriage-ui-headerline-debounce-ms)
+                     80))
+             (delay (max 0.0 (/ (float ms) 1000.0)))
+             (timerobj
+              (run-at-time
+               delay nil
+               (lambda ()
+                 (when (window-live-p win)
+                   (set-window-parameter win 'carriage-ui--hl-timer nil)
+                   (when (or (not (boundp 'carriage-ui-headerline-only-selected-window))
+                             (not carriage-ui-headerline-only-selected-window)
+                             (eq win (selected-window)))
+                     (apply fn args)))))))
+        (when (window-live-p win)
+          (set-window-parameter win 'carriage-ui--hl-timer timerobj))))))
+
+(when (fboundp 'carriage-ui--hl--debounce)
+  (unless (advice-member-p #'carriage-ui--hl--debounce-safe 'carriage-ui--hl--debounce)
+    (advice-add 'carriage-ui--hl--debounce :around
+                (lambda (orig win fn args)
+                  (ignore orig)
+                  (carriage-ui--hl--debounce-safe win fn args)))))
+
+(when (fboundp 'carriage-ui--headerline-idle-refresh-run)
+  (unless (advice-member-p #'carriage-ui--headerline-idle-safe 'carriage-ui--headerline-idle-refresh-run)
+    (defun carriage-ui--headerline-idle-safe (orig &rest args)
+      (condition-case _e
+          (apply orig args)
+        (error
+         (ignore-errors (message "carriage headerline idle error (guarded)")))))
+    (advice-add 'carriage-ui--headerline-idle-refresh-run :around
+                #'carriage-ui--headerline-idle-safe)))
+
+;; Sane debounce wrapper: guards against stale/broken implementations that may signal void variables (e.g., 'tm).
+(when (fboundp 'carriage-ui--hl--debounce)
+  (unless (advice-member-p 'carriage-ui--hl--debounce@sane 'carriage-ui--hl--debounce)
+    (defun carriage-ui--hl--debounce@sane (orig win fn args)
+      (condition-case _
+          (funcall orig win fn args)
+        (error
+         (let ((existing (and (window-live-p win)
+                              (window-parameter win 'carriage-ui--hl-timer))))
+           (unless (timerp existing)
+             (let* ((delay (/ (max 0 (or carriage-ui-headerline-debounce-ms 0)) 1000.0))
+                    (timerobj
+                     (run-at-time
+                      delay nil
+                      (lambda ()
+                        (when (window-live-p win)
+                          (set-window-parameter win 'carriage-ui--hl-timer nil)
+                          (when (or (not carriage-ui-headerline-only-selected-window)
+                                    (carriage-ui--hl--selected-window-p win))
+                            (apply fn args))))))))
+             (when (window-live-p win)
+               (set-window-parameter win 'carriage-ui--hl-timer timerobj)))))))
+    (advice-add 'carriage-ui--hl--debounce :around #'carriage-ui--hl--debounce@sane)))
+
+;; Hard guard: swallow headerline refresh errors (e.g., stray 'tm) so they don't
+;; break timers/overlays (preloader spinner) or spam the minibuffer.
+(unless (advice-member-p 'carriage-ui--headerline-idle-safe 'carriage-ui--headerline-idle-refresh-run)
+  (defun carriage-ui--headerline-idle-safe (orig &rest args)
+    (condition-case e
+        (apply orig args)
+      (error
+       (ignore-errors
+         (message "headerline refresh error: %s" (error-message-string e))))))
+
+  (advice-add 'carriage-ui--headerline-idle-refresh-run :around
+              #'carriage-ui--headerline-idle-safe))
+
+;; Debounce gate: robust wrapper that never references unknown symbols (e.g., 'tm)
+;; and falls back to a per-window timer if the primary gate errors.
+(unless (advice-member-p 'carriage-ui--hl--debounce@sane 'carriage-ui--hl--debounce)
+  (defun carriage-ui--hl--debounce@sane (orig win fn args)
+    (condition-case _
+        (funcall orig win fn args)
+      (error
+       (let ((existing (and (window-live-p win)
+                            (window-parameter win 'carriage-ui--hl-timer))))
+         (unless (timerp existing)
+           (let* ((delay (/ (max 0 (or carriage-ui-headerline-debounce-ms 0)) 1000.0))
+                  (timerobj
+                   (run-at-time
+                    delay nil
+                    (lambda ()
+                      (when (window-live-p win)
+                        (set-window-parameter win 'carriage-ui--hl-timer nil)
+                        (when (or (not (boundp 'carriage-ui-headerline-only-selected-window))
+                                  (not carriage-ui-headerline-only-selected-window)
+                                  (eq win (selected-window)))
+                          (apply fn args))))))))
+           (when (window-live-p win)
+             (set-window-parameter win 'carriage-ui--hl-timer timerobj)))))))
+  (advice-add 'carriage-ui--hl--debounce :around #'carriage-ui--hl--debounce@sane))
+
+;; Integrated early insertion of iteration marker and reliable spinner start/move.
+;; This ensures:
+;; - Immediate CARRIAGE_ITERATION_ID insertion under cursor, before heavy work.
+;; - Spinner appears right under the ID line and keeps moving to the stream tail.
+;; - Spinner is not stopped on first chunk; finalization path remains the stop point.
+(with-eval-after-load 'carriage-mode
+  (defvar-local carriage--early-iteration-marker-done nil)
+
+  (defun carriage-ui--maybe-insert-early-id-and-spinner ()
+    "Insert CARRIAGE_ID and start spinner immediately under point, once per request."
+    (unless carriage--early-iteration-marker-done
+      (let* ((id (or (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id)
+                     (and (fboundp 'carriage-begin-iteration) (carriage-begin-iteration))
+                     ;; Fallback id when carriage-begin-iteration is unavailable:
+                     (md5 (format "%s-%s" (float-time) (random)))))
+             (pos (and (fboundp 'carriage-iteration--write-inline-marker)
+                       (carriage-iteration--write-inline-marker (point) id))))
+        (when (numberp pos)
+          (setq carriage--early-iteration-marker-done t)
+          ;; Place stream origin right after ID line (beginning of next line).
+          (setq carriage--stream-origin-marker (copy-marker pos t))
+          ;; Show spinner now; first frame must be rendered synchronously.
+          (when (fboundp 'carriage--preloader-start)
+            (carriage--preloader-start))
+          ;; Set UI state to 'sending' early (best-effort).
+          (when (fboundp 'carriage-ui-set-state)
+            (carriage-ui-set-state 'sending))))))
+
+  ;; Wrap send entry points to perform early marker+spinner before heavy work.
+  (dolist (fn '(carriage-send-buffer carriage-send-subtree))
+    (when (fboundp fn)
+      (advice-add fn :around
+                  (lambda (orig &rest args)
+                    (carriage-ui--maybe-insert-early-id-and-spinner)
+                    (apply orig args)))))
+
+  ;; If later pipeline tries to insert the marker again, suppress it gracefully
+  ;; for this request to avoid duplicate ID lines.
+  (when (fboundp 'carriage-insert-inline-iteration-marker-now)
+    (advice-add 'carriage-insert-inline-iteration-marker-now :around
+                (lambda (orig &rest args)
+                  (if carriage--early-iteration-marker-done
+                      ;; Clear flag for future requests; skip duplicate insertion now.
+                      (setq carriage--early-iteration-marker-done nil)
+                    (apply orig args)))))
+
+  ;; Keep spinner at the tail of the streamed output on each chunk.
+  (when (fboundp 'carriage-insert-stream-chunk)
+    (advice-add 'carriage-insert-stream-chunk :after
+                (lambda (&rest _)
+                  (when (and (boundp 'carriage--preloader-overlay)
+                             (overlayp carriage--preloader-overlay)
+                             (boundp 'carriage--stream-end-marker)
+                             (markerp carriage--stream-end-marker))
+                    (let ((end (marker-position carriage--stream-end-marker)))
+                      (move-overlay carriage--preloader-overlay end end)))))))
 
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

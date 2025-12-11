@@ -574,6 +574,19 @@ Consults engine capabilities; safe when registry is not yet loaded."
   "Update interval, in seconds, for the buffer preloader spinner."
   :type 'number :group 'carriage)
 
+(defcustom carriage-mode-preloader-face 'mode-line-emphasis
+  "Face used to render the in-buffer preloader spinner.
+Choose a visible face for your theme; 'shadow can be too dim."
+  :type 'face :group 'carriage)
+
+(defcustom carriage-mode-preloader-window-local nil
+  "When non-nil, show the spinner only in the window where streaming started."
+  :type 'boolean :group 'carriage)
+
+(defcustom carriage-mode-preloader-follow-point t
+  "When non-nil, keep point after the spinner during streaming by moving it to the stream tail on each chunk."
+  :type 'boolean :group 'carriage)
+
 (defconst carriage--preloader-frames-unicode
   ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
   "Spinner frames for the buffer preloader (Unicode).")
@@ -610,7 +623,7 @@ Consults engine capabilities; safe when registry is not yet loaded."
     (when (overlayp carriage--preloader-overlay)
       (overlay-put carriage--preloader-overlay 'after-string nil)
       (overlay-put carriage--preloader-overlay 'before-string
-                   (propertize (concat frame "\n") 'face 'shadow))
+                   (propertize (concat frame "\n") 'face carriage-mode-preloader-face))
       ;; Refresh a visible window showing this buffer; avoid repainting all windows.
       (let ((w (get-buffer-window (current-buffer) t)))
         (when (window-live-p w)
@@ -619,7 +632,14 @@ Consults engine capabilities; safe when registry is not yet loaded."
 
 (defun carriage--preloader-start ()
   "Start buffer preloader at the origin of the current stream region."
-  (when (and carriage-mode-preloader-enabled (null carriage--preloader-timer))
+  (when carriage-mode-preloader-enabled
+    ;; Hard reset any stale state so spinner always (re)appears.
+    (when (timerp carriage--preloader-timer)
+      (cancel-timer carriage--preloader-timer))
+    (setq carriage--preloader-timer nil)
+    (when (overlayp carriage--preloader-overlay)
+      (delete-overlay carriage--preloader-overlay))
+    (setq carriage--preloader-overlay nil)
     (let* ((pos (cond
                  ((and (markerp carriage--stream-origin-marker)
                        (buffer-live-p (marker-buffer carriage--stream-origin-marker)))
@@ -629,8 +649,15 @@ Consults engine capabilities; safe when registry is not yet loaded."
            (buf (current-buffer))
            (timer nil))
       (setq carriage--preloader-index 0)
+      ;; Render first frame immediately so spinner is visible right away.
       (carriage--preloader--render pos)
-      ;; Place cursor at spinner line so it appears after the spinner (using before-string).
+      ;; Ensure high priority so spinner is not obscured by other overlays.
+      (when (overlayp carriage--preloader-overlay)
+        (overlay-put carriage--preloader-overlay 'priority 1001)
+        (when (and (boundp 'carriage-mode-preloader-window-local)
+                   carriage-mode-preloader-window-local)
+          (overlay-put carriage--preloader-overlay 'window (selected-window))))
+      ;; Place cursor under spinner (spinner line is provided by before-string + \"\\n\").
       (when (numberp pos) (goto-char pos))
       (setq timer
             (run-at-time
@@ -641,13 +668,13 @@ Consults engine capabilities; safe when registry is not yet loaded."
                      (cancel-timer timer)
                      (setq timer nil))
                  (with-current-buffer buf
-                   (let* ((ov (and (boundp 'carriage--preloader-overlay)
-                                   carriage--preloader-overlay))
+                   (let* ((ov carriage--preloader-overlay)
                           (ob (and (overlayp ov) (overlay-buffer ov))))
                      (when (and (overlayp ov)
                                 (buffer-live-p ob)
                                 (get-buffer-window ob t))
-                       (carriage--preloader--render (overlay-start ov)))))))))
+                       (carriage--preloader--render
+                        (or (overlay-start ov) pos)))))))))
       (setq carriage--preloader-timer timer))))
 
 (defun carriage--preloader-stop ()
@@ -881,9 +908,6 @@ TYPE is either 'text (default) or 'reasoning.
   and append to the reasoning tail marker so that main text remains outside the block."
   (let ((s (or string "")))
     (carriage--undo-group-start)
-    ;; First incoming chunk stops the preloader (if any).
-    (when (fboundp 'carriage--preloader-stop)
-      (carriage--preloader-stop))
     (pcase type
       ((or 'reasoning :reasoning)
        (when (eq carriage-mode-include-reasoning 'block)
@@ -914,6 +938,15 @@ TYPE is either 'text (default) or 'reasoning.
              (setq carriage--iteration-inline-marker-inserted t))))
        ;; Do not auto-close reasoning here; text is appended after all prior content.
        (carriage--stream-insert-at-end s))))
+  ;; Move preloader overlay to stream tail so spinner stays ahead
+  (when (and (boundp 'carriage--preloader-overlay)
+             (overlayp carriage--preloader-overlay)
+             (markerp carriage--stream-end-marker))
+    (let ((endpos (marker-position carriage--stream-end-marker)))
+      (move-overlay carriage--preloader-overlay endpos endpos)
+      (when (and (boundp 'carriage-mode-preloader-follow-point)
+                 carriage-mode-preloader-follow-point)
+        (goto-char endpos))))
   ;; Nudge redisplay for windows showing this buffer
   (dolist (w (get-buffer-window-list (current-buffer) t t))
     (force-window-update w))
@@ -2245,4 +2278,59 @@ If no begin_context is present, insert a minimal header and block at point-max."
       (advice-add fn :after #'carriage--doc-state-write-safe))))
 
 (provide 'carriage-mode)
+
+;; Hotfix: enforce proper marker→spinner order directly under cursor for send operations.
+;; Desired order relative to user's point at send time:
+;;  1) newline
+;;  2) #+CARRIAGE_ITERATION_ID: <id>
+;;  3) newline
+;;  4) spinner on its own line
+;;  5) newline
+;;  6) place cursor after spinner (streaming starts here)
+
+(with-eval-after-load 'carriage-transport
+  (defun carriage--display-fix--insert-marker-here ()
+    "Insert newline + CARRIAGE_ID + newline under point, set stream-origin below it.
+Also marks the inline-marker as inserted to avoid duplicate insertions elsewhere."
+    (let* ((id (or (and (boundp 'carriage--last-iteration-id)
+                        carriage--last-iteration-id)
+                   (and (fboundp 'carriage-begin-iteration)
+                        (carriage-begin-iteration))
+                   ;; Fallback id (deterministic enough for UI; engines use their own ids)
+                   (secure-hash 'sha1 (format "%s-%s" (float-time) (random 1e9))))))
+      ;; 1) newline before marker if not at BOL
+      (unless (bolp) (end-of-line))
+      (insert "\n")
+      ;; 2) marker line
+      (insert (format "#+CARRIAGE_ITERATION_ID: %s\n" id))
+      ;; 3) origin marker → start of next line (spinner goes here, then output)
+      (when (boundp 'carriage--stream-origin-marker)
+        (if (and (markerp carriage--stream-origin-marker)
+                 (marker-buffer carriage--stream-origin-marker))
+            (set-marker carriage--stream-origin-marker (point))
+          (setq carriage--stream-origin-marker (copy-marker (point) t))))
+      (setq carriage--iteration-inline-marker-inserted t)
+      t))
+
+  (defun carriage-transport-begin@display-fix (orig-fn &rest args)
+    "Ensure marker is inserted under cursor before transport starts (single source of truth)."
+    (save-excursion
+      (condition-case _e
+          (carriage--display-fix--insert-marker-here)
+        (error nil)))
+    (apply orig-fn args))
+  (advice-add 'carriage-transport-begin :around #'carriage-transport-begin@display-fix))
+
+(with-eval-after-load 'carriage-mode
+  (defun carriage--preloader-start@move-point (orig-fn &rest args)
+    "After spinner appears, place point where streaming should write (below spinner)."
+    (let ((res (apply orig-fn args)))
+      (when (and (boundp 'carriage--stream-origin-marker)
+                 (markerp carriage--stream-origin-marker))
+        (goto-char carriage--stream-origin-marker))
+      res))
+  (when (fboundp 'carriage--preloader-start)
+    (advice-add 'carriage--preloader-start :around #'carriage--preloader-start@move-point)))
+
+(provide 'carriage-display-fix)
 ;;; carriage-mode.el ends here

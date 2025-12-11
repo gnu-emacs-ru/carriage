@@ -203,12 +203,29 @@ Returns an unregister lambda that clears the handler when called."
 
 ;;;###autoload
 (defun carriage-transport-streaming ()
-  "Signal that transport has progressed to streaming: update UI state."
+  "Signal that transport has progressed to streaming: update UI state (do not stop preloader)."
   (carriage-log "Transport: streaming")
-  ;; Stop preloader when first streaming chunk arrives.
-  (when (fboundp 'carriage--preloader-stop)
-    (ignore-errors (carriage--preloader-stop)))
-  (carriage-ui-set-state 'streaming))
+  (carriage-ui-set-state 'streaming)
+  ;; Ensure spinner overlay is alive when streaming starts; render a frame if needed (best-effort).
+  (when (and (fboundp 'carriage--preloader-start)
+             (boundp 'carriage-mode-preloader-enabled)
+             carriage-mode-preloader-enabled)
+    (ignore-errors
+      ;; If overlay/timer were not started for any reason, start now.
+      (unless (and (boundp 'carriage--preloader-overlay)
+                   (overlayp carriage--preloader-overlay))
+        (carriage--preloader-start))
+      ;; Draw a frame immediately to avoid waiting for timer tick.
+      (when (fboundp 'carriage--preloader--render)
+        (let* ((pos (or (and (boundp 'carriage--stream-end-marker)
+                             (markerp carriage--stream-end-marker)
+                             (marker-position carriage--stream-end-marker))
+                        (and (boundp 'carriage--stream-origin-marker)
+                             (markerp carriage--stream-origin-marker)
+                             (marker-position carriage--stream-origin-marker))
+                        (point))))
+          (when (numberp pos)
+            (ignore-errors (carriage--preloader--render pos))))))))
 
 ;;;###autoload
 (defun carriage-transport-complete (&optional errorp)

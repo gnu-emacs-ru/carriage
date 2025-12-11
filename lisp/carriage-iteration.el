@@ -150,46 +150,22 @@ When optional ID is non-nil, reuse it instead of generating a new one."
   :group 'carriage)
 
 (defun carriage-iteration--write-inline-marker (pos id)
-  "Insert inline iteration marker at a safe position:
-- Always at the beginning of a line (BOL).
-- If POS is inside a #+begin_patch … #+end_patch block, place the marker
-  above the block's begin line (so it never splits a patch block).
-Returns buffer position after insertion."
+  "Insert inline iteration marker directly under POS with explicit newlines.
+Order at POS:
+1) newline
+2) \"#+CARRIAGE_ITERATION_ID: <id>\"
+3) newline
+Return buffer position after the inserted marker (start of the next line)."
   (when (and (stringp id) (> (length (string-trim id)) 0)
              (numberp pos))
     (save-excursion
       (goto-char pos)
-      (let* ((case-fold-search t)
-             (here (point))
-             (beg-internal nil)
-             (end-before nil)
-             (end-forward nil))
-        ;; Find nearest begin_patch above POS
-        (save-excursion
-          (when (re-search-backward "^[ \t]*#\\+begin_patch\\b" nil t)
-            (setq beg-internal (line-beginning-position))))
-        ;; Find nearest end_patch above POS
-        (save-excursion
-          (when (re-search-backward "^[ \t]*#\\+end_patch\\b" nil t)
-            (setq end-before (line-beginning-position))))
-        ;; If inside a patch block (last begin after last end), prefer placing BELOW the block:
-        ;; jump to the end marker after POS and insert on the next line.
-        (when (and beg-internal (or (null end-before) (> beg-internal end-before)))
-          (save-excursion
-            (when (re-search-forward "^[ \t]*#\\+end_patch\\b" nil t)
-              (setq end-forward (line-end-position))))
-          (setq here (or end-forward here)))
-        (goto-char here)
-        (let ((bol (line-beginning-position)))
-          (goto-char bol)
-          ;; Ensure a visual blank line above the marker (when not at bob or prev non-blank).
-          (unless (or (bobp)
-                      (save-excursion
-                        (forward-line -1)
-                        (looking-at-p "^[ \t]*$")))
-            (insert "\n"))
-          (insert (format "#+CARRIAGE_ITERATION_ID: %s\n" (downcase id)))
-          (point))))))
+      ;; Always start on a fresh line under POS (do not split inline text).
+      (unless (bolp)
+        (end-of-line))
+      (insert "\n")
+      (insert (format "#+CARRIAGE_ITERATION_ID: %s\n" (downcase id)))
+      (point))))
 
 (defun carriage-iteration-read-id ()
   "Read iteration id for the current buffer.

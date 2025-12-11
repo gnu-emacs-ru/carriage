@@ -333,16 +333,17 @@ Gracefully ignores missing keys."
 
 (defun carriage-doc-state-auto-enable ()
   "Find-file hook: auto-enable carriage-mode when CAR_MODE=t or a begin_carriage block is present.
-Requires an Org buffer and a recognizable project root."
+Runs only in Org buffers. Does not require Git; if Git/project root is unavailable,
+Carriage still enables and treats `default-directory' as the project root."
   (when (derived-mode-p 'org-mode)
     (condition-case _e
         (let* ((pl (carriage-doc-state-read (current-buffer)))
                (m  (plist-get pl :CAR_MODE))
                (on (carriage-doc-state--str->bool (or m "")))
                (has-block (ignore-errors (carriage-doc-state--carriage-block-range))))
-          (when (and (fboundp 'carriage-project-root)
-                     (carriage-project-root)
-                     (or on has-block))
+          ;; Enable Carriage immediately when the document explicitly opts-in or
+          ;; contains a begin_carriage block. Do not call project-root/git here.
+          (when (or on has-block)
             (require 'carriage-mode)
             (carriage-mode 1)))
       (error nil))))
@@ -350,7 +351,9 @@ Requires an Org buffer and a recognizable project root."
 (defun carriage-doc-state--maybe-auto-enable ()
   "Auto-enable carriage-mode on visit when carriage-global-mode is active.
 Calls `carriage-doc-state-auto-enable' only if global mode is on."
-  (when (bound-and-true-p carriage-global-mode)
+  (when (and (bound-and-true-p carriage-global-mode)
+             (derived-mode-p 'org-mode)
+             (not (bound-and-true-p carriage-mode)))
     (ignore-errors (carriage-doc-state-auto-enable))))
 
 ;; -------------------------------------------------------------------

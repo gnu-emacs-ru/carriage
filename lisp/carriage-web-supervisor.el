@@ -39,8 +39,12 @@
   :type 'string
   :group 'carriage-webd)
 
-(defcustom carriage-webd-default-port 0
-  "Default port for webd. 0 means ephemeral."
+(defcustom carriage-webd-default-port 2025
+  "Default port for webd.
+Port selection policy:
+- try 2025;
+- if busy, try 2026;
+- otherwise let kernel pick an ephemeral port (0)."
   :type 'integer
   :group 'carriage-webd)
 
@@ -265,27 +269,17 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
       ;; If daemon is healthy, rewire publisher to 'push using runtime files and seed state
       (when ok
         (with-demoted-errors "webd-start: %S"
-          ;; Prefer explicit publish helpers; fall back to legacy path.
+          ;; Rewire publisher unconditionally via helpers.
           (require 'carriage-web-publish nil t)
-          (if (and (featurep 'carriage-web-publish)
-                   (fboundp 'carriage-web-publish-switch-to-push)
-                   (carriage-web-publish-switch-to-push))
-              (progn
-                ;; Idle snapshot publisher keeps webd sessions cache warm
-                (when (fboundp 'carriage-web-snapshot-start)
-                  (ignore-errors (carriage-web-snapshot-start)))
-                ;; Seed initial snapshot immediately (best-effort)
-                (when (fboundp 'carriage-web-publish-seed-snapshot)
-                  (ignore-errors (carriage-web-publish-seed-snapshot))))
-            ;; Legacy fallback: set vars directly and use older helpers
-            (setq carriage-web-publish-backend 'push)
-            (setq carriage-web-bind bind)
-            (setq carriage-web-port resolved-port)
-            (setq carriage-web-auth-token token)
+          (when (and (featurep 'carriage-web-publish)
+                     (fboundp 'carriage-web-publish-switch-to-push)
+                     (carriage-web-publish-switch-to-push))
+            ;; Start idle snapshot publisher (keeps cache warm) and seed once.
             (when (fboundp 'carriage-web-snapshot-start)
               (ignore-errors (carriage-web-snapshot-start)))
-            (when (fboundp 'carriage-web--snapshot-publish-now)
-              (ignore-errors (carriage-web--snapshot-publish-now)))))))
+            (when (fboundp 'carriage-web-publish-seed-snapshot)
+              (ignore-errors (carriage-web-publish-seed-snapshot)))
+            (message "webd: publish rewired to 'push; snapshot seeded")))))
     proc))
 
 (defun carriage-webd--signal-pid (pid sig)
@@ -507,6 +501,17 @@ This is safe to call after webd is up (health OK)."
     (message "webd: publish rewire=%s seed=%s"
              (if ok1 "ok" "no")
              (if ok2 "ok" "no"))))
+
+;; Auto-rewire publisher to webd after carriage-webd-start succeeds.
+(with-eval-after-load 'carriage-web-supervisor
+  (ignore-errors
+    (advice-add
+     'carriage-webd-start :after
+     (lambda (&rest _)
+       (ignore-errors
+         (require 'carriage-web-publish nil t)
+         (when (fboundp 'carriage-web-publish-setup-now)
+           (carriage-web-publish-setup-now)))))))
 
 (provide 'carriage-web-supervisor)
 

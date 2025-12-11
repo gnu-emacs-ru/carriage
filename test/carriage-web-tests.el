@@ -1319,4 +1319,41 @@
       (should (equal (plist-get cap-payload :code) "WEB_E_PAYLOAD")))
     (setq carriage-web-auth-token nil))
 
+;; ---------------------------------------------------------------------
+;; Snapshot builder filters: only Org buffers with carriage-mode are sessions.
+
+(ert-deftest carriage-web--snapshot-build-filters-carriage-org ()
+  "Only Org buffers with carriage-mode should be considered sessions."
+  (require 'cl-lib)
+  (let ((buf-org (generate-new-buffer "cw-org"))
+        (buf-tmp (generate-new-buffer "cw-nonorg")))
+    (unwind-protect
+        (progn
+          ;; Prepare an Org buffer with carriage-mode=t and a file name
+          (with-current-buffer buf-org
+            (ignore-errors (require 'org))
+            (org-mode)
+            (setq-local carriage-mode t)
+            (setq buffer-file-name (expand-file-name "proj/sample.org" default-directory)))
+          ;; Prepare a non-Org buffer without carriage-mode
+          (with-current-buffer buf-tmp
+            (fundamental-mode)
+            (setq buffer-file-name (expand-file-name "misc.txt" default-directory)))
+          ;; Limit buffer-list to our two buffers
+          (let* ((id-org (with-current-buffer buf-org (carriage-web--buffer-id (current-buffer)))))
+            (cl-letf (((symbol-function 'buffer-list)
+                       (lambda () (list buf-org buf-tmp))))
+              (let* ((data (carriage-web--snapshot-build))
+                     (ids  (mapcar (lambda (pl) (cond
+                                                 ((and (listp pl) (plist-get pl :id)) (plist-get pl :id))
+                                                 ((and (listp pl) (consp (car pl))) (alist-get :id pl))
+                                                 (t nil)))
+                                   data)))
+                ;; Must include only our Org+carriage-mode buffer
+                (should (listp data))
+                (should (member id-org ids))
+                (should (= (length (cl-remove-if-not #'identity ids)) 1))))))
+      (when (buffer-live-p buf-org) (kill-buffer buf-org))
+      (when (buffer-live-p buf-tmp) (kill-buffer buf-tmp)))))
+
 ;;; carriage-web-tests.el ends here

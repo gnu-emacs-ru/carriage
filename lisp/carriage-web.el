@@ -417,6 +417,7 @@ Return an alist of (downcased-name . value)."
    " const saved = (function(){ try{return localStorage.getItem('cw_token')||'';}catch(e){return '';} })();"
    " S.token = saved; $('#tok').value = saved; }"
    "function init(){ bind(); refreshList(); connect(); setInterval(refreshList, 15000); }"
+   "window.addEventListener('beforeunload', ()=>{ try{ if(S.es){ S.es.close(); } }catch(e){} });"
    "document.addEventListener('DOMContentLoaded', init);"
    "})();</script>"
    "</body></html>"))
@@ -762,7 +763,13 @@ legacy in-process mode a small TTL cache MAY be refreshed by scanning."
                               (or ttl 0))))))
       (unless fresh
         (let* ((res (cl-loop for b in (buffer-list)
-                             when (buffer-live-p b)
+                             when (and (buffer-live-p b)
+                                       (with-current-buffer b
+                                         (and buffer-file-name
+                                              (not (file-remote-p buffer-file-name))
+                                              (derived-mode-p 'org-mode)
+                                              (boundp 'carriage-mode)
+                                              carriage-mode)))
                              for snap = (ignore-errors (carriage-web--buffer-session-snapshot b))
                              when snap collect snap))
                (data (cl-remove-if-not #'identity res)))
@@ -1269,17 +1276,32 @@ In main Emacs this is disabled; use `carriage-webd-start'."
                       :sentinel #'carriage-web--sentinel
                       :log #'carriage-web--accept))
         (error
-         ;; fallback to ephemeral port
-         (setq proc (make-network-process
-                     :name "carriage-web"
-                     :server t
-                     :host host
-                     :service 0
-                     :noquery t
-                     :family 'ipv4
-                     :filter #'carriage-web--process-filter
-                     :sentinel #'carriage-web--sentinel
-                     :log #'carriage-web--accept))))
+         ;; fallback: if requested 2025, try 2026; otherwise go ephemeral (0)
+         (let ((alt (and (numberp port) (= port 2025) 2026)))
+           (condition-case _e2
+               (when alt
+                 (setq proc (make-network-process
+                             :name "carriage-web"
+                             :server t
+                             :host host
+                             :service alt
+                             :noquery t
+                             :family 'ipv4
+                             :filter #'carriage-web--process-filter
+                             :sentinel #'carriage-web--sentinel
+                             :log #'carriage-web--accept)))
+             (error
+              ;; final fallback to ephemeral port
+              (setq proc (make-network-process
+                          :name "carriage-web"
+                          :server t
+                          :host host
+                          :service 0
+                          :noquery t
+                          :family 'ipv4
+                          :filter #'carriage-web--process-filter
+                          :sentinel #'carriage-web--sentinel
+                          :log #'carriage-web--accept)))))))
       (setq carriage-web--server-proc proc)
       (let* ((pc1 (ignore-errors (process-contact proc :service)))
              (pc2 (ignore-errors (process-contact proc t)))
@@ -1361,34 +1383,40 @@ Useful during debugging to ensure no long-lived connections remain."
 ON-DONE is an optional callback invoked with (status buffer) when request completes."
   (let* ((bind (or carriage-web-bind "127.0.0.1"))
          (port (or carriage-web-port 8787))
-         (url (format "http://%s:%s%s" bind port path))
-         (json (json-encode payload))
+         (url  (format "http://%s:%s%s" bind port path))
+         ;; JSON → строго unibyte UTF-8 для url-http-create-request
+         (json-str (json-encode payload))
+         (body     (encode-coding-string json-str 'utf-8))
          (url-request-method "POST")
-         ;; Keep requests lean and non-blocking; never show minibuffer progress.
+         ;; Лёгкий, неблокирующий режим; без статус‑минимизатора.
          (url-show-status nil)
          (url-automatic-caching nil)
-         ;; Short timeout to avoid UI stalls if webd is down.
+         ;; Короткий timeout, чтобы не подвешивать UI при недоступном webd.
          (url-request-timeout 0.7)
          (url-request-extra-headers
           (append
-           `(("Content-Type" . "application/json; charset=utf-8"))
+           '(("Content-Type" . "application/json; charset=utf-8"))
            (when carriage-web-auth-token
              `(("X-Auth" . ,carriage-web-auth-token)))))
-         (url-request-data json))
+         ;; Тело запроса — уже unibyte UTF‑8
+         (url-request-data body)
+         ;; Явно укажем MIME charset и двоичный вывод, чтобы исключить multibyte-сборку заголовка+тела
+         (url-mime-charset-string "utf-8"))
     (condition-case _e
-        (url-retrieve
-         url
-         (lambda (status)
-           (let ((buf (current-buffer)))
-             (unwind-protect
-                 (when (functionp on-done)
-                   (with-current-buffer buf
-                     (goto-char (point-min))
-                     (let ((ok (and (re-search-forward "^HTTP/1\\.[01] \\([0-9]+\\)" nil t)
-                                    (string-to-number (match-string 1)))))
-                       (funcall on-done ok buf))))
-               (when (buffer-live-p buf) (kill-buffer buf)))))
-         nil t)
+        (let ((coding-system-for-write 'binary))  ;; критично: сборка всего HTTP‑запроса в unibyte
+          (url-retrieve
+           url
+           (lambda (status)
+             (let ((buf (current-buffer)))
+               (unwind-protect
+                   (when (functionp on-done)
+                     (with-current-buffer buf
+                       (goto-char (point-min))
+                       (let ((ok (and (re-search-forward "^HTTP/1\\.[01] \\([0-9]+\\)" nil t)
+                                      (string-to-number (match-string 1)))))
+                         (funcall on-done ok buf))))
+                 (when (buffer-live-p buf) (kill-buffer buf)))))
+           nil t))
       (error nil))))
 
 (defun carriage-web-publish (type payload)
@@ -1407,17 +1435,22 @@ serving HTTP/SSE from the main Emacs."
 (defun carriage-web--snapshot-build ()
   "Build lightweight sessions snapshot (list of snapshots) in the main Emacs.
 
-Only include Org buffers with carriage-mode enabled (a \"session\")."
-  (let* ((res (cl-loop for b in (buffer-list)
+Include any live buffer with carriage-mode enabled (a \"session\").
+Skip only remote (TRAMP) buffers to avoid expensive ops; ephemeral/non-file
+buffers are allowed and identified by buffer-name."
+  (let* ((total (length (buffer-list)))
+         (res (cl-loop for b in (buffer-list)
                        when (and (buffer-live-p b)
                                  (with-current-buffer b
-                                   (and (derived-mode-p 'org-mode)
-                                        (boundp 'carriage-mode)
-                                        carriage-mode))))
+                                   (and (boundp 'carriage-mode)
+                                        carriage-mode
+                                        (not (file-remote-p (or buffer-file-name ""))))))
                        for snap = (ignore-errors (carriage-web--buffer-session-snapshot b))
                        when snap collect snap))
          (data (cl-remove-if-not #'identity res)))
-    (carriage-web--log "snapshot-build: filtered-count=%d" (condition-case _e (length data) (error -1)))
+    (carriage-web--log "snapshot-build: total=%d filtered=%d"
+                       (or total -1)
+                       (condition-case _e (length data) (error -1)))
     data))
 
 (defun carriage-web--snapshot-publish-now ()
@@ -1458,6 +1491,245 @@ Only include Org buffers with carriage-mode enabled (a \"session\")."
   (carriage-web--log "snapshot-seed: requested by user")
   (ignore-errors (carriage-web--snapshot-publish-now))
   (message "carriage-web: snapshot seed sent"))
+
+;; Override faulty /api/push handler with a robust version (condition-case for JSON).
+(defun carriage-web--handle-push (proc req)
+  "Handle POST /api/push from a trusted publisher (loopback + token).
+REQ is a plist with :headers, :query and :body (JSON).
+Supported types: ui, apply, report, snapshot, transport; unknown → passthrough."
+  (let* ((body (or (plist-get req :body) ""))
+         (hdrs (plist-get req :headers))
+         (ctype (and (listp hdrs) (assoc-default "content-type" hdrs))))
+    ;; Request size limit (prevent UI stalls)
+    (when (and (integerp carriage-web-max-request-bytes)
+               (> (string-bytes body) carriage-web-max-request-bytes))
+      (carriage-web--log "push: payload too large bytes=%d limit=%d"
+                         (string-bytes body) carriage-web-max-request-bytes)
+      (carriage-web--send-json
+       proc "400 Bad Request"
+       (list :ok json-false :error "payload too large" :code "WEB_E_PAYLOAD"))
+      (cl-return-from carriage-web--handle-push t))
+    ;; Content-Type must be application/json
+    (unless (and (stringp ctype)
+                 (string-match-p "\\`application/json\\b" (downcase ctype)))
+      (carriage-web--log "push: bad content-type ctype=%S" ctype)
+      (carriage-web--send-json
+       proc "400 Bad Request"
+       (list :ok json-false :error "bad content-type" :code "WEB_E_PAYLOAD"))
+      (cl-return-from carriage-web--handle-push t))
+    ;; Parse JSON body to plist
+    (let* ((obj (condition-case _e
+                    (let ((json-object-type 'plist)
+                          (json-array-type 'list)
+                          (json-false :false))
+                      (json-read-from-string body))
+                  (error nil))))
+      (if (not (and (listp obj) (plist-get obj :type)))
+          (carriage-web--send-json proc "400 Bad Request"
+                                   (list :ok json-false
+                                         :error "bad request" :code "WEB_E_PAYLOAD"))
+        (let* ((typ (plist-get obj :type))
+               (doc (plist-get obj :doc)))
+          (when (stringp typ)
+            (carriage-web--log "push: type=%s doc=%s" typ (or doc "-")))
+          (pcase (and (stringp typ) typ)
+            ;; UI state
+            ("ui"
+             (let ((st (plist-get obj :state)))
+               (when (and (stringp doc) (listp st))
+                 (puthash doc st carriage-web--ui-by-doc)
+                 (carriage-web-pub "ui" (list :doc doc :state st))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Apply/report summaries
+            ((or "apply" "report")
+             (let ((sum (plist-get obj :summary)))
+               (when (and (stringp doc) (listp sum))
+                 (puthash doc sum carriage-web--last-report-by-doc)
+                 (carriage-web-pub typ (list :doc doc :summary sum))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Snapshot list replaces sessions cache
+            ("snapshot"
+             (let ((data (plist-get obj :data)))
+               (when (listp data)
+                 (setq carriage-web--sessions-cache data)
+                 (setq carriage-web--sessions-cache-time (float-time))
+                 (carriage-web--log "push: snapshot updated count=%d"
+                                    (condition-case _e (length data) (error 0)))
+                 ;; Notify SSE clients that new snapshot is available
+                 (carriage-web-pub "snapshot" (list :ts (float-time)))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Transport events
+            ("transport"
+             (let ((ph (plist-get obj :phase))
+                   (meta (plist-get obj :meta)))
+               (when (stringp doc)
+                 (carriage-web-pub "transport"
+                                   (append (list :doc doc :phase ph)
+                                           (and (listp meta) (list :meta meta))))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Passthrough for unknown types
+            (_
+             (carriage-web-pub (or typ "message") (or obj (list)))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))))))))
+
+;; Final override: robust /api/push handler with correct JSON parse and guards.
+(defun carriage-web--handle-push (proc req)
+  "Handle POST /api/push from a trusted publisher (loopback + token).
+REQ is a plist with :headers, :query and :body (JSON).
+Supported types: ui, apply, report, snapshot, transport; unknown → passthrough."
+  (let* ((body (or (plist-get req :body) ""))
+         (hdrs (plist-get req :headers))
+         (ctype (and (listp hdrs) (assoc-default "content-type" hdrs))))
+    ;; Request size limit (prevent UI stalls)
+    (when (and (integerp carriage-web-max-request-bytes)
+               (> (string-bytes body) carriage-web-max-request-bytes))
+      (carriage-web--log "push: payload too large bytes=%d limit=%d"
+                         (string-bytes body) carriage-web-max-request-bytes)
+      (carriage-web--send-json
+       proc "400 Bad Request"
+       (list :ok json-false :error "payload too large" :code "WEB_E_PAYLOAD"))
+      (cl-return-from carriage-web--handle-push t))
+    ;; Content-Type must be application/json
+    (unless (and (stringp ctype)
+                 (string-match-p "\\`application/json\\b" (downcase ctype)))
+      (carriage-web--log "push: bad content-type ctype=%S" ctype)
+      (carriage-web--send-json
+       proc "400 Bad Request"
+       (list :ok json-false :error "bad content-type" :code "WEB_E_PAYLOAD"))
+      (cl-return-from carriage-web--handle-push t))
+    ;; Parse JSON body to plist (robust)
+    (let* ((obj (condition-case _e
+                    (let ((json-object-type 'plist)
+                          (json-array-type 'list)
+                          (json-false :false))
+                      (json-read-from-string body))
+                  (error nil))))
+      (if (not (and (listp obj) (plist-get obj :type)))
+          (carriage-web--send-json proc "400 Bad Request"
+                                   (list :ok json-false
+                                         :error "bad request" :code "WEB_E_PAYLOAD"))
+        (let* ((typ (plist-get obj :type))
+               (doc (plist-get obj :doc)))
+          (when (stringp typ)
+            (carriage-web--log "push: type=%s doc=%s" typ (or doc "-")))
+          (pcase (and (stringp typ) typ)
+            ;; UI state
+            ("ui"
+             (let ((st (plist-get obj :state)))
+               (when (and (stringp doc) (listp st))
+                 (puthash doc st carriage-web--ui-by-doc)
+                 (carriage-web-pub "ui" (list :doc doc :state st))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Apply/report summaries
+            ((or "apply" "report")
+             (let ((sum (plist-get obj :summary)))
+               (when (and (stringp doc) (listp sum))
+                 (puthash doc sum carriage-web--last-report-by-doc)
+                 (carriage-web-pub typ (list :doc doc :summary sum))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Snapshot list replaces sessions cache
+            ("snapshot"
+             (let ((data (plist-get obj :data)))
+               (when (listp data)
+                 (setq carriage-web--sessions-cache data)
+                 (setq carriage-web--sessions-cache-time (float-time))
+                 (carriage-web--log "push: snapshot updated count=%d"
+                                    (condition-case _e (length data) (error 0)))
+                 ;; Notify SSE clients that new snapshot is available
+                 (carriage-web-pub "snapshot" (list :ts (float-time)))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Transport events
+            ("transport"
+             (let ((ph (plist-get obj :phase))
+                   (meta (plist-get obj :meta)))
+               (when (stringp doc)
+                 (carriage-web-pub "transport"
+                                   (append (list :doc doc :phase ph)
+                                           (and (listp meta) (list :meta meta))))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Passthrough for unknown types
+            (_
+             (carriage-web-pub (or typ "message") (or obj (list)))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))))))))
+
+(defun carriage-web--handle-push (proc req)
+  "Handle POST /api/push from a trusted publisher (loopback + token).
+REQ is a plist with :headers, :query and :body (JSON).
+Supported types: ui, apply, report, snapshot, transport; unknown → passthrough."
+  (let* ((body (or (plist-get req :body) ""))
+         (hdrs (plist-get req :headers))
+         (ctype (and (listp hdrs) (assoc-default "content-type" hdrs))))
+    ;; Request size limit (prevent UI stalls).
+    (when (and (integerp carriage-web-max-request-bytes)
+               (> (string-bytes body) carriage-web-max-request-bytes))
+      (carriage-web--log "push: payload too large bytes=%d limit=%d"
+                         (string-bytes body) carriage-web-max-request-bytes)
+      (carriage-web--send-json
+       proc "400 Bad Request"
+       (list :ok json-false :error "payload too large" :code "WEB_E_PAYLOAD"))
+      (cl-return-from carriage-web--handle-push t))
+    ;; Content-Type must be application/json
+    (unless (and (stringp ctype)
+                 (string-match-p "\\`application/json\\b" (downcase ctype)))
+      (carriage-web--log "push: bad content-type ctype=%S" ctype)
+      (carriage-web--send-json
+       proc "400 Bad Request"
+       (list :ok json-false :error "bad content-type" :code "WEB_E_PAYLOAD"))
+      (cl-return-from carriage-web--handle-push t))
+    ;; Parse JSON body to plist (robust)
+    (let* ((obj (condition-case _e
+                    (let ((json-object-type 'plist)
+                          (json-array-type 'list)
+                          (json-false :false))
+                      (json-read-from-string body))
+                  (error nil))))
+      (if (not (and (listp obj) (plist-get obj :type)))
+          (carriage-web--send-json proc "400 Bad Request"
+                                   (list :ok json-false
+                                         :error "bad request" :code "WEB_E_PAYLOAD"))
+        (let* ((typ (plist-get obj :type))
+               (doc (plist-get obj :doc)))
+          (when (stringp typ)
+            (carriage-web--log "push: type=%s doc=%s" typ (or doc "-")))
+          (pcase (and (stringp typ) typ)
+            ;; UI state
+            ("ui"
+             (let ((st (plist-get obj :state)))
+               (when (and (stringp doc) (listp st))
+                 (puthash doc st carriage-web--ui-by-doc)
+                 (carriage-web-pub "ui" (list :doc doc :state st))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Apply/report summaries
+            ((or "apply" "report")
+             (let ((sum (plist-get obj :summary)))
+               (when (and (stringp doc) (listp sum))
+                 (puthash doc sum carriage-web--last-report-by-doc)
+                 (carriage-web-pub typ (list :doc doc :summary sum))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Snapshot list replaces sessions cache
+            ("snapshot"
+             (let ((data (plist-get obj :data)))
+               (when (listp data)
+                 (setq carriage-web--sessions-cache data)
+                 (setq carriage-web--sessions-cache-time (float-time))
+                 (carriage-web--log "push: snapshot updated count=%d"
+                                    (condition-case _e (length data) (error 0)))
+                 ;; Notify SSE clients that new snapshot is available
+                 (carriage-web-pub "snapshot" (list :ts (float-time)))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Transport events
+            ("transport"
+             (let ((ph (plist-get obj :phase))
+                   (meta (plist-get obj :meta)))
+               (when (stringp doc)
+                 (carriage-web-pub "transport"
+                                   (append (list :doc doc :phase ph)
+                                           (and (listp meta) (list :meta meta))))))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))
+            ;; Passthrough for unknown types
+            (_
+             (carriage-web-pub (or typ "message") (or obj (list)))
+             (carriage-web--send-json proc "200 OK" (list :ok t)))))))))
 
 (provide 'carriage-web)
 

@@ -124,5 +124,13 @@ Intended for use right after webd start/restart from the main Emacs."
   (carriage-web-publish-switch-to-push)
   (run-at-time 0.2 nil #'carriage-web-publish-seed-snapshot))
 
+;;;###autoload
+(defun carriage-web-publish-setup-now ()
+  "Switch to 'push publish backend (from webd runtime) and seed a snapshot soon.
+Intended to be called right after webd health becomes OK."
+  (interactive)
+  (when (carriage-web-publish-switch-to-push)
+    (run-at-time 0.1 nil #'carriage-web-publish-seed-snapshot)))
+
 (provide 'carriage-web-publish)
 ;;; carriage-web-publish.el ends here

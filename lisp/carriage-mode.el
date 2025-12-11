@@ -81,11 +81,6 @@
   :type 'string
   :group 'carriage)
 
-(defcustom carriage-mode-auto-open-report t
-  "DEPRECATED: kept for UI toggle state only. Use =carriage-mode-report-open-policy'.
-When non-nil, the [AutoRpt] toggle appears ON (meaning 'always)."
-  :type 'boolean :group 'carriage)
-(make-variable-buffer-local 'carriage-mode-auto-open-report)
 
 (defcustom carriage-mode-report-open-policy 'on-error
   "Report auto-open policy:

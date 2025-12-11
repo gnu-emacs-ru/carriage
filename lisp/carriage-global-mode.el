@@ -70,10 +70,16 @@ which-key hints are registered if available."
           ;; Auto-enable carriage-mode on visiting Org files when CAR_MODE=t
           (when (require 'carriage-doc-state nil t)
             (add-hook 'find-file-hook #'carriage-doc-state-auto-enable))
+          ;; Start snapshot publisher (idempotent) for web dashboard integration.
+          (when (require 'carriage-web nil t)
+            (ignore-errors (carriage-web-snapshot-start)))
           (message "carriage-global-mode enabled (menu)"))
       (ignore-errors (carriage-keys-which-key-unregister))
       (when (featurep 'carriage-doc-state)
         (remove-hook 'find-file-hook #'carriage-doc-state-auto-enable))
+      ;; Stop snapshot publisher when global mode is disabled.
+      (when (featurep 'carriage-web)
+        (ignore-errors (carriage-web-snapshot-stop)))
       (message "carriage-global-mode disabled"))))
 
 (provide 'carriage-global-mode)

@@ -583,7 +583,7 @@ Choose a visible face for your theme; 'shadow can be too dim."
   "When non-nil, show the spinner only in the window where streaming started."
   :type 'boolean :group 'carriage)
 
-(defcustom carriage-mode-preloader-follow-point t
+(defcustom carriage-mode-preloader-follow-point nil
   "When non-nil, keep point after the spinner during streaming by moving it to the stream tail on each chunk."
   :type 'boolean :group 'carriage)
 
@@ -756,7 +756,9 @@ Does not modify buffer text; only clears markers/state so the next chunk opens a
           (marker-position carriage--stream-end-marker))))
 
 (defun carriage--ensure-stream-region ()
-  "Ensure streaming region exists. Use origin marker if set; otherwise current point."
+  "Ensure streaming region exists. Use origin marker if set; otherwise current point.
+Avoid inserting an extra newline when we are already parked just below the
+CARRIAGE_ID (or its optional separator)."
   (unless (and (markerp carriage--stream-beg-marker)
                (markerp carriage--stream-end-marker))
     (let* ((pos (cond
@@ -764,9 +766,6 @@ Does not modify buffer text; only clears markers/state so the next chunk opens a
                        (buffer-live-p (marker-buffer carriage--stream-origin-marker)))
                   (marker-position carriage--stream-origin-marker))
                  (t (point)))))
-      (save-excursion
-        (goto-char pos)
-        (unless (bolp) (insert "\n")))
       (setq carriage--stream-beg-marker (copy-marker pos t))
       (setq carriage--stream-end-marker (copy-marker pos t)))))
 
@@ -2288,38 +2287,6 @@ If no begin_context is present, insert a minimal header and block at point-max."
 ;;  5) newline
 ;;  6) place cursor after spinner (streaming starts here)
 
-(with-eval-after-load 'carriage-transport
-  (defun carriage--display-fix--insert-marker-here ()
-    "Insert newline + CARRIAGE_ID + newline under point, set stream-origin below it.
-Also marks the inline-marker as inserted to avoid duplicate insertions elsewhere."
-    (let* ((id (or (and (boundp 'carriage--last-iteration-id)
-                        carriage--last-iteration-id)
-                   (and (fboundp 'carriage-begin-iteration)
-                        (carriage-begin-iteration))
-                   ;; Fallback id (deterministic enough for UI; engines use their own ids)
-                   (secure-hash 'sha1 (format "%s-%s" (float-time) (random 1e9))))))
-      ;; 1) newline before marker if not at BOL
-      (unless (bolp) (end-of-line))
-      (insert "\n")
-      ;; 2) marker line
-      (insert (format "#+CARRIAGE_ITERATION_ID: %s\n" id))
-      ;; 3) origin marker → start of next line (spinner goes here, then output)
-      (when (boundp 'carriage--stream-origin-marker)
-        (if (and (markerp carriage--stream-origin-marker)
-                 (marker-buffer carriage--stream-origin-marker))
-            (set-marker carriage--stream-origin-marker (point))
-          (setq carriage--stream-origin-marker (copy-marker (point) t))))
-      (setq carriage--iteration-inline-marker-inserted t)
-      t))
-
-  (defun carriage-transport-begin@display-fix (orig-fn &rest args)
-    "Ensure marker is inserted under cursor before transport starts (single source of truth)."
-    (save-excursion
-      (condition-case _e
-          (carriage--display-fix--insert-marker-here)
-        (error nil)))
-    (apply orig-fn args))
-  (advice-add 'carriage-transport-begin :around #'carriage-transport-begin@display-fix))
 
 (with-eval-after-load 'carriage-mode
   (defun carriage--preloader-start@move-point (orig-fn &rest args)

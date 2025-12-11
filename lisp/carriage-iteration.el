@@ -149,21 +149,59 @@ When optional ID is non-nil, reuse it instead of generating a new one."
   :type '(choice (const inline) (const property))
   :group 'carriage)
 
+(defcustom carriage-mode-insert-separator-before-id t
+  "When non-nil, insert a visual separator line just above the inline CARRIAGE_ID marker."
+  :type 'boolean :group 'carriage)
+
+(defcustom carriage-mode-separator-text "-----"
+  "Separator line text inserted above the CARRIAGE_ID when enabled.
+Keep it short to avoid wrapping."
+  :type 'string :group 'carriage)
+
 (defun carriage-iteration--write-inline-marker (pos id)
-  "Insert inline iteration marker directly under POS with explicit newlines.
-Order at POS:
-1) newline
-2) \"#+CARRIAGE_ITERATION_ID: <id>\"
-3) newline
-Return buffer position after the inserted marker (start of the next line)."
+  "Insert inline iteration marker starting at the beginning of the current line.
+Behavior:
+- If POS is not at BOL, finish the line and insert a single newline before the marker.
+- If POS is already at BOL, do not add an extra blank line before the marker.
+- Optionally insert a separator line just above the marker when
+  `carriage-mode-insert-separator-before-id' is non-nil (default), avoiding
+  duplicates if the previous line already equals the separator.
+- Insert the marker line \"#+CARRIAGE_ITERATION_ID: <id>\" and a trailing newline.
+Return buffer position after the inserted marker (beginning of the next line)."
   (when (and (stringp id) (> (length (string-trim id)) 0)
              (numberp pos))
     (save-excursion
       (goto-char pos)
-      ;; Always start on a fresh line under POS (do not split inline text).
+      ;; Ensure we are at BOL for the marker. If currently not at BOL,
+      ;; move to EOL and insert a single newline; if already at BOL, do not
+      ;; insert a blank line here (avoid extra vertical gap).
       (unless (bolp)
-        (end-of-line))
-      (insert "\n")
+        (end-of-line)
+        (insert "\n"))
+      ;; We are at BOL. Optionally insert a separator line just above the marker.
+      (when (and (boundp 'carriage-mode-insert-separator-before-id)
+                 carriage-mode-insert-separator-before-id)
+        (let* ((sep (if (and (boundp 'carriage-mode-separator-text)
+                             (stringp carriage-mode-separator-text)
+                             (> (length carriage-mode-separator-text) 0))
+                        carriage-mode-separator-text
+                      "-----"))
+               (prev (save-excursion
+                       ;; Be robust at buffer start/BOL: if there is no previous line,
+                       ;; treat as empty so we will insert the separator.
+                       (let ((here (point)))
+                         (if (> here (point-min))
+                             (progn
+                               (forward-line -1)
+                               (buffer-substring-no-properties
+                                (line-beginning-position) (line-end-position)))
+                           ""))))
+               (prev-trim (string-trim (or prev "")))
+               (sep-trim  (string-trim sep)))
+          ;; Insert separator only when the previous line is not already it.
+          (unless (string= prev-trim sep-trim)
+            (insert sep "\n"))))
+      ;; Insert marker and return position after it (start of next line).
       (insert (format "#+CARRIAGE_ITERATION_ID: %s\n" (downcase id)))
       (point))))
 

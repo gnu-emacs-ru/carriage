@@ -50,7 +50,7 @@ Default is nil to keep test suite expectations (WEB_E_CMD for most ops)."
   "Cap for JSON responses; payloads are truncated beyond this limit."
   :type 'integer :group 'carriage-web)
 
-(defcustom carriage-web-max-request-bytes 131072
+(defcustom carriage-web-max-request-bytes 2097152
   "Maximum allowed size (in bytes) for JSON request bodies (e.g., /api/push).
 Oversized payloads are rejected with a client error to prevent UI stalls."
   :type 'integer :group 'carriage-web)
@@ -579,12 +579,19 @@ Adds :type TYPE to payload and debounces delivery."
           n)))))
 
 (defun carriage-web--buffer-ui-state (&optional buffer)
-  "Return plist (:phase :tooltip) for BUFFER UI state."
+  "Return plist (:phase :tooltip) for BUFFER UI state.
+Tooltip is clipped to a reasonable length to keep snapshot payload small."
   (with-current-buffer (or buffer (current-buffer))
     (let* ((st (and (boundp 'carriage--ui-state) carriage--ui-state))
-           (phase (if (symbolp st) (format "%s" st) (or (and st (format "%s" st)) "idle")))
-           (tooltip (and (boundp 'carriage--ui-state-tooltip) carriage--ui-state-tooltip)))
-      (list :phase phase :tooltip tooltip))))
+           (phase (if (symbolp st) (format "%s" st)
+                    (or (and st (format "%s" st)) "idle")))
+           (raw-tip (and (boundp 'carriage--ui-state-tooltip) carriage--ui-state-tooltip))
+           (tip (and (stringp raw-tip)
+                     (let ((maxlen 300))
+                       (if (> (length raw-tip) maxlen)
+                           (substring raw-tip 0 maxlen)
+                         raw-tip)))))
+      (list :phase phase :tooltip tip))))
 
 (defun carriage-web--buffer-engine-string (&optional buffer)
   "Return engine string for BUFFER based on carriage-apply-engine and policy."
@@ -778,7 +785,7 @@ legacy in-process mode a small TTL cache MAY be refreshed by scanning."
       (carriage-web--log "sessions: legacy cache count=%d"
                          (condition-case _e (length (or carriage-web--sessions-cache '())) (error 0)))
       (carriage-web--send-json proc "200 OK"
-                               (list :ok t :data carriage-web--sessions-cache)))))
+                               (list :ok t :data (or carriage-web--sessions-cache '()))))))
 
 (defun carriage-web--handle-session (proc req)
   "Return a detailed snapshot for a single session by its doc id."
@@ -1384,8 +1391,43 @@ ON-DONE is an optional callback invoked with (status buffer) when request comple
   (let* ((bind (or carriage-web-bind "127.0.0.1"))
          (port (or carriage-web-port 8787))
          (url  (format "http://%s:%s%s" bind port path))
-         ;; JSON → строго unibyte UTF-8 для url-http-create-request
-         (json-str (json-encode payload))
+         ;; Глубокая нормализация payload → alist для корректного JSON
+         (norm (cl-labels
+                   ((to-json (x)
+                      (cond
+                       ((hash-table-p x)
+                        (let (acc)
+                          (maphash (lambda (k v)
+                                     (push (cons (format "%s" k) (to-json v)) acc))
+                                   x)
+                          (nreverse acc)))
+                       ;; plist? (k1 v1 k2 v2 …) где k — keyword/symbol/string
+                       ((and (listp x)
+                             (let ((p x) (ok t))
+                               (while (and ok p (cdr p))
+                                 (setq ok (or (keywordp (car p))
+                                              (symbolp (car p))
+                                              (stringp (car p))))
+                                 (setq p (cddr p)))
+                               ok)))
+                       (let ((p x) (acc nil))
+                         (while p
+                           (let ((k (car p)) (v (cadr p)))
+                             (push (cons (format "%s" k) (to-json v)) acc))
+                           (setq p (cddr p)))
+                         (nreverse acc)))
+                      ;; alist
+                      ((and (listp x) (consp (car x)))
+                       (mapcar (lambda (kv)
+                                 (cons (format "%s" (car kv)) (to-json (cdr kv))))
+                               x))
+                      ;; list/vector → массив
+                      ((listp x)   (mapcar #'to-json x))
+                      ((vectorp x) (vconcat (mapcar #'to-json (append x nil))))
+                      (t x)))))
+         (to-json payload)
+         ;; JSON → строго unibyte UTF‑8 для url-http-create-request
+         (json-str (json-encode norm))
          (body     (encode-coding-string json-str 'utf-8))
          (url-request-method "POST")
          ;; Лёгкий, неблокирующий режим; без статус‑минимизатора.

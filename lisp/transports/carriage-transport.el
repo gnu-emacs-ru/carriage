@@ -27,7 +27,6 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'carriage-ui)
-(require 'carriage-fast-transient nil t)
 (require 'carriage-logging)
 (require 'carriage-errors)
 ;; Break circular dependency with carriage-mode: call its fns via declare-function.
@@ -35,8 +34,6 @@
 (declare-function carriage-clear-abort-handler "carriage-mode" ())
 (declare-function carriage--preloader-start "carriage-mode" ())
 (declare-function carriage--preloader-stop "carriage-mode" ())
-(declare-function carriage-iteration--write-inline-marker "carriage-iteration" (pos id))
-(declare-function carriage-insert-inline-iteration-marker-now "carriage-mode" ())
 
 (defvar carriage--transport-loading-adapter nil
   "Guard to prevent recursive/layered adapter loading in transport dispatcher.")
@@ -187,14 +184,11 @@ Returns an unregister lambda that clears the handler when called."
   (when (functionp abort-fn)
     (carriage-register-abort-handler abort-fn))
   (carriage-log "Transport: begin (abort=%s)" (if (functionp abort-fn) "installed" "none"))
-  ;; Generate iteration id before any streaming/reasoning to group upcoming patches
-  (when (fboundp 'carriage-begin-iteration)
-    (ignore-errors (carriage-begin-iteration)))
-  (when (fboundp 'carriage-insert-inline-iteration-marker-now)
-    (ignore-errors (carriage-insert-inline-iteration-marker-now)))
   (carriage-ui-set-state 'sending)
-  ;; Start buffer preloader (if available) at the insertion point.
-  (when (fboundp 'carriage--preloader-start)
+  ;; Start buffer preloader (if available) at the insertion point (guard duplicate overlays)
+  (when (and (fboundp 'carriage--preloader-start)
+             (not (and (boundp 'carriage--preloader-overlay)
+                       (overlayp carriage--preloader-overlay))))
     (ignore-errors (carriage--preloader-start)))
   ;; Return unregister lambda
   (lambda ()

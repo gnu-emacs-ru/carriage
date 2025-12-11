@@ -38,7 +38,6 @@
 (require 'carriage-sre-core)
 (require 'carriage-doc-state nil t)
 ;; Autoload stub ensures calling carriage-global-mode works even if file isn't loaded yet.
-(autoload 'carriage-global-mode "carriage-global-mode" "Global Carriage prefix/menu." t)
 (require 'carriage-global-mode)
 ;; Ensure 'transports' subdirectory is on load-path when loading carriage-mode directly
 (let* ((this-dir (file-name-directory (or load-file-name buffer-file-name)))
@@ -143,10 +142,6 @@ with a compact \"#+patch_done ( … )\" marker that summarizes the operation.
 Applies to patch/sre/aibo and file ops (create/delete/rename)."
   :type 'boolean :group 'carriage)
 
-(defcustom carriage-mode-apply-all-require-last-iteration t
-  "Deprecated (v1.1): C-c e A is always strict now and refuses without last-iteration id.
-This toggle has no effect."
-  :type 'boolean :group 'carriage)
 
 (defcustom carriage-mode-use-icons t
   "Use all-the-icons in mode-line if available."
@@ -281,15 +276,6 @@ Note: v1 forbids binary patches; this option remains nil in v1 and is reserved f
 May be a string or a function of zero args returning string."
   :type '(choice string function) :group 'carriage)
 
-(defcustom carriage-mode-use-transient t
-  "DEPRECATED: transient Carriage menu is always enabled; this option is ignored."
-  :type 'boolean :group 'carriage)
-(make-obsolete-variable 'carriage-mode-use-transient
-                        "Transient Carriage menu is always enabled; the option is ignored."
-                        "1.4")
-
-(defvar carriage-mode--transient-warning-emitted nil
-  "Internal guard to warn about ignored `carriage-mode-use-transient'.")
 
 (defcustom carriage-enable-legacy-bindings nil
   "When non-nil, enable legacy bindings (C-c M-RET / C-c RET) in carriage-mode buffers.
@@ -925,16 +911,6 @@ TYPE is either 'text (default) or 'reasoning.
                             (= (marker-position carriage--stream-end-marker) tailpos))
                    (set-marker carriage--stream-end-marker newpos (current-buffer)))))))))
       (_
-       ;; Before the first text chunk, insert inline iteration marker (if configured).
-       (when (and (eq carriage-iteration-marker-placement 'inline)
-                  (not carriage--iteration-inline-marker-inserted)
-                  (boundp 'carriage--last-iteration-id) carriage--last-iteration-id)
-         (let ((pos (and (markerp carriage--stream-end-marker)
-                         (marker-position carriage--stream-end-marker))))
-           (when (numberp pos)
-             (ignore-errors
-               (carriage-iteration--write-inline-marker pos carriage--last-iteration-id))
-             (setq carriage--iteration-inline-marker-inserted t))))
        ;; Do not auto-close reasoning here; text is appended after all prior content.
        (carriage--stream-insert-at-end s))))
   ;; Move preloader overlay to stream tail so spinner stays ahead
@@ -991,17 +967,6 @@ TYPE is either 'text (default) or 'reasoning.
                   (org-fold-region body-beg body-end t))))
              (t nil))))
       (error nil)))
-  ;; Inline iteration marker: if not inserted earlier (before first text chunk), insert now.
-  (when (and (not errorp) mark-last-iteration
-             (boundp 'carriage-iteration-marker-placement)
-             (eq carriage-iteration-marker-placement 'inline)
-             (not carriage--iteration-inline-marker-inserted))
-    (let ((r (carriage-stream-region))
-          (id (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id)))
-      (when (and (consp r) (numberp (car r)) id)
-        (ignore-errors
-          (carriage-iteration--write-inline-marker (car r) id))
-        (setq carriage--iteration-inline-marker-inserted t))))
   ;; Mark the streamed region as last iteration (text properties)
   (when (and (not errorp) mark-last-iteration)
     (let ((r (carriage-stream-region)))
@@ -1172,8 +1137,18 @@ May include :context-text and :context-target per v1.1."
                   (intent  carriage-mode-intent)
                   (suite   carriage-mode-suite)
                   (origin-marker (copy-marker (point) t))
-                  (ctx     (carriage--build-context 'buffer srcbuf))
+                  (ctx nil)
                   (built nil) (sys nil) (pr nil))
+             ;; Early, synchronous: prepare stream region, insert ID and start preloader
+             (carriage-stream-reset origin-marker)
+             (when (fboundp 'carriage-begin-iteration)
+               (ignore-errors (carriage-begin-iteration)))
+             (when (fboundp 'carriage-insert-inline-iteration-marker-now)
+               (ignore-errors (carriage-insert-inline-iteration-marker-now)))
+             (when (fboundp 'carriage--preloader-start)
+               (ignore-errors (carriage--preloader-start)))
+             ;; Build context after immediate UI feedback
+             (setq ctx (carriage--build-context 'buffer srcbuf))
              (setq built (carriage-build-prompt intent suite ctx)
                    sys   (plist-get built :system)
                    pr    (plist-get built :prompt))
@@ -1186,7 +1161,6 @@ May include :context-text and :context-target per v1.1."
                (ignore-errors (carriage-show-traffic)))
 
              (carriage--ensure-transport)
-             (carriage-stream-reset origin-marker)
              (let* ((unreg (carriage-transport-begin)))
                (carriage-traffic-log 'out "request begin: source=buffer backend=%s model=%s"
                                      backend model)
@@ -1226,12 +1200,19 @@ May include :context-text and :context-target per v1.1."
          (suite   carriage-mode-suite)
          (srcbuf  (current-buffer))
          (origin-marker (copy-marker (point) t))
-         (ctx     (progn
-                    ;; Keep spinner/active feedback during context build
-                    (carriage-ui-set-state 'sending)
-                    (carriage--build-context 'subtree srcbuf)))
+         (ctx nil)
          (built nil) (sys nil) (pr nil))
-
+    ;; Early, synchronous: prepare stream region, insert ID and start preloader
+    (carriage-stream-reset origin-marker)
+    (when (fboundp 'carriage-begin-iteration)
+      (ignore-errors (carriage-begin-iteration)))
+    (when (fboundp 'carriage-insert-inline-iteration-marker-now)
+      (ignore-errors (carriage-insert-inline-iteration-marker-now)))
+    (when (fboundp 'carriage--preloader-start)
+      (ignore-errors (carriage--preloader-start)))
+    ;; Keep spinner/active feedback during context build, then build context
+    (carriage-ui-set-state 'sending)
+    (setq ctx (carriage--build-context 'subtree srcbuf))
     (setq built (carriage-build-prompt intent suite ctx)
           sys   (plist-get built :system)
           pr    (plist-get built :prompt))
@@ -1247,7 +1228,6 @@ May include :context-text and :context-target per v1.1."
       (ignore-errors (carriage-show-traffic)))
 
     (carriage--ensure-transport)
-    (carriage-stream-reset origin-marker)
     (let* ((unreg (carriage-transport-begin)))
       (carriage-traffic-log 'out "request begin: source=subtree backend=%s model=%s"
                             backend model)
@@ -2276,28 +2256,20 @@ If no begin_context is present, insert a minimal header and block at point-max."
     (when (fboundp fn)
       (advice-add fn :after #'carriage--doc-state-write-safe))))
 
+
+;; Robust preloader, stream region, and point behavior harmonization
+
+(defgroup carriage-mode-preloader nil
+  "Preloader/spinner behavior for Carriage."
+  :group 'convenience)
+
+
+
+
+;; Keep cursor free during streaming; spinner still moves to the tail.
+
 (provide 'carriage-mode)
 
-;; Hotfix: enforce proper marker→spinner order directly under cursor for send operations.
-;; Desired order relative to user's point at send time:
-;;  1) newline
-;;  2) #+CARRIAGE_ITERATION_ID: <id>
-;;  3) newline
-;;  4) spinner on its own line
-;;  5) newline
-;;  6) place cursor after spinner (streaming starts here)
 
 
-(with-eval-after-load 'carriage-mode
-  (defun carriage--preloader-start@move-point (orig-fn &rest args)
-    "After spinner appears, place point where streaming should write (below spinner)."
-    (let ((res (apply orig-fn args)))
-      (when (and (boundp 'carriage--stream-origin-marker)
-                 (markerp carriage--stream-origin-marker))
-        (goto-char carriage--stream-origin-marker))
-      res))
-  (when (fboundp 'carriage--preloader-start)
-    (advice-add 'carriage--preloader-start :around #'carriage--preloader-start@move-point)))
-
-(provide 'carriage-display-fix)
 ;;; carriage-mode.el ends here

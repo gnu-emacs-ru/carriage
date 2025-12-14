@@ -199,8 +199,7 @@ Return buffer position after the inserted marker (beginning of the next line)."
                 (save-excursion
                   (forward-line -1)
                   (delete-region (line-beginning-position) (line-end-position))
-                  (insert sep)
-                  (insert "\n"))
+                  (insert sep))
               ;; Otherwise, just add the separator on a fresh line above.
               (insert sep "\n")))))
       ;; Insert the marker and return position at start of next line.

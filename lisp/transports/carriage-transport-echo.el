@@ -167,7 +167,7 @@ Does not modify the Org buffer and does not call 'carriage-transport-begin'."
                            (progn
                              (when first
                                (setq first nil)
-                               (carriage-transport-streaming))
+                               (carriage-transport-streaming buffer))
                              (let ((chunk (pop rest)))
                                (with-current-buffer buffer
                                  (carriage-insert-stream-chunk chunk 'text))

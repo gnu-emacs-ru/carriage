@@ -177,23 +177,28 @@ PLIST keys: :backend :model :system :prompt :context (list of paths or structure
 
 
 ;;;###autoload
-(defun carriage-transport-begin (&optional abort-fn)
+(defun carriage-transport-begin (&optional abort-fn buffer)
   "Signal beginning of an async request: set UI to 'sending and install ABORT-FN.
 ABORT-FN should be a zero-arg function that cancels the ongoing request.
-Returns an unregister lambda that clears the handler when called."
-  (when (functionp abort-fn)
-    (carriage-register-abort-handler abort-fn))
-  (carriage-log "Transport: begin (abort=%s)" (if (functionp abort-fn) "installed" "none"))
-  (carriage-ui-set-state 'sending)
-  ;; Start buffer preloader (if available) at the insertion point (guard duplicate overlays)
-  (when (and (fboundp 'carriage--preloader-start)
-             (not (and (boundp 'carriage--preloader-overlay)
-                       (overlayp carriage--preloader-overlay))))
-    (ignore-errors (carriage--preloader-start)))
-  ;; Return unregister lambda
-  (lambda ()
-    (carriage-clear-abort-handler)
-    (carriage-log "Transport: unregister abort handler")))
+Returns an unregister lambda that clears the handler when called.
+When BUFFER is non-nil, operate in that buffer."
+  (let ((buf (or buffer (current-buffer))))
+    (with-current-buffer buf
+      (when (functionp abort-fn)
+        (carriage-register-abort-handler abort-fn))
+      (carriage-log "Transport: begin (abort=%s)" (if (functionp abort-fn) "installed" "none"))
+      (carriage-ui-set-state 'sending)
+      ;; Start buffer preloader (if available) at the insertion point (guard duplicate overlays)
+      (when (and (fboundp 'carriage--preloader-start)
+                 (not (and (boundp 'carriage--preloader-overlay)
+                           (overlayp carriage--preloader-overlay))))
+        (ignore-errors (carriage--preloader-start))))
+    ;; Return unregister lambda (bound to origin buffer)
+    (lambda ()
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (carriage-clear-abort-handler)
+          (carriage-log "Transport: unregister abort handler"))))))
 
 ;;;###autoload
 (defun carriage-transport-streaming ()

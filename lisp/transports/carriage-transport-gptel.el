@@ -247,7 +247,7 @@ Returns cons (UPDATED-SUMMARY . REMAINDER-TEXT-AFTER-HEAD)."
   (carriage-traffic-log-response-summary buffer (carriage--gptel--summary-string summary))
   (with-current-buffer buffer
     (carriage-stream-finalize nil t)
-    (carriage-transport-complete nil)))
+    (carriage-transport-complete nil buffer)))
 
 (defun carriage--gptel--on-abort (buffer info summary)
   "Handle abort/error with INFO: log and finalize BUFFER with error, include SUMMARY."
@@ -260,7 +260,7 @@ Returns cons (UPDATED-SUMMARY . REMAINDER-TEXT-AFTER-HEAD)."
   (carriage-traffic-log-response-summary buffer (carriage--gptel--summary-string summary))
   (with-current-buffer buffer
     (carriage-stream-finalize t nil)
-    (carriage-transport-complete t)))
+    (carriage-transport-complete t buffer)))
 
 (defun carriage--gptel--cb--ensure-reasoning (gptel-buffer state)
   "Ensure UI reasoning state on first event. Return updated STATE."

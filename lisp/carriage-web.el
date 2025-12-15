@@ -158,6 +158,7 @@ When non-nil, all HTTP/SSE handlers must answer strictly from cached state;
 no buffer-list scans or heavy work are allowed in handlers.")
 (defvar carriage-web--server-proc nil)
 (defvar carriage-web--heartbeat-timer nil)
+(defvar carriage-web--daemon-diag-timer nil)
 (defvar carriage-web--clients nil) ;; list of plists: (:proc P :last-ts TS :filter DOC|nil)
 
 ;; Lightweight metrics (best-effort)
@@ -1446,7 +1447,17 @@ Supported types: ui, apply, report, snapshot, transport; unknown → passthrough
                     ;; Dispatch
                     (carriage-web--dispatch-request
                      proc (list :method method :path path :query q :headers hdrs :body body))
-                    (erase-buffer))))))))))
+                    (erase-buffer))))))))
+    (error
+     ;; Robust server: never die on unexpected parse/dispatch errors.
+     (carriage-web--log "filter error: %S" err)
+     (ignore-errors
+       (carriage-web--send-json proc "500 Internal Server Error"
+                                (list :ok json-false :error "server error" :code "WEB_E_SERVER"))
+       (carriage-web--graceful-close proc))
+     (ignore-errors
+       (with-current-buffer (carriage-web--ensure-client-buffer proc)
+         (erase-buffer))))))
 ;; Start / Stop
 
 (defun carriage-web-start ()
@@ -1527,6 +1538,20 @@ In main Emacs this is disabled; use `carriage-webd-start'."
         (cancel-timer carriage-web--heartbeat-timer))
       (setq carriage-web--heartbeat-timer
             (run-at-time 1.0 3.0 #'carriage-web--heartbeat))
+      ;; Daemon-side lightweight diagnostics to stdout (captured by supervisor):
+      ;; periodic "alive" line with current port/clients/sessions.
+      (when carriage-web-daemon-p
+        (when (timerp carriage-web--daemon-diag-timer)
+          (cancel-timer carriage-web--daemon-diag-timer))
+        (setq carriage-web--daemon-diag-timer
+              (run-at-time
+               5 5
+               (lambda ()
+                 (ignore-errors
+                   (let* ((clients (condition-case _ (length carriage-web--clients) (error 0)))
+                          (sessions (condition-case _ (length (or carriage-web--sessions-cache '())) (error 0))))
+                     (princ (format "webd: diag alive port=%s clients=%d sessions=%d\n"
+                                    carriage-web-port clients sessions))))))))
       proc)))
 
 (defun carriage-web-stop ()
@@ -1535,6 +1560,9 @@ In main Emacs this is disabled; use `carriage-webd-start'."
   (when (timerp carriage-web--heartbeat-timer)
     (cancel-timer carriage-web--heartbeat-timer)
     (setq carriage-web--heartbeat-timer nil))
+  (when (timerp carriage-web--daemon-diag-timer)
+    (cancel-timer carriage-web--daemon-diag-timer)
+    (setq carriage-web--daemon-diag-timer nil))
   (dolist (cli carriage-web--clients)
     (let ((p (plist-get cli :proc)))
       (when (process-live-p p)

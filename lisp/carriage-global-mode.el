@@ -66,7 +66,6 @@ which-key hints are registered if available."
         (progn
           (dolist (pref prefixes)
             (define-key global-map (kbd pref) #'carriage-keys-open-menu))
-          (ignore-errors (carriage-keys-which-key-register))
           ;; Auto-enable carriage-mode on visiting Org files when CAR_MODE=t
           (when (require 'carriage-doc-state nil t)
             (add-hook 'find-file-hook #'carriage-doc-state-auto-enable))
@@ -74,7 +73,6 @@ which-key hints are registered if available."
           (when (require 'carriage-web nil t)
             (ignore-errors (carriage-web-snapshot-start)))
           (message "carriage-global-mode enabled (menu)"))
-      (ignore-errors (carriage-keys-which-key-unregister))
       (when (featurep 'carriage-doc-state)
         (remove-hook 'find-file-hook #'carriage-doc-state-auto-enable))
       ;; Stop snapshot publisher when global mode is disabled.

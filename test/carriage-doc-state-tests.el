@@ -68,5 +68,29 @@
       (let ((s2 (buffer-substring-no-properties (point-min) (point-max))))
         (should (equal s1 s2))))))
 
+(ert-deftest carriage-doc-state/avoid-inserting-inside-begin-blocks ()
+  "begin_carriage must be placed at the top slot; never inside any begin_* blocks.
+When a begin_context block is at the top, the carriage block is inserted before it,
+and directly under the file-level PROPERTIES."
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+title: Demo\n#+PROPERTY: P q\n\n#+begin_context\n path1\n#+end_context\n\nBody\n")
+    (carriage-doc-state-write '(("CAR_MODE" . "t")))
+    (save-excursion
+      (goto-char (point-min))
+      (should (re-search-forward "^[ \t]*#\\+begin_carriage\\b" nil t))
+      (let ((car-pos (match-beginning 0)))
+        ;; previous line must be a PROPERTY (directly under PROPERTIES)
+        (save-excursion
+          (goto-char car-pos)
+          (forward-line -1)
+          (should (looking-at "^[ \t]*#\\+PROPERTY:")))
+        ;; and the carriage block must be before any begin_context at the top
+        (save-excursion
+          (goto-char (point-min))
+          (should (re-search-forward "^[ \t]*#\\+begin_context\\b" nil t))
+          (let ((ctx-pos (match-beginning 0)))
+            (should (< car-pos ctx-pos))))))))
+
 (provide 'carriage-doc-state-tests)
 ;;; carriage-doc-state-tests.el ends here

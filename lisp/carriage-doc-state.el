@@ -697,25 +697,56 @@ Returns an alist of (KEY . VAL) where KEY is the drawer-style key (e.g., \"CAR_M
     (nreverse alist)))
 
 (defun carriage-doc-state--top-slot-position ()
-  "Return canonical insertion point for #+begin_carriage.
-The point is:
-- immediately after the contiguous top-of-file #+<KEYWORD> lines (including all #+PROPERTY),
-  even when the buffer begins with blank lines; or
-- at buffer start when no #+ header lines are present."
+  "Return canonical insertion point (BOL) for #+begin_carriage.
+
+Rules:
+- Place the block immediately after the last top-of-file header keyword line
+  \"#+KEY:\" (including all \"#+PROPERTY:\") — never inside any \"#+begin_*\" block.
+- Leading blank and comment lines before the first header are ignored for detection,
+  but once a header is seen, we do NOT skip further blank/comment lines: the block
+  must go directly under the header lines (i.e., right after PROPERTIES when present).
+- When no header keyword lines exist at the top, insert at buffer start."
   (save-excursion
     (save-restriction
       (widen)
       (goto-char (point-min))
-      (let ((case-fold-search t))
-        ;; Skip leading blank lines to find header cluster if any.
-        (while (looking-at "^[ \t]*$")
-          (forward-line 1))
-        (if (looking-at "^[ \t]*#\\+")
+      (let ((case-fold-search t)
+            (seen-hdr nil)
+            (last-hdr-end nil)
+            (done nil))
+        (while (and (not (eobp)) (not done))
+          (let ((bol (line-beginning-position))
+                (eol (line-end-position)))
+            (cond
+             ;; Top-of-file blank lines: skip only until we see the first header.
+             ((looking-at "^[ \t]*$")
+              (if seen-hdr
+                  (setq done t)
+                (forward-line 1)))
+             ;; Never step into any begin_* block; stop before it.
+             ((looking-at "^[ \t]*#\\+begin_\\b")
+              (setq done t))
+             ;; Header keyword lines (#+KEY: ...), including #+PROPERTY:
+             ((looking-at "^[ \t]*#\\+[A-Za-z0-9_]+:")
+              (setq seen-hdr t
+                    last-hdr-end eol)
+              (forward-line 1))
+             ;; Any other #+ line (without colon) — treat as non-header (stop).
+             ((looking-at "^[ \t]*#\\+")
+              (setq done t))
+             ;; Comment lines starting with '#' (but not '#+'): skip only before headers.
+             ((looking-at "^[ \t]*#\\([^+]\\|$\\)")
+              (if seen-hdr
+                  (setq done t)
+                (forward-line 1)))
+             ;; Any other content — stop scanning the header section.
+             (t
+              (setq done t)))))
+        (if last-hdr-end
             (progn
-              (while (looking-at "^[ \t]*#\\+")
-                (forward-line 1))
-              (point))
-          ;; No header keywords at the top — insert at absolute beginning.
+              (goto-char last-hdr-end)
+              (forward-line 1)
+              (line-beginning-position))
           (point-min))))))
 
 (defun carriage-doc-state--write-carriage-block (alist)

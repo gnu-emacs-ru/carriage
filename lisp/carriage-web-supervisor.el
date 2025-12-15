@@ -165,6 +165,18 @@ Resolution order:
                  (string= (match-string 1) "200")))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
+(defun carriage-webd--tcp-open-p (host port)
+  "Best-effort TCP connect probe to HOST:PORT.
+Returns t when connection can be opened and immediately closed, nil otherwise."
+  (let ((p nil))
+    (unwind-protect
+        (condition-case _e
+            (progn
+              (setq p (open-network-stream "carriage-webd-probe" nil host port))
+              (when (process-live-p p) t))
+          (error nil))
+      (when (processp p) (ignore-errors (delete-process p))))))
+
 (defun carriage-webd--wait-health (port)
   "Wait for health up to carriage-webd-wait-health-ms."
   (let* ((deadline (+ (float-time) (/ carriage-webd-wait-health-ms 1000.0)))
@@ -278,7 +290,11 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
                       (setq tries (1- tries))
                       (sleep-for 0.1)))
                   (and (numberp pval) (> pval 0) pval))))
+           (tcp (and resolved-port (carriage-webd--tcp-open-p bind resolved-port)))
            (ok (and resolved-port (carriage-webd--wait-health resolved-port))))
+      (when carriage-webd-verbose
+        (message "webd: probe summary bind=%s port=%s tcp=%s health=%s"
+                 bind resolved-port (if tcp 't 'nil) (if ok 't 'nil)))
       (message (if ok "webd: started on %s:%s" "webd: started (health not confirmed) on %s:%s")
                bind resolved-port)
       ;; If daemon is healthy, rewire publisher to 'push using runtime files and seed state
@@ -351,11 +367,13 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
          (bind carriage-webd-default-bind)
          (port (let ((s (carriage-webd--read-file (carriage-webd--port-file))))
                  (and s (string-match-p "^[0-9]+$" s) (string-to-number s))))
+         (tcp (and port (carriage-webd--tcp-open-p bind port)))
          (health (and port (carriage-webd--probe-health port))))
-    (message "webd status: pid=%s alive=%s bind=%s port=%s health=%s runtime=%s"
-             (or pid 'nil) (if alive 't 'nil) bind (or port 'nil) (if health 't 'nil)
+    (message "webd status: pid=%s alive=%s bind=%s port=%s tcp=%s health=%s runtime=%s"
+             (or pid 'nil) (if alive 't 'nil) bind (or port 'nil)
+             (if tcp 't 'nil) (if health 't 'nil)
              (carriage-webd--runtime-dir))
-    (list :pid pid :alive alive :bind bind :port port :health health :runtime (carriage-webd--runtime-dir))))
+    (list :pid pid :alive alive :bind bind :port port :tcp tcp :health health :runtime (carriage-webd--runtime-dir))))
 
 ;;;###autoload
 ;;;###autoload

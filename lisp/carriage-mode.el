@@ -408,7 +408,6 @@ Consults engine capabilities; safe when registry is not yet loaded."
       (force-mode-line-update)))
   (when (require 'carriage-keyspec nil t)
     (carriage-keys-apply-known-keymaps)
-    (ignore-errors (carriage-keys-which-key-register))
     (let ((prefixes (carriage-keys-prefixes)))
       (dolist (pref prefixes)
         (define-key carriage-mode-map (kbd pref) #'carriage-keys-open-menu)))
@@ -2262,20 +2261,13 @@ If no begin_context is present, insert a minimal header and block at point-max."
     (when (fboundp fn)
       (advice-add fn :after #'carriage--doc-state-write-safe))))
 
-
 ;; Robust preloader, stream region, and point behavior harmonization
 
 (defgroup carriage-mode-preloader nil
   "Preloader/spinner behavior for Carriage."
   :group 'convenience)
 
-
-
-
 ;; Keep cursor free during streaming; spinner still moves to the tail.
-
 (provide 'carriage-mode)
-
-
 
 ;;; carriage-mode.el ends here

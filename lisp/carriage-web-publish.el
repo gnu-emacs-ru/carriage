@@ -18,6 +18,15 @@
 
 (require 'subr-x)
 
+;; Safety shim: ensure normalizer exists even if carriage-web.el isn't loaded yet.
+;; This avoids timer crashes (void-function carriage-web--payload-normalize)
+;; in mixed/older load orders. Raw HTTP helper will still normalize properly.
+(unless (fboundp 'carriage-web--payload-normalize)
+  (defun carriage-web--payload-normalize (payload)
+    (condition-case _e
+        payload
+      (error payload))))
+
 (defgroup carriage-web-publish nil
   "Configure Carriage main Emacs to publish to webd."
   :group 'carriage)
@@ -26,6 +35,12 @@
   "Runtime directory where webd writes webd.port and webd.token.
 When nil, the helper will derive it from XDG_RUNTIME_DIR or /run/user/UID/carriage-webd."
   :type '(choice (const :tag "Auto" nil) directory)
+  :group 'carriage-web-publish)
+
+(defcustom carriage-web-publish-verbose nil
+  "When non-nil, emit helper progress messages to *Messages*.
+Keep nil by default to avoid echo-area noise on startup."
+  :type 'boolean
   :group 'carriage-web-publish)
 
 (defun carriage-web-publish--xdg-runtime-dir ()
@@ -66,7 +81,7 @@ When nil, the helper will derive it from XDG_RUNTIME_DIR or /run/user/UID/carria
 
 (defun carriage-web-publish--maybe-message (fmt &rest args)
   "Best-effort message for diagnostics; avoid noise in batch."
-  (when (and (not noninteractive) (fboundp 'message))
+  (when (and carriage-web-publish-verbose (not noninteractive) (fboundp 'message))
     (apply #'message fmt args)))
 
 ;;;###autoload
@@ -93,7 +108,8 @@ Return plist (:bind STR :port INT :token STR) on success or nil."
 ;;;###autoload
 (defun carriage-web-publish-switch-to-push ()
   "Switch Carriage publish backend to 'push and configure target from runtime files.
-Sets carriage-web-publish-backend when present; otherwise prints a hint."
+Sets carriage-web-publish-backend when present; otherwise prints a hint.
+Returns non-nil (runtime plist) on success, nil otherwise."
   (interactive)
   (let* ((conf (carriage-web-publish-configure-from-runtime)))
     (unless conf
@@ -103,7 +119,8 @@ Sets carriage-web-publish-backend when present; otherwise prints a hint."
       (setq carriage-web-publish-backend 'push)
       (carriage-web-publish--maybe-message "carriage-web-publish: backend set to 'push"))
      (t
-      (carriage-web-publish--maybe-message "carriage-web-publish: backend var not found; ensure carriage-web.el is loaded")))))
+      (carriage-web-publish--maybe-message "carriage-web-publish: backend var not found; ensure carriage-web.el is loaded")))
+    conf))
 
 ;;;###autoload
 (defun carriage-web-publish-seed-snapshot ()
@@ -116,13 +133,7 @@ Sets carriage-web-publish-backend when present; otherwise prints a hint."
    (t
     (carriage-web-publish--maybe-message "carriage-web-publish: snapshot function not found; load carriage-web.el"))))
 
-;;;###autoload
-(defun carriage-web-publish-setup-now ()
-  "One-shot setup: switch to 'push → configure target → seed snapshot.
-Intended for use right after webd start/restart from the main Emacs."
-  (interactive)
-  (carriage-web-publish-switch-to-push)
-  (run-at-time 0.2 nil #'carriage-web-publish-seed-snapshot))
+
 
 ;;;###autoload
 (defun carriage-web-publish-setup-now ()

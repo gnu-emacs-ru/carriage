@@ -2928,6 +2928,11 @@ a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
   (defun carriage-ui--maybe-insert-early-id-and-spinner ()
     "Insert CARRIAGE_ID and start spinner immediately under point, once per request."
     (unless carriage--early-iteration-marker-done
+      ;; Hard reset any stale streaming state and anchor origin to the current point
+      ;; before inserting the inline ID and starting the preloader. This guarantees
+      ;; the spinner appears exactly under the cursor for this request.
+      (when (fboundp 'carriage-stream-reset)
+        (carriage-stream-reset (copy-marker (point) t)))
       (let* ((id (or (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id)
                      (and (fboundp 'carriage-begin-iteration) (carriage-begin-iteration))
                      ;; Fallback id when carriage-begin-iteration is unavailable:
@@ -2953,26 +2958,6 @@ a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
                     (carriage-ui--maybe-insert-early-id-and-spinner)
                     (apply orig args)))))
 
-  ;; If later pipeline tries to insert the marker again, suppress it gracefully
-  ;; for this request to avoid duplicate ID lines.
-  (when (fboundp 'carriage-insert-inline-iteration-marker-now)
-    (advice-add 'carriage-insert-inline-iteration-marker-now :around
-                (lambda (orig &rest args)
-                  (if carriage--early-iteration-marker-done
-                      ;; Clear flag for future requests; skip duplicate insertion now.
-                      (setq carriage--early-iteration-marker-done nil)
-                    (apply orig args)))))
-
-  ;; Keep spinner at the tail of the streamed output on each chunk.
-  (when (fboundp 'carriage-insert-stream-chunk)
-    (advice-add 'carriage-insert-stream-chunk :after
-                (lambda (&rest _)
-                  (when (and (boundp 'carriage--preloader-overlay)
-                             (overlayp carriage--preloader-overlay)
-                             (boundp 'carriage--stream-end-marker)
-                             (markerp carriage--stream-end-marker))
-                    (let ((end (marker-position carriage--stream-end-marker)))
-                      (move-overlay carriage--preloader-overlay end end)))))))
 
 ;; Integrated guards and cursor policy for inline ID and streaming cursor behavior.
 

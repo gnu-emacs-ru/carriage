@@ -29,6 +29,14 @@
 
 (require 'url)
 (require 'browse-url)
+(require 'carriage-web) ;; for raw POST helper
+;; Safety: if some timer fires very early and normalizer isn't yet defined anywhere,
+;; provide a tiny fallback to avoid void-function crashes (no-op normalizer).
+(unless (fboundp 'carriage-web--payload-normalize)
+  (defun carriage-web--payload-normalize (payload)
+    (condition-case _e
+        payload
+      (error payload))))
 
 (defgroup carriage-webd nil
   "Supervisor for Carriage web daemon."
@@ -141,7 +149,10 @@ Resolution order:
   "Return t if /api/health returns HTTP 200 quickly, else nil."
   (let* ((url-request-method "GET")
          (url-show-status nil)
-         (url-request-extra-headers nil)
+         ;; Include X-Auth when available (health is auth-gated).
+         (tok (ignore-errors (carriage-webd--read-file (carriage-webd--token-file))))
+         (url-request-extra-headers (and (stringp tok) (> (length tok) 0)
+                                         `(("X-Auth" . ,tok))))
          (url (carriage-webd--health-url port))
          (url-automatic-caching nil)
          (url-request-timeout 0.6)
@@ -164,7 +175,8 @@ Resolution order:
       (setq ok (carriage-webd--probe-health port))
       (unless ok
         (setq tries (1+ tries))
-        (message "webd: health probe #%d failed, retrying..." tries)
+        (when carriage-webd-verbose
+          (message "webd: health probe #%d failed, retrying..." tries))
         (sleep-for intv)))
     ok))
 
@@ -211,7 +223,8 @@ The sexp logs all major stages to stdout so that the supervisor can capture them
                     "-L" lispdir
                     "-l" "carriage-web.el"
                     "--eval" (carriage-webd--compute-entrypoint bind port token))))
-    (message "webd: spawning %S" cmd)
+    (when carriage-webd-verbose
+      (message "webd: spawning %S" cmd))
     (make-process
      :name carriage-webd--proc-name
      :buffer (get-buffer-create carriage-webd--out-buf)
@@ -225,7 +238,8 @@ The sexp logs all major stages to stdout so that the supervisor can capture them
                      (with-current-buffer out
                        (goto-char (point-max))
                        (insert (format "webd: child sentinel: %s %s" (process-name proc) event)))))
-                 (message "webd: child %s" (string-trim event))))))
+                 (when carriage-webd-verbose
+                   (message "webd: child %s" (string-trim event)))))))
 
 (defun carriage-webd--ensure-token (token)
   (or token
@@ -258,7 +272,8 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
                   (while (and (not pval) (> tries 0))
                     (let ((s (carriage-webd--read-file (carriage-webd--port-file))))
                       (setq pval (and s (string-to-number s))))
-                    (message "webd: waiting port file (%d)" tries)
+                    (when carriage-webd-verbose
+                      (message "webd: waiting port file (%d)" tries))
                     (unless (and (numberp pval) (> pval 0))
                       (setq tries (1- tries))
                       (sleep-for 0.1)))
@@ -300,7 +315,8 @@ TOKEN defaults to `carriage-webd-auth-token' or generated."
     (cond
      (proc
       (delete-process proc)
-      (message "webd: process deleted"))
+      (when carriage-webd-verbose
+        (message "webd: process deleted")))
      (t
       (let ((pid (carriage-webd--read-pid)))
         (if (not pid)
@@ -410,10 +426,10 @@ Runs only in interactive sessions and skips when a webd process is already alive
   :type 'number
   :group 'carriage-webd)
 
-
-(defcustom carriage-webd-autostart-delay 1.0
-  "Delay in seconds before attempting webd autostart."
-  :type 'number
+(defcustom carriage-webd-verbose nil
+  "When non-nil, emit progress messages to *Messages* during webd operations.
+Keep nil by default to avoid echo-area noise."
+  :type 'boolean
   :group 'carriage-webd)
 
 (defun carriage-webd--maybe-autostart ()
@@ -442,28 +458,18 @@ For safety, the token is not printed to *Messages*."
       (message "webd: no token file found"))))
 
 (defun carriage-webd--api-cmd (command &optional payload)
-  "Send a command to webd via POST /api/cmd."
+  "Send a command to webd via POST /api/cmd using raw helper (no url.el)."
   (let* ((bind (or carriage-webd-default-bind "127.0.0.1"))
          (port-str (carriage-webd--read-file (carriage-webd--port-file)))
          (port (and port-str (string-to-number port-str)))
          (token (carriage-webd--ensure-token carriage-webd-auth-token))
-         (body (json-encode (append (list :cmd command) payload)))
-         (url (format "http://%s:%d/api/cmd" bind port))
-         (url-request-method "POST")
-         (url-show-status nil)
-         (url-request-extra-headers
-          `(("Content-Type" . "application/json; charset=utf-8")
-            ("X-Auth" . ,token)))
-         (url-request-data body))
+         (pl (append (list :cmd command) payload)))
     (unless (and port token)
       (error "webd not running or token not found"))
-    (url-retrieve
-     url
-     (lambda (status)
-       (with-current-buffer (current-buffer)
-         (let ((ok (string-match-p "^HTTP/1\\.[01] 200" (buffer-string))))
-           (message "webd cmd '%s': %s" command (if ok "ok" "failed"))
-           (kill-buffer (current-buffer))))))))
+    (let ((carriage-web-bind bind)
+          (carriage-web-port port)
+          (carriage-web-auth-token token))
+      (carriage-web--http-post-json-raw "/api/cmd" pl))))
 
 ;;;###autoload
 (defun carriage-webd-drop-sse-clients ()
@@ -512,6 +518,11 @@ This is safe to call after webd is up (health OK)."
          (require 'carriage-web-publish nil t)
          (when (fboundp 'carriage-web-publish-setup-now)
            (carriage-web-publish-setup-now)))))))
+
+;; Safety: remove any leftover debug advice on url-http we might have added earlier.
+(with-eval-after-load 'url-http
+  (ignore-errors (advice-remove 'url-http-create-request 'carriage-webd--dbg-url-http))
+  (ignore-errors (advice-remove 'url-http-create-request 'carriage-web--dbg-url-http)))
 
 (provide 'carriage-web-supervisor)
 

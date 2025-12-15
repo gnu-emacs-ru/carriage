@@ -39,6 +39,14 @@
 (require 'carriage-doc-state nil t)
 ;; Autoload stub ensures calling carriage-global-mode works even if file isn't loaded yet.
 (require 'carriage-global-mode)
+
+;; Safety shim: guarantee normalizer exists even if carriage-web isn't loaded yet (timers may fire early).
+(unless (fboundp 'carriage-web--payload-normalize)
+  (defun carriage-web--payload-normalize (payload)
+    (condition-case _e
+        payload
+      (error payload))))
+
 ;; Ensure 'transports' subdirectory is on load-path when loading carriage-mode directly
 (let* ((this-dir (file-name-directory (or load-file-name buffer-file-name)))
        (transports-dir (and this-dir (expand-file-name "transports" this-dir))))
@@ -1131,7 +1139,10 @@ May include :context-text and :context-target per v1.1."
                   (model   carriage-mode-model)
                   (intent  carriage-mode-intent)
                   (suite   carriage-mode-suite)
-                  (origin-marker (copy-marker (point) t))
+                  (origin-marker (or (and (markerp carriage--stream-origin-marker)
+                                          (buffer-live-p (marker-buffer carriage--stream-origin-marker))
+                                          carriage--stream-origin-marker)
+                                     (copy-marker (point) t)))
                   (ctx nil)
                   (built nil) (sys nil) (pr nil))
              ;; Early, synchronous: prepare stream region, insert ID and start preloader

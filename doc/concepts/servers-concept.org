@@ -1,0 +1,66 @@
+#+title: Концепция серверов — Рой Carriage (Agents + Hub + Registry)
+#+author: Carriage Team
+#+language: ru
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+* Резюме
+- Переходим к модели «Роя»: множество независимых headless‑агентов (Emacs‑процессы), каждый с локальным HTTP/SSE‑сервером. Отдельный Hub агрегирует и проксирует, читая реестр (Registry). Основная сессия Emacs не хостит HTTP и не блокируется.
+- Жёсткая дисциплина: обработчики отвечают из кэшей; тяжёлое — только таймерами. Команды — только по белому списку. Токены не попадают в браузер (Hub проксирует).
+
+* Диалектический анализ
+- Тезис: отдельный webd даёт изоляцию, но усложняет эксплуатацию.
+- Антитезис: единый сервер в основной сессии прост, но рисковый по лагам/безопасности.
+- Синтез: библиотека серверов + процессы‑агенты. Основная сессия — только оркестратор. Наблюдение и ограниченное управление через Hub/Registry.
+
+* Архитектура
+- Agent: Emacs с Carriage, локальный HTTP/SSE. Порт по умолчанию 0 (эпфемерный). Runtime dir per‑agent.
+- Hub: Emacs‑прокси. Список агентов, health, проксирование API/SSE, единый веб‑дэшборд.
+- Registry: $XDG_RUNTIME_DIR/carriage-swarm (или /tmp/carriage-swarm-$USER), файл registry.ndjson + каталоги agents/<id>/ с pid/port/token/meta.
+
+* Политики
+- Loopback bind, CORS off, токен обязателен. Команды — только whitelist, без eval.
+- Обработчики — без тяжёлых сканов. SSE — дебаунс, капы, idle‑prune. Логи — без секретов.
+
+* Дорожная карта (патчи)
+1) Новые спецификации: swarm/agent/hub/registry. Старые web-dashboard/webd — deprecated.
+2) Реестр: модуль для ndjson + per‑agent dirs, атомарные записи, cleanup.
+3) Agent server: перепрофилировать текущий carriage-web.el в роль агента.
+4) Запуск агента: lisp/carriage-agent.el (entrypoint, порт, токен, регистрация, heartbeat).
+5) Hub: lisp/carriage-hub.el (proxy + dashboard).
+6) Новый супервизор: lisp/carriage-swarm-supervisor.el (start/stop/restart/list/cleanup).
+7) UI интеграция: меню в основной сессии только с асинхронными операциями; без HTTP внутри UI‑Emacs.
+8) Чистка наследия: удалить push‑бекенды и webd‑артефакты; переименовать runtime.
+9) Тесты: registry/agent/hub интеграционные сценарии.
+10) Гармонизация: единые имена, минимальный набор флагов, наблюдаемость.
+
+* Контекст (файлы спецификаций/кода/тестов)
+#+begin_context
+spec/swarm-v1.org
+spec/agent-http-api-v1.org
+spec/hub-http-api-v1.org
+spec/registry-v1.org
+spec/security-v2.org
+spec/logging-v2.org
+spec/ui-v2.org
+lisp/carriage-web.el
+lisp/carriage-logging.el
+lisp/carriage-mode.el
+lisp/carriage-global-mode.el
+lisp/carriage-utils.el
+lisp/carriage-web-supervisor.el
+lisp/carriage-web-publish.el
+# планируемые новые:
+lisp/carriage-agent.el
+lisp/carriage-hub.el
+lisp/carriage-swarm-registry.el
+lisp/carriage-swarm-supervisor.el
+# планируемые тесты:
+test/carriage-swarm-registry-tests.el
+test/carriage-agent-server-tests.el
+test/carriage-hub-proxy-tests.el
+#+end_context
+
+* Примечания
+- Основная сессия Emacs не должна хостить HTTP; запуск агентов/хаба — в отдельных процессах.
+- Браузер общается только с Hub; Hub проксирует и подставляет X‑Auth.

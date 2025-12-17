@@ -1,4 +1,4 @@
-#+title: Doc State v2 — Property drawers and begin_<kind> folding
+#+title: Doc State v2 — CARRIAGE_STATE property storage
 #+author: Peter Kosov <11111000000@email.com>
 #+language: en
 #+options: toc:2 num:t
@@ -6,7 +6,7 @@
 
 Meta
 - Spec-ID: carriage/docs/doc-state/v2
-- Version: v2.0
+- Version: v2.1
 - Status: draft
 - Normativity: RFC 2119 applies
 - Ownership: docs, ui
@@ -21,45 +21,65 @@ Purpose
 - Normative: t
 - Stability: stable
 - Pack-Priority: P3
-- LLM-Summary: Define storage and restoration of document state and folding overlays.
+- LLM-Summary: Define storage and restoration of Carriage document state using a single Org property.
 
 Normative Requirements
 - Anchor: REQ
 - Normative: t
 - Stability: stable
 - Pack-Priority: P3
-- REQ-ds-001: begin_<kind> folding MUST be overlay-based; no org-fold reliance.
-- REQ-ds-002: Overlays MUST auto-reveal on cursor enter and auto-hide on leave.
-- REQ-ds-003: A begin_carriage block MUST be preferred over file-level #+PROPERTY when present; write
-  operations MUST upsert the begin_carriage body and keep storage normalized.
-- REQ-ds-004: File-level #+PROPERTY: CARRIAGE_* MAY be used for backward compatibility; the writer
-  MUST normalize to begin_carriage and hide file-level properties via a dedicated overlay.
-- REQ-ds-005: A before-save hook (when enabled) MUST restore state from the buffer, persist normalized
-  storage (begin_carriage + properties), and fold overlays idempotently.
-- REQ-ds-006: Folding MUST be maintained by overlay refresh on edits and cursor movement; watchers
-  MUST reveal on cursor enter and re-hide on leave without relying on org-fold.
-- REQ-ds-007: The begin_carriage storage MAY include provenance keys (CAR_TEMPLATE_ID,
-  CAR_TEMPLATE_VER, CAR_CONTEXT_PROFILE, CAR_INHERITED); writers SHOULD upsert and preserve them.
-- REQ-ds-008: Autosave MUST be opt-in and disabled by default. Save hooks MUST be installed
-  only when `carriage-doc-state-save-on-save' is non-nil, and hook handlers MUST be no-ops
-  when it is nil.
-- REQ-ds-009: Restoring CAR_MODE MUST NOT redundantly re-enable or re-disable carriage-mode;
+
+- REQ-ds-001: Document state MUST be stored canonically as a single file-level Org property line:
+  #+PROPERTY: CARRIAGE_STATE <sexp>
+
+- REQ-ds-002: The value <sexp> MUST be a readable Emacs Lisp sexp that encodes the state as either:
+  - a plist (preferred) with :CAR_* keys, or
+  - an alist convertible to such plist.
+
+- REQ-ds-003: Readers MUST read only from CARRIAGE_STATE. Legacy storages (begin_carriage blocks,
+  drawers, and multi-line CARRIAGE_* properties) MUST NOT be used when this spec version is active.
+
+- REQ-ds-004: Writers MUST upsert exactly one CARRIAGE_STATE line and MUST place it in the top-of-file
+  header area (the initial run of #+KEY: lines), directly after the last top-of-file #+PROPERTY: line
+  if any exist, otherwise after the last top-of-file #+KEY: line.
+
+- REQ-ds-005: A before-save hook (when enabled) MUST restore state from CARRIAGE_STATE (best-effort),
+  persist the normalized CARRIAGE_STATE value, and keep visibility controls idempotent.
+
+- REQ-ds-006: Autosave MUST be opt-in and disabled by default. Save hooks MUST be installed only when
+  `carriage-doc-state-save-on-save' is non-nil, and hook handlers MUST be no-ops when it is nil.
+
+- REQ-ds-007: Restoring CAR_MODE MUST NOT redundantly re-enable or re-disable carriage-mode;
   implementations MUST compare desired vs current state and avoid no-op toggles.
+
+- REQ-ds-008: Document state MUST NOT be injected into LLM request payloads; implementations SHOULD
+  strip the CARRIAGE_STATE property line from prompt payload.
+
+Visibility / UI
+- Anchor: UI
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- UI-ds-001: Implementations SHOULD provide a toggle to hide/show the CARRIAGE_STATE property line
+  (e.g., via overlays and an invisibility spec), and MUST NOT rely on org-fold for this.
 
 Interfaces/Contracts
 - Anchor: IFC
 - Normative: t
 - Stability: stable
 - Pack-Priority: P3
-- IFC-ds-001: carriage-block-fold-ensure-overlay KIND
-- IFC-ds-002: carriage-block-fold-reveal/hide KIND
+- IFC-ds-001: carriage-doc-state-read  → plist (:CAR_* ...)
+- IFC-ds-002: carriage-doc-state-write → upsert canonical storage
+- IFC-ds-003: carriage-doc-state-restore → apply state to buffer-local variables
 
 Testing and Conformance
 - Anchor: TST
 - Normative: t
 - Stability: stable
 - Pack-Priority: P3
-- TST-ds-001: overlays refreshed after edits; placeholders clickable
+- TST-ds-001: writer inserts/updates exactly one CARRIAGE_STATE line in canonical header position
+- TST-ds-002: writer is idempotent for stable input
+- TST-ds-003: save hook persists normalized CARRIAGE_STATE
 
 Cross-References and Anchors
 - Anchor: XREF
@@ -68,4 +88,6 @@ Cross-References and Anchors
 - Pack-Priority: P3
 - Code:
   - lisp/carriage-doc-state.el
-  - lisp/carriage-block-fold.el
+  - lisp/carriage-mode.el
+- Tests:
+  - test/carriage-doc-state-tests.el

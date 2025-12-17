@@ -50,5 +50,34 @@
             (should (eq (symbol-value 'carriage--ui-state) 'error)))
         (carriage-mode -1)))))
 
+(ert-deftest carriage-transport-complete-accepts-buffer-arg ()
+  "carriage-transport-complete accepts BUFFER arg and completes in that buffer."
+  (let ((noninteractive nil)
+        (origin (generate-new-buffer " *carriage-origin*"))
+        (other  (generate-new-buffer " *carriage-other*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer origin
+            (org-mode)
+            (carriage-mode 1)
+            (carriage-transport-begin)
+            (should (eq (symbol-value 'carriage--ui-state) 'sending)))
+          (with-current-buffer other
+            (org-mode)
+            (carriage-mode 1)
+            (carriage-ui-set-state 'error)
+            ;; Complete ORIGIN from a different current buffer; must not signal,
+            ;; and must not clobber OTHER's state.
+            (carriage-transport-complete nil origin)
+            (should (eq (symbol-value 'carriage--ui-state) 'error)))
+          (with-current-buffer origin
+            (should (eq (symbol-value 'carriage--ui-state) 'idle))))
+      (when (buffer-live-p origin)
+        (with-current-buffer origin (ignore-errors (carriage-mode -1)))
+        (kill-buffer origin))
+      (when (buffer-live-p other)
+        (with-current-buffer other (ignore-errors (carriage-mode -1)))
+        (kill-buffer other)))))
+
 (provide 'carriage-transport-test)
 ;;; carriage-transport-test.el ends here

@@ -126,7 +126,7 @@ Does not modify the Org buffer and does not call 'carriage-transport-begin'."
            (carriage-traffic-log 'in "echo: aborted")
            (with-current-buffer buffer
              (carriage-stream-finalize t nil))
-           (carriage-transport-complete t)))
+           (carriage-transport-complete t buffer)))
         ;; Structured request
         (carriage-traffic-log-request buffer
                                       :backend 'echo

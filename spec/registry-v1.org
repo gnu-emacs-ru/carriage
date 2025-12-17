@@ -1,0 +1,79 @@
+#+title: Registry v1 — Runtime inventory of Carriage Agents
+#+author: Carriage Team <dev@carriage>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Meta
+- Spec-ID: carriage/registry/v1
+- Version: v1.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: core
+- Prompt-ABI: v1
+- Pack-Profiles: P1-core
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Anchor: PURPOSE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Define a file-based registry for live Carriage Agents: per-agent runtime directories
+  and a global NDJSON index. Enable Hub to discover and monitor Agents reliably.
+
+Layout
+- Anchor: LAYOUT
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Base dir: $XDG_RUNTIME_DIR/carriage-swarm/ or /tmp/carriage-swarm-$USER/
+- Files and dirs:
+  - registry.ndjson     ; append-only or atomically rewritten index
+  - agents/<id>/pid     ; PID of agent process
+  - agents/<id>/port    ; HTTP port bound by agent
+  - agents/<id>/token   ; shared secret for agent API (mode 0600), not exposed to browsers
+  - agents/<id>/meta.json ; {"bind":"127.0.0.1","started_ts":<unix>,"project":string|null,"label":string|null,"version":string}
+
+Record
+- Anchor: RECORD
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- NDJSON line schema (one per agent):
+  - {
+      "id": string, "pid": int, "bind": "127.0.0.1", "port": int,
+      "runtime_dir": string, "meta": {"project":string|null,"label":string|null,"version":string},
+      "started_ts": number, "last_seen_ts": number|null, "alive": bool|null
+    }
+
+Operations
+- Anchor: OPS
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Registration:
+  - Agent creates agents/<id>/, writes pid/port/token/meta.json, appends or updates registry.ndjson atomically
+- Update:
+  - Hub (or Agent) may update last_seen_ts and alive flag via atomic rewrite
+- Cleanup:
+  - Stale detection: missing PID, TCP closed, or health fails consistently → mark alive=false; GC removes entries and dirs
+
+Security
+- Anchor: SEC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- token file must be 0600; never printed in logs
+- registry.ndjson must not contain raw tokens; token references via path/hash only
+
+Testing
+- Anchor: TST
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Create agent entry; Hub discovers it
+- Kill agent; Hub marks stale and removes entry
+- Concurrent updates do not corrupt registry.ndjson (atomic rename)

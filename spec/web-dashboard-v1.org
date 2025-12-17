@@ -22,7 +22,7 @@ CARRIAGE_SUITE aibo
 Meta
 - Spec-ID: carriage/ui/web-dashboard/v1
 - Version: v1.0
-- Status: draft
+- Status: deprecated
 - Normativity: RFC 2119 applies
 - Ownership: ui, transport
 - Prompt-ABI: v1

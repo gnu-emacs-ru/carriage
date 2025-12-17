@@ -1,0 +1,152 @@
+#+title: Carriage Swarm v1 — Agents, Hub, and the Registry
+#+author: Carriage Team <dev@carriage>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Meta
+- Spec-ID: carriage/swarm/v1
+- Version: v1.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: core, ui, transport
+- Prompt-ABI: v1
+- Pack-Profiles: P1-core
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Anchor: PURPOSE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- LLM-Summary: Define a resilient “swarm” architecture for Carriage: multiple independent Agents
+  (headless Emacs processes) each hosting Carriage and a local HTTP/SSE server; a Hub process
+  aggregates, proxies, and presents a unified web dashboard; a Registry persists live agent
+  entries. Main Emacs does not host HTTP.
+
+Scope
+- Anchor: SCOPE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- In scope:
+  - Agent role: serve local API/stream for a single Carriage session
+  - Hub role: proxy to agents, present unified web UI, list agents
+  - Registry: file-based inventory of live agents (pid/port/token/meta)
+  - Security, limits, lifecycle and health checks
+- Out of scope: remote exposure beyond loopback; multi-user ACL; arbitrary eval
+
+Terms
+- Anchor: TERMS
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Agent: standalone Emacs process with Carriage and a local HTTP/SSE server.
+- Hub: standalone Emacs process that reads Registry and proxies API/streams to Agents.
+- Registry: file-based index of live Agents (runtime dir entries + NDJSON).
+- Session: logical unit of observation (one Carriage buffer/file inside an Agent).
+- Token: shared secret for Agent API, carried as X-Auth (Hub injects; browser never sees it).
+
+Normative Requirements
+- Anchor: REQ
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- REQ-swarm-001: Agents and Hub MUST bind to loopback (127.0.0.1) by default; CORS MUST be disabled.
+- REQ-swarm-002: Main Emacs MUST NOT host HTTP/SSE servers. Only Agents and Hub serve HTTP/SSE.
+- REQ-swarm-003: Agents MUST expose local API and SSE; handlers MUST answer from cached state; heavy
+  work MUST be performed by idle timers or internal publishers, not in process filters.
+- REQ-swarm-004: Hub MUST proxy browser requests to Agents (API and SSE). Browser MUST NOT receive
+  Agent tokens; Hub injects X-Auth on behalf of the browser.
+- REQ-swarm-005: All command endpoints MUST implement a strict whitelist; arbitrary eval is forbidden.
+- REQ-swarm-006: Payload size limits and truncation MUST be enforced consistently across Agents and Hub.
+- REQ-swarm-007: Agents SHOULD select port=0 by default (ephemeral); per-Agent runtime directories MUST
+  be unique to avoid collisions.
+- REQ-swarm-008: Registry entries MUST be written atomically; stale entries MUST be detected and cleaned.
+- REQ-swarm-009: SSE MUST be the baseline streaming protocol; reconnects MUST be tolerated; idle clients pruned.
+- REQ-swarm-010: Errors MUST map to errors-v2 with structured envelopes; severity preserved.
+
+Invariants
+- Anchor: INV
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- FREEZE: bind = 127.0.0.1
+- FREEZE: sse-max-clients = 16
+- FREEZE: json-max-bytes = 131072
+- FREEZE: request-max-bytes = 2097152
+- INV-swarm-001: Agents and Hub MUST never block UI on network I/O; all HTTP/SSE I/O runs via non-blocking filters and timers.
+- INV-swarm-002: No heavy artifacts (patch bodies, large diffs) are streamed by default; details are fetched on demand.
+
+Interfaces/Contracts
+- Anchor: IFC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Components:
+  - Agent HTTP API: health, sessions, session/<id>, report/last, cmd (whitelist), metrics, stream
+  - Hub HTTP API: list agents, proxy agent API/stream, hub health/metrics, static dashboard
+  - Registry format: NDJSON catalog + per-agent runtime dir with pid/port/token/meta
+- Response envelope:
+  - success: {"ok": true, "data": <payload>}
+  - error:   {"ok": false, "error": "<message>", "code": "<ERR_CODE>"}
+
+Security and Limits
+- Anchor: SEC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- Loopback bind; tokens required for Agent API and SSE
+- Hub proxies tokens; browser does not see Agent tokens
+- No arbitrary eval; whitelist commands only
+- Payload caps and truncation; no secret leakage in logs
+
+Performance and Asynchrony
+- Anchor: PERF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Agents and Hub MUST respond from cached state; no heavy scans in handlers
+- SSE fan-out MUST be debounced; clients capped and pruned
+- Registry operations MUST be atomic; health probes MUST be non-blocking and bounded
+
+Testing and Conformance
+- Anchor: TST
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- CHK-swarm-001: Agent health OK on loopback; token enforced
+- CHK-swarm-002: SSE emits ui/apply/report/transport/heartbeat; reconnects tolerated
+- CHK-swarm-003: Hub lists agents from Registry; stale entries cleaned
+- CHK-swarm-004: Hub proxies Agent API/stream; browser never sees tokens
+- CHK-swarm-005: Whitelist commands enforced; unknown → WEB_E_CMD
+- CHK-swarm-006: Payload caps respected; truncation metrics exposed
+
+Cross-References and Anchors
+- Anchor: XREF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Replaces: spec/web-dashboard-v1.org, spec/webd-ops-v1.org
+- Related:
+  - spec/security-v2.org
+  - spec/logging-v2.org
+- Code (target):
+  - lisp/carriage-agent.el
+  - lisp/carriage-hub.el
+  - lisp/carriage-swarm-registry.el
+  - lisp/carriage-swarm-supervisor.el
+  - lisp/carriage-web.el (agent server role)
+  - lisp/carriage-logging.el
+  - lisp/carriage-mode.el, lisp/carriage-global-mode.el
+
+Evolution
+- Anchor: EVO
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Affects-Prompt: none
+- Future v1.x:
+  - Agent sharding policies; richer Hub dashboards; per-agent TLS via UDS proxy

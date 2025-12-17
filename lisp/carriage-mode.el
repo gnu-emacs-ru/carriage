@@ -1074,20 +1074,17 @@ May include :context-text and :context-target per v1.1."
                        (buffer-substring-no-properties beg end)))
                  (buffer-substring-no-properties (point-min) (point-max))))
               (_ (buffer-substring-no-properties (point-min) (point-max)))))
-           ;; Filter out any #+begin_carriage … #+end_carriage blocks from the payload
+           ;; Do not leak document state into the LLM payload:
+           ;; remove file-level CARRIAGE_STATE property lines from the payload.
            (payload
             (let ((text (or payload "")))
               (with-temp-buffer
                 (insert text)
                 (goto-char (point-min))
                 (let ((case-fold-search t))
-                  (while (re-search-forward "^[ \t]*#\\+begin_carriage\\b" nil t)
-                    (let ((beg (match-beginning 0)))
-                      (if (re-search-forward "^[ \t]*#\\+end_carriage\\b" nil t)
-                          (let ((end (line-end-position)))
-                            (delete-region beg end)
-                            (when (looking-at "\n") (delete-char 1)))
-                        (delete-region beg (point-max))))))
+                  (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b.*$" nil t)
+                    (delete-region (line-beginning-position)
+                                   (min (point-max) (1+ (line-end-position))))))
                 (buffer-substring-no-properties (point-min) (point-max)))))
            (target (if (boundp 'carriage-mode-context-injection)
                        carriage-mode-context-injection
@@ -1226,7 +1223,9 @@ May include :context-text and :context-target per v1.1."
         (when (fboundp 'carriage-begin-iteration)
           (ignore-errors (carriage-begin-iteration)))
         (when (fboundp 'carriage-insert-inline-iteration-marker-now)
-          (ignore-errors (carriage-insert-inline-iteration-marker-now)))
+          ;; Keep behavior consistent with `carriage-send-buffer': separator first.
+          (let ((carriage-mode-insert-separator-before-id t))
+            (ignore-errors (carriage-insert-inline-iteration-marker-now))))
         (when (fboundp 'carriage--preloader-start)
           (ignore-errors (carriage--preloader-start)))))
     ;; Keep spinner/active feedback during context build, then build context
@@ -2255,25 +2254,73 @@ If no begin_context is present, insert a minimal header and block at point-max."
 
 ;; Persist document state after key parameter changes (advice hooks).
 (with-eval-after-load 'carriage-doc-state
+  (defvar carriage--doc-state--advice-targets
+    '(;; Core state
+      carriage-toggle-intent
+      carriage-select-suite
+      carriage-select-model
+      carriage-select-backend
+      carriage-select-apply-engine
+
+      ;; Context sources (GPTel/Doc/Visible/etc.)
+      carriage-toggle-include-gptel-context
+      carriage-toggle-include-doc-context
+      carriage-toggle-include-visible-context
+      carriage-toggle-include-patched-files
+
+      ;; Doc-context scope selectors (AllCtx/LastCtx/etc.)
+      carriage-select-doc-context-all
+      carriage-select-doc-context-last
+      carriage-toggle-doc-context-scope
+      carriage-select-doc-context-scope
+      ;; Extra/legacy entry-points (advised only when they exist)
+      carriage-select-doc-context
+      carriage-toggle-doc-context-all
+      carriage-toggle-doc-context-last
+      ;; Back-compat typo/old name (safe: advised only if fboundp)
+      carriage_toggle-doc-context-scope
+
+      ;; Context profile / presets
+      carriage-toggle-context-profile
+      carriage-context-profile-set
+      carriage-context-profile-select
+
+      ;; UI/behaviour toggles that must persist too
+      carriage-toggle-auto-open-report
+      carriage-toggle-show-diffs
+      carriage-toggle-confirm-apply-all
+      carriage-toggle-confirm-apply
+      carriage-toggle-use-icons
+      carriage-toggle-flash-patches
+      carriage-toggle-audio-notify)
+    "Commands that should trigger doc-state persistence when invoked.
+
+This list must include *all* interactive commands that change persisted state,
+including doc-context scope (LastCtx/AllCtx) and context source toggles.
+Persistence is best-effort; invalid/unreadable CARRIAGE_STATE must never break commands.")
+
+  (defvar carriage--doc-state--advised nil
+    "List of commands that already have doc-state persistence advice installed.")
+
   (defun carriage--doc-state-write-safe (&rest _)
-    (ignore-errors (carriage-doc-state-write-current)))
-  (dolist (fn '(carriage-toggle-intent
-                carriage-select-suite
-                carriage-select-model
-                carriage-select-backend
-                carriage-select-apply-engine
-                carriage-toggle-include-gptel-context
-                carriage-toggle-include-doc-context
-                carriage-toggle-include-visible-context
-                carriage-toggle-include-patched-files
-                carriage-toggle-context-profile
-                carriage-context-profile-set
-                carriage-select-doc-context-all
-                carriage-select-doc-context-last
-                carriage-toggle-doc-context-scope
-                carriage-toggle-auto-open-report))
-    (when (fboundp fn)
-      (advice-add fn :after #'carriage--doc-state-write-safe))))
+    "Persist document state if doc-state sync is enabled; never signal.
+If CARRIAGE_STATE is invalid/unreadable, this must not break anything."
+    (when (and (boundp 'carriage-doc-state-sync-on-change)
+               carriage-doc-state-sync-on-change)
+      (ignore-errors (carriage-doc-state-write-current))))
+
+  (defun carriage--doc-state--ensure-advice (&optional _file)
+    "Ensure all known doc-state advice targets are advised.
+Designed for use from `after-load-functions' so commands loaded later
+(still) start persisting state."
+    (dolist (fn carriage--doc-state--advice-targets)
+      (when (and (fboundp fn) (not (memq fn carriage--doc-state--advised)))
+        (ignore-errors (advice-add fn :after #'carriage--doc-state-write-safe))
+        (push fn carriage--doc-state--advised))))
+
+  ;; Install now for already-loaded commands, and keep installing as other modules load.
+  (carriage--doc-state--ensure-advice)
+  (add-hook 'after-load-functions #'carriage--doc-state--ensure-advice))
 
 ;; Robust preloader, stream region, and point behavior harmonization
 

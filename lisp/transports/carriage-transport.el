@@ -201,44 +201,51 @@ When BUFFER is non-nil, operate in that buffer."
           (carriage-log "Transport: unregister abort handler"))))))
 
 ;;;###autoload
-(defun carriage-transport-streaming ()
-  "Signal that transport has progressed to streaming: update UI state (do not stop preloader)."
-  (carriage-log "Transport: streaming")
-  (carriage-ui-set-state 'streaming)
-  ;; Ensure spinner overlay is alive when streaming starts; render a frame if needed (best-effort).
-  (when (and (fboundp 'carriage--preloader-start)
-             (boundp 'carriage-mode-preloader-enabled)
-             carriage-mode-preloader-enabled)
-    (ignore-errors
-      ;; If overlay/timer were not started for any reason, start now.
-      (unless (and (boundp 'carriage--preloader-overlay)
-                   (overlayp carriage--preloader-overlay))
-        (carriage--preloader-start))
-      ;; Draw a frame immediately to avoid waiting for timer tick.
-      (when (fboundp 'carriage--preloader--render)
-        (let* ((pos (or (and (boundp 'carriage--stream-end-marker)
-                             (markerp carriage--stream-end-marker)
-                             (marker-position carriage--stream-end-marker))
-                        (and (boundp 'carriage--stream-origin-marker)
-                             (markerp carriage--stream-origin-marker)
-                             (marker-position carriage--stream-origin-marker))
-                        (point))))
-          (when (numberp pos)
-            (ignore-errors (carriage--preloader--render pos))))))))
+(defun carriage-transport-streaming (&optional buffer)
+  "Signal that transport has progressed to streaming: update UI state (do not stop preloader).
+
+When BUFFER is non-nil, operate in that buffer."
+  (let ((buf (or buffer (current-buffer))))
+    (with-current-buffer buf
+      (carriage-log "Transport: streaming")
+      (carriage-ui-set-state 'streaming)
+      ;; Ensure spinner overlay is alive when streaming starts; render a frame if needed (best-effort).
+      (when (and (fboundp 'carriage--preloader-start)
+                 (boundp 'carriage-mode-preloader-enabled)
+                 carriage-mode-preloader-enabled)
+        (ignore-errors
+          ;; If overlay/timer were not started for any reason, start now.
+          (unless (and (boundp 'carriage--preloader-overlay)
+                       (overlayp carriage--preloader-overlay))
+            (carriage--preloader-start))
+          ;; Draw a frame immediately to avoid waiting for timer tick.
+          (when (fboundp 'carriage--preloader--render)
+            (let* ((pos (or (and (boundp 'carriage--stream-end-marker)
+                                 (markerp carriage--stream-end-marker)
+                                 (marker-position carriage--stream-end-marker))
+                            (and (boundp 'carriage--stream-origin-marker)
+                                 (markerp carriage--stream-origin-marker)
+                                 (marker-position carriage--stream-origin-marker))
+                            (point))))
+              (when (numberp pos)
+                (ignore-errors (carriage--preloader--render pos))))))))))
 
 ;;;###autoload
-(defun carriage-transport-complete (&optional errorp)
+(defun carriage-transport-complete (&optional errorp buffer)
   "Signal completion of an async request: clear abort handler and set UI state.
-If ERRORP non-nil, set state to 'error; otherwise flash 'done then return to 'idle."
-  (carriage-clear-abort-handler)
-  ;; Ensure preloader is stopped on finalize.
-  (when (fboundp 'carriage--preloader-stop)
-    (ignore-errors (carriage--preloader-stop)))
-  (if errorp
-      (carriage-ui-set-state 'error)
-    (carriage-ui-set-state 'idle))
-  (carriage-log "Transport: complete (status=%s)" (if errorp "error" "ok"))
-  t)
+If ERRORP non-nil, set state to 'error; otherwise flash 'done then return to 'idle.
+When BUFFER is non-nil, operate in that buffer (default is current buffer)."
+  (let ((buf (or buffer (current-buffer))))
+    (with-current-buffer buf
+      (carriage-clear-abort-handler)
+      ;; Ensure preloader is stopped on finalize.
+      (when (fboundp 'carriage--preloader-stop)
+        (ignore-errors (carriage--preloader-stop)))
+      (if errorp
+          (carriage-ui-set-state 'error)
+        (carriage-ui-set-state 'idle))
+      (carriage-log "Transport: complete (status=%s)" (if errorp "error" "ok"))
+      t)))
 
 ;;;###autoload
 (defun carriage-transport-dispatch (&rest args)

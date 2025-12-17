@@ -1,0 +1,108 @@
+#+title: Agent HTTP API v1 — Local API and SSE for a single Carriage agent
+#+author: Carriage Team <dev@carriage>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Meta
+- Spec-ID: carriage/agent/http/v1
+- Version: v1.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: core, transport
+- Prompt-ABI: v1
+- Pack-Profiles: P1-core
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Anchor: PURPOSE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Define the Agent HTTP API for a single Carriage process: JSON endpoints and SSE stream,
+  served on loopback with token auth and strict whitelists, answering from cached state.
+
+Endpoints
+- Anchor: IFC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- All endpoints: loopback only, Content-Type: application/json; UTF-8
+- Token header: X-Auth: <token> (required for all endpoints, including stream)
+- GET /api/health
+  - 200: {"ok":true,"data":{"version":"X.Y.Z","engine":"git|emacs","ts":<unix>}}
+- GET /api/sessions
+  - 200: {"ok":true,"data":[Session,...]}
+- GET /api/session/<id>
+  - 200: {"ok":true,"data": Session+{"apply":{"last":ReportSummary},"ctx":{"sources":{"doc":N,"gptel":N,"visible":N,"both":N}}}}
+  - 404: {"ok":false,"error":"not found","code":"WEB_E_NOT_FOUND"}
+- GET /api/report/last?doc=<id>&limit=<N>
+  - 200: {"ok":true,"data":{"summary":ReportSummary,"items":[...<=N...]}}
+  - 404: {"ok":false,"error":"not found","code":"WEB_E_NOT_FOUND"}
+- POST /api/cmd
+  - Input: {"cmd": "<name>", "doc": "<id>", ...args}
+  - Allowed commands (whitelist):
+    - "apply_last_iteration", "abort", "report_open", "commit_all", "commit_last", "wip",
+      "toggle" with {"key":"ctx|files|visible|patched|profile"}
+  - 200: {"ok":true} or 400/500 error envelope; unknown → WEB_E_CMD
+- GET /api/metrics
+  - 200: {"ok":true,"data":{
+          "published": int,
+          "truncated": int,
+          "clients": int,
+          "sessions_count": int,
+          "sessions_age_ms": number|null,
+          "ts": number
+        }}
+- GET /stream[?doc=<id>]
+  - SSE events: ui|apply|report|transport|heartbeat
+  - event: <type>, data: <JSON payload>, id: <seq>
+
+Schema
+- Anchor: SCHEMA
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Response envelope:
+  - success: {"ok": true, "data": <payload>}
+  - error:   {"ok": false, "error": "<message>", "code": "<ERR_CODE>"}
+- Session (minimal):
+  - {
+      "id": string, "title": string, "project": string, "mode": string,
+      "intent": "Ask|Code|Hybrid", "suite": "udiff|sre|aibo", "engine": "git:<policy>|emacs",
+      "branch": string|null, "ctx": {"count": int}, "patches": {"count": int},
+      "state": {"phase": "idle|sending|streaming|dry-run|apply|error", "tooltip": string}
+    }
+- ReportSummary: {"ok": int, "fail": int, "skipped": int, "total": int, "ts": string}
+- Event payloads:
+  - ui:        {"type":"ui","doc":"<id>","state":{...}}
+  - apply:     {"type":"apply","doc":"<id>","summary":ReportSummary}
+  - report:    {"type":"report","doc":"<id>","summary":ReportSummary}
+  - transport: {"type":"transport","doc":"<id>","phase":"begin|streaming|complete","meta":{"model":string}}
+  - heartbeat: {"type":"heartbeat","ts":number}
+
+Security and Limits
+- Anchor: SEC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- Loopback bind, token required; CORS disabled
+- Strict whitelist for /api/cmd; no arbitrary eval
+- Payload caps and truncation enforced; secrets not logged
+
+Performance
+- Anchor: PERF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Handlers respond from caches; no heavy scans in filters
+- SSE debounced; clients capped and idle-pruned
+
+Testing
+- Anchor: TST
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Agent health OK; SSE emits events; /api/cmd whitelist; payload caps respected

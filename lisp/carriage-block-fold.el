@@ -36,13 +36,13 @@
   "Face for the one-line placeholder of folded begin_<kind> blocks."
   :group 'carriage-block-fold)
 
-(defcustom carriage-block-fold-kinds '((carriage . t))
+(defcustom carriage-block-fold-kinds nil
   "Alist of (KIND . ENABLED) for overlay-based folding of begin_<kind> blocks.
 
 Example:
-  ((carriage . t) (context . nil))
+  ((context . t) (reasoning . nil))
 
-Only `carriage' is enabled by default. Add other kinds (e.g., `context') when needed."
+No kinds are enabled by default. Enable kinds explicitly when needed."
   :type '(alist :key-type (choice (const carriage) (symbol))
                 :value-type boolean)
   :group 'carriage-block-fold)

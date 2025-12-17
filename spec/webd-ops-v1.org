@@ -1,6 +1,6 @@
 #+title: Carriage Web Daemon (webd) Operations v1
 
-Status: draft
+Status: deprecated
 Owner: Carriage
 
 1. Purpose

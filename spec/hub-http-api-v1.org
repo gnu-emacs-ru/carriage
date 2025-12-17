@@ -1,0 +1,73 @@
+#+title: Hub HTTP API v1 — Registry, Proxy, and Unified Dashboard
+#+author: Carriage Team <dev@carriage>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Meta
+- Spec-ID: carriage/hub/http/v1
+- Version: v1.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: core, ui
+- Prompt-ABI: v1
+- Pack-Profiles: P2-full
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Anchor: PURPOSE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Define Hub endpoints to list Agents from the Registry and proxy Agent API/streams,
+  injecting tokens server-side so the browser never sees Agent secrets.
+
+Endpoints
+- Anchor: IFC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Loopback only; Content-Type: application/json; UTF-8
+- Hub health:
+  - GET /hub/health → 200 {"ok":true,"data":{"version":"X.Y.Z","ts":<unix>}}
+  - GET /hub/metrics → 200 {"ok":true,"data":{"agents":int,"proxy_active":int,"ts":<unix>}}
+- Registry:
+  - GET /hub/agents → 200 {"ok":true,"data":[{"id":string,"pid":int,"bind":string,"port":int,"label":string|null,"project":string|null,"alive":bool,"last_seen":number},...]}
+  - POST /hub/cleanup → 200 {"ok":true} (remove stale entries; loopback-only; optional)
+- Proxy:
+  - GET /hub/agent/<id>/api/health → proxied Agent /api/health
+  - GET /hub/agent/<id>/api/sessions → proxied Agent /api/sessions
+  - GET /hub/agent/<id>/api/session/<doc> → proxied
+  - GET /hub/agent/<id>/api/report/last?doc=<doc>&limit=<N> → proxied
+  - GET /hub/agent/<id>/api/metrics → proxied
+  - POST /hub/agent/<id>/api/cmd → proxied (whitelist enforced by Agent)
+  - GET /hub/agent/<id>/stream[?doc=<doc>] → proxied SSE (Hub forwards events)
+- Static:
+  - GET / → Swarm Dashboard (vanilla HTML/JS)
+
+Security
+- Anchor: SEC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- Hub binds loopback; CORS disabled
+- Browser does not receive Agent tokens; Hub injects X-Auth when proxying
+- No arbitrary eval anywhere; Agents enforce whitelist
+
+Performance
+- Anchor: PERF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Hub proxy is non-blocking; timeouts and caps enforced
+- Registry reads are O(1) per listing; cleanup is batched and bounded
+
+Testing
+- Anchor: TST
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Hub lists agents from Registry; stale entries removed
+- Proxy works for API and SSE; browser never receives tokens

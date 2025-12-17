@@ -645,8 +645,7 @@ Choose a visible face for your theme; 'shadow can be too dim."
         (when (and (boundp 'carriage-mode-preloader-window-local)
                    carriage-mode-preloader-window-local)
           (overlay-put carriage--preloader-overlay 'window (selected-window))))
-      ;; Place cursor under spinner (spinner line is provided by before-string + \"\\n\").
-      (when (numberp pos) (goto-char pos))
+
       (setq timer
             (run-at-time
              0 interval
@@ -692,14 +691,12 @@ Choose a visible face for your theme; 'shadow can be too dim."
   "Non-nil when an inline iteration marker has been inserted for the current stream.")
 
 (defun carriage-insert-inline-iteration-marker-now ()
-  "Insert inline iteration marker immediately at a safe position if configured.
+  "Insert inline iteration marker immediately at the current position.
 Uses stream origin when available; never splits a patch block.
 Also adjusts stream origin to the next line after the marker so the spinner
 (preloader) appears strictly below it. Returns non-nil when inserted."
   (interactive)
-  (when (and (boundp 'carriage-iteration-marker-placement)
-             (eq carriage-iteration-marker-placement 'inline)
-             (not carriage--iteration-inline-marker-inserted)
+  (when (and (not carriage--iteration-inline-marker-inserted)
              (boundp 'carriage--last-iteration-id)
              (stringp carriage--last-iteration-id)
              (> (length (string-trim carriage--last-iteration-id)) 0))
@@ -711,8 +708,10 @@ Also adjusts stream origin to the next line after the marker so the spinner
                        (buffer-live-p (marker-buffer carriage--stream-beg-marker)))
                   (marker-position carriage--stream-beg-marker))
                  (t (point))))
-           (ins-pos (ignore-errors
-                      (carriage-iteration--write-inline-marker pos carriage--last-iteration-id))))
+           ;; Force separator insertion for send path so it's visible immediately.
+           (ins-pos (let ((carriage-mode-insert-separator-before-id t))
+                      (ignore-errors
+                        (carriage-iteration--write-inline-marker pos carriage--last-iteration-id)))))
       ;; After inserting the marker line (which includes a trailing newline),
       ;; move the stream-origin to the beginning of the next line so the preloader
       ;; spinner is rendered strictly below the CARRIAGE_ID line.
@@ -726,7 +725,15 @@ Also adjusts stream origin to the next line after the marker so the spinner
 Does not modify buffer text; only clears markers/state so the next chunk opens a region."
   (setq carriage--stream-beg-marker nil)
   (setq carriage--stream-end-marker nil)
-  (setq carriage--stream-origin-marker (and (markerp origin-marker) origin-marker))
+  ;; Always pin origin to the cursor position at the moment of reset.
+  ;; Never reuse an old marker object: stale origin makes preloader “drift” upward.
+  (setq carriage--stream-origin-marker
+        (cond
+         ((and (markerp origin-marker)
+               (buffer-live-p (marker-buffer origin-marker)))
+          (copy-marker (marker-position origin-marker) t))
+         (t
+          (copy-marker (point) t))))
   (setq carriage--reasoning-open nil)
   (setq carriage--reasoning-tail-marker nil)
   (setq carriage--reasoning-beg-marker nil)
@@ -763,7 +770,6 @@ Records begin and tail markers so main text can be inserted after reasoning
 without auto-closing; the end marker is inserted later at tail."
   (when (eq carriage-mode-include-reasoning 'block)
     (carriage--ensure-stream-region)
-    (ignore-errors (carriage-insert-inline-iteration-marker-now))
     (unless carriage--reasoning-open
       (let ((inhibit-read-only t)
             (pos (marker-position carriage--stream-end-marker)))
@@ -1128,7 +1134,17 @@ May include :context-text and :context-target per v1.1."
   (sit-for 0)
   ;; Defer heavy preparation to the next tick so UI updates (spinner/state) are visible instantly.
   (let ((srcbuf (current-buffer))
-        (prefix current-prefix-arg))
+        (prefix current-prefix-arg)
+        (origin-marker (copy-marker (point) t)))
+    ;; Prepare stream immediately at cursor: reset → begin-iteration → insert marker+separator → preloader.
+    (carriage-stream-reset origin-marker)
+    (when (fboundp 'carriage-begin-iteration)
+      (ignore-errors (carriage-begin-iteration)))
+    (when (fboundp 'carriage-insert-inline-iteration-marker-now)
+      (let ((carriage-mode-insert-separator-before-id t))
+        (ignore-errors (carriage-insert-inline-iteration-marker-now))))
+    (when (fboundp 'carriage--preloader-start)
+      (ignore-errors (carriage--preloader-start)))
     (run-at-time
      0 nil
      (lambda ()
@@ -1138,20 +1154,8 @@ May include :context-text and :context-target per v1.1."
                   (model   carriage-mode-model)
                   (intent  carriage-mode-intent)
                   (suite   carriage-mode-suite)
-                  (origin-marker (or (and (markerp carriage--stream-origin-marker)
-                                          (buffer-live-p (marker-buffer carriage--stream-origin-marker))
-                                          carriage--stream-origin-marker)
-                                     (copy-marker (point) t)))
                   (ctx nil)
                   (built nil) (sys nil) (pr nil))
-             ;; Early, synchronous: prepare stream region, insert ID and start preloader
-             (carriage-stream-reset origin-marker)
-             (when (fboundp 'carriage-begin-iteration)
-               (ignore-errors (carriage-begin-iteration)))
-             (when (fboundp 'carriage-insert-inline-iteration-marker-now)
-               (ignore-errors (carriage-insert-inline-iteration-marker-now)))
-             (when (fboundp 'carriage--preloader-start)
-               (ignore-errors (carriage--preloader-start)))
              ;; Build context after immediate UI feedback
              (setq ctx (carriage--build-context 'buffer srcbuf))
              (setq built (carriage-build-prompt intent suite ctx)
@@ -1179,7 +1183,10 @@ May include :context-text and :context-target per v1.1."
                                                   :system sys
                                                   :buffer srcbuf
                                                   :mode (symbol-name (buffer-local-value 'major-mode srcbuf))
-                                                  :insert-marker origin-marker)
+                                                  :insert-marker (or (and (markerp carriage--stream-origin-marker)
+                                                                          (buffer-live-p (marker-buffer carriage--stream-origin-marker))
+                                                                          carriage--stream-origin-marker)
+                                                                     origin-marker))
                      t)
                  (quit
                   (carriage-log "send-buffer: keyboard-quit; aborting")
@@ -1207,14 +1214,17 @@ May include :context-text and :context-target per v1.1."
          (origin-marker (copy-marker (point) t))
          (ctx nil)
          (built nil) (sys nil) (pr nil))
-    ;; Early, synchronous: prepare stream region, insert ID and start preloader
-    (carriage-stream-reset origin-marker)
-    (when (fboundp 'carriage-begin-iteration)
-      (ignore-errors (carriage-begin-iteration)))
-    (when (fboundp 'carriage-insert-inline-iteration-marker-now)
-      (ignore-errors (carriage-insert-inline-iteration-marker-now)))
-    (when (fboundp 'carriage--preloader-start)
-      (ignore-errors (carriage--preloader-start)))
+    ;; Early, synchronous: prepare stream only if early path hasn't already inserted the marker.
+    (let ((already (and (boundp 'carriage--iteration-inline-marker-inserted)
+                        carriage--iteration-inline-marker-inserted)))
+      (unless already
+        (carriage-stream-reset origin-marker)
+        (when (fboundp 'carriage-begin-iteration)
+          (ignore-errors (carriage-begin-iteration)))
+        (when (fboundp 'carriage-insert-inline-iteration-marker-now)
+          (ignore-errors (carriage-insert-inline-iteration-marker-now)))
+        (when (fboundp 'carriage--preloader-start)
+          (ignore-errors (carriage--preloader-start)))))
     ;; Keep spinner/active feedback during context build, then build context
     (carriage-ui-set-state 'sending)
     (setq ctx (carriage--build-context 'subtree srcbuf))

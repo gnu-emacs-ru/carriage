@@ -25,21 +25,15 @@
   (ignore-errors
     (when (fboundp 'carriage-ui-set-state)
       (carriage-ui-set-state phase))
-    (when (fboundp 'carriage--preloader-start)
-      (carriage--preloader-start))
     ;; Give redisplay a chance to show spinner/state
     (sit-for 0)))
 
 (defun carriage--ft--around-defer (orig phase &rest args)
-  "Common around-advice: quit transient, show PHASE, and run ORIG asynchronously."
-  (if (carriage--ft--in-transient-p)
-      (progn
-        (carriage--ft--quit-transient-now)
-        (carriage--ft--early-ui phase)
-        (run-at-time 0 nil (lambda () (apply orig args)))
-        ;; Return quickly to let UI breathe; actual work runs on next tick.
-        nil)
-    (apply orig args)))
+  "Common around-advice: quit transient, show PHASE, and run ORIG."
+  (when (carriage--ft--in-transient-p)
+    (carriage--ft--quit-transient-now)
+    (carriage--ft--early-ui phase))
+  (apply orig args))
 
 ;; Send commands: early 'sending
 (defun carriage--ft-around-send-buffer (orig &rest args)
@@ -60,16 +54,23 @@
 
 ;; Install advices when the corresponding functions are available.
 (with-eval-after-load 'carriage-mode
+  ;; Guard against double-install (e.g., reloads), which otherwise can cause
+  ;; send functions to run twice → duplicate inline iteration markers.
   (when (fboundp 'carriage-send-buffer)
-    (advice-add 'carriage-send-buffer :around #'carriage--ft-around-send-buffer))
+    (unless (advice-member-p #'carriage--ft-around-send-buffer 'carriage-send-buffer)
+      (advice-add 'carriage-send-buffer :around #'carriage--ft-around-send-buffer)))
   (when (fboundp 'carriage-send-subtree)
-    (advice-add 'carriage-send-subtree :around #'carriage--ft-around-send-subtree))
+    (unless (advice-member-p #'carriage--ft-around-send-subtree 'carriage-send-subtree)
+      (advice-add 'carriage-send-subtree :around #'carriage--ft-around-send-subtree)))
   (when (fboundp 'carriage-apply-at-point-or-region)
-    (advice-add 'carriage-apply-at-point-or-region :around #'carriage--ft-around-apply-at-point-or-region))
+    (unless (advice-member-p #'carriage--ft-around-apply-at-point-or-region 'carriage-apply-at-point-or-region)
+      (advice-add 'carriage-apply-at-point-or-region :around #'carriage--ft-around-apply-at-point-or-region)))
   (when (fboundp 'carriage-apply-last-iteration)
-    (advice-add 'carriage-apply-last-iteration :around #'carriage--ft-around-apply-last-iteration))
+    (unless (advice-member-p #'carriage--ft-around-apply-last-iteration 'carriage-apply-last-iteration)
+      (advice-add 'carriage-apply-last-iteration :around #'carriage--ft-around-apply-last-iteration)))
   (when (fboundp 'carriage-dry-run-at-point)
-    (advice-add 'carriage-dry-run-at-point :around #'carriage--ft-around-dry-run-at-point))
+    (unless (advice-member-p #'carriage--ft-around-dry-run-at-point 'carriage-dry-run-at-point)
+      (advice-add 'carriage-dry-run-at-point :around #'carriage--ft-around-dry-run-at-point)))
 
   ;; Idle prewarm to reduce cold-start latency for the first request.
   (run-at-time

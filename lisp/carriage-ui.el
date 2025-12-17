@@ -2917,48 +2917,6 @@ a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
              (set-window-parameter win 'carriage-ui--hl-timer timerobj)))))))
   (advice-add 'carriage-ui--hl--debounce :around #'carriage-ui--hl--debounce@sane))
 
-;; Integrated early insertion of iteration marker and reliable spinner start/move.
-;; This ensures:
-;; - Immediate CARRIAGE_ITERATION_ID insertion under cursor, before heavy work.
-;; - Spinner appears right under the ID line and keeps moving to the stream tail.
-;; - Spinner is not stopped on first chunk; finalization path remains the stop point.
-(with-eval-after-load 'carriage-mode
-  (defvar-local carriage--early-iteration-marker-done nil)
-
-  (defun carriage-ui--maybe-insert-early-id-and-spinner ()
-    "Insert CARRIAGE_ID and start spinner immediately under point, once per request."
-    (unless carriage--early-iteration-marker-done
-      ;; Hard reset any stale streaming state and anchor origin to the current point
-      ;; before inserting the inline ID and starting the preloader. This guarantees
-      ;; the spinner appears exactly under the cursor for this request.
-      (when (fboundp 'carriage-stream-reset)
-        (carriage-stream-reset (copy-marker (point) t)))
-      (let* ((id (or (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id)
-                     (and (fboundp 'carriage-begin-iteration) (carriage-begin-iteration))
-                     ;; Fallback id when carriage-begin-iteration is unavailable:
-                     (md5 (format "%s-%s" (float-time) (random)))))
-             (pos (and (fboundp 'carriage-iteration--write-inline-marker)
-                       (carriage-iteration--write-inline-marker (point) id))))
-        (when (numberp pos)
-          (setq carriage--early-iteration-marker-done t)
-          ;; Mark inline-ID as inserted for this stream to avoid duplicates later.
-          (setq carriage--iteration-inline-marker-inserted t)
-          ;; Place stream origin right after ID line (beginning of next line).
-          (setq carriage--stream-origin-marker (copy-marker pos t))
-          ;; Show spinner now; first frame must be rendered synchronously.
-          (when (fboundp 'carriage--preloader-start)
-            (carriage--preloader-start))
-          ;; Set UI state to 'sending' early (best-effort).
-          (when (fboundp 'carriage-ui-set-state)
-            (carriage-ui-set-state 'sending))))))
-
-  ;; Wrap send entry points to perform early marker+spinner before heavy work.
-  (dolist (fn '(carriage-send-buffer carriage-send-subtree))
-    (when (fboundp fn)
-      (advice-add fn :around
-                  (lambda (orig &rest args)
-                    (carriage-ui--maybe-insert-early-id-and-spinner)
-                    (apply orig args))))))
 
 
 ;; Integrated guards and cursor policy for inline ID and streaming cursor behavior.
@@ -3010,29 +2968,8 @@ a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
 ;;; Integrated guards: single inline-id insertion and free cursor during streaming
 
 
-;; Ensure spinner anchors strictly under current point at the start of a send.
-(when (fboundp 'carriage-ui--maybe-insert-early-id-and-spinner)
-  (defun carriage-ui--ad-anchor-early (orig &rest args)
-    "Reset stream state to the current point before starting early spinner/ID."
-    (when (fboundp 'carriage-stream-reset)
-      (carriage-stream-reset (copy-marker (point) t)))
-    (apply orig args))
-  (advice-remove 'carriage-ui--maybe-insert-early-id-and-spinner
-                 #'carriage-ui--ad-anchor-early)
-  (advice-add 'carriage-ui--maybe-insert-early-id-and-spinner :around
-              #'carriage-ui--ad-anchor-early))
 
-;; Fallback: if preloader starts without a valid origin, anchor it to point.
-(when (fboundp 'carriage--preloader-start)
-  (defun carriage-ui--ad-ensure-origin (orig &rest args)
-    "Ensure preloader has a valid fresh origin at point when missing."
-    (unless (and (boundp 'carriage--stream-origin-marker)
-                 (markerp carriage--stream-origin-marker))
-      (setq carriage--stream-origin-marker (copy-marker (point) t)))
-    (apply orig args))
-  (advice-remove 'carriage--preloader-start #'carriage-ui--ad-ensure-origin)
-  (advice-add 'carriage--preloader-start :around
-              #'carriage-ui--ad-ensure-origin))
+
 
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

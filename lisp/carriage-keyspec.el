@@ -106,8 +106,8 @@ Each value is a plist with :add and/or :remove lists of (:id ID :keys (..)).")
     ;; Git/WIP
     (:id wip          :cmd carriage-wip-checkout            :keys ("w")  :contexts (carriage) :section session :desc-key :wip)
     (:id reset        :cmd carriage-wip-reset-soft          :keys ("R")  :contexts (carriage) :section session :desc-key :reset)
-    (:id commit-all   :cmd carriage-commit-changes          :keys ("C")  :contexts (carriage) :section session :desc-key :commit-all)
-    (:id commit-last  :cmd carriage-commit-last-iteration   :keys ("L")     :contexts (carriage) :section session :desc-key :commit-last)
+    (:id commit-all   :cmd carriage-commit-changes          :keys ("cc")  :contexts (carriage) :section session :desc-key :commit-all)
+    (:id commit-last  :cmd carriage-commit-last-iteration   :keys ("cl")     :contexts (carriage) :section session :desc-key :commit-last)
     ;; Global
     (:id show-log     :cmd carriage-show-log                :keys ("L")     :contexts (carriage report global) :section logs :desc-key :show-log)
     (:id show-traffic :cmd carriage-show-traffic            :keys ("T")     :contexts (carriage report global) :section logs :desc-key :show-traffic)

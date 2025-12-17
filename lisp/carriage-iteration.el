@@ -165,59 +165,34 @@ Keep it short to avoid wrapping."
   :type 'string :group 'carriage)
 
 (defun carriage-iteration--write-inline-marker (pos id)
-  "Insert inline iteration marker starting at beginning of current line, with optional separator.
+  "Insert inline iteration marker for ID at POS and return stream origin position.
 
-Behavior:
-- If POS is not at BOL, finish the line and insert a single newline (no extra blank lines at BOL).
-- If `carriage-mode-insert-separator-before-id' is non-nil (default), ensure there is a
-  separator line just above the marker; if the previous line is already the separator, do nothing.
-  If the previous line is an empty line, replace that empty line with the separator instead of
-  inserting yet another blank line.
-- Insert the marker line \"#+CARRIAGE_ITERATION_ID: <id>\" and a trailing newline.
-Return buffer position after the inserted marker (beginning of the next line)."
-  (when (and (stringp id) (> (length (string-trim id)) 0) (numberp pos))
-    (save-excursion
-      (goto-char pos)
-      ;; Normalize to BOL: only add a single newline when not at BOL.
-      ;; Insert newline right at point (not at EOL) so the separator+ID appear
-      ;; directly under the cursor position.
-      (unless (bolp)
-        (insert "\n"))
-      ;; Optionally add a separator line above (without duplication).
-      (when (if (boundp 'carriage-mode-insert-separator-before-id)
-                carriage-mode-insert-separator-before-id
-              t)
-        (let* ((sep (if (and (boundp 'carriage-mode-separator-text)
-                             (stringp carriage-mode-separator-text)
-                             (> (length carriage-mode-separator-text) 0))
-                        carriage-mode-separator-text
-                      "-----"))
-               (sep-trim (string-trim sep))
-               (have-prev (save-excursion (> (point) (point-min))))
-               (prev-line (save-excursion
-                            (when have-prev
-                              (forward-line -1)
-                              (buffer-substring-no-properties
-                               (line-beginning-position) (line-end-position)))))
-               (prev-trim (string-trim (or prev-line ""))))
-          (let* ((marker (format "#+CARRIAGE_ITERATION_ID: %s" (downcase id)))
-                 (marker-trim (string-trim marker)))
-            ;; Idempotency guard: if we are called twice at the same place,
-            ;; the previous line will already be the marker for this id.
-            ;; In that case, do nothing and keep insertion position below the marker.
-            (when (and have-prev (string= prev-trim marker-trim))
-              (cl-return-from carriage-iteration--write-inline-marker (point)))
-            (unless (string= prev-trim sep-trim)
-              (if (and have-prev (string-empty-p prev-trim))
-                  ;; Replace the empty previous line with the separator (avoid extra blank gap).
-                  (save-excursion
-                    (forward-line -1)
-                    (delete-region (line-beginning-position) (line-end-position))
-                    (insert sep))
-                ;; Otherwise, just add the separator on a fresh line above.
-                (insert sep "\n"))))))
-      ;; Insert the marker and return position at start of next line.
-      (insert (format "#+CARRIAGE_ITERATION_ID: %s\n" (downcase id)))
+Insertion policy:
+- Insert at the beginning of the line containing POS (never split a line).
+- When `carriage-mode-insert-separator-before-id' is non-nil, insert separator line first.
+- Always end with a newline after the marker line.
+
+Return value is the point at the beginning of the line immediately after the marker
+(i.e. where preloader/spinner and streamed text should start)."
+  (when (and (stringp id)
+             (not (string-empty-p (string-trim id)))
+             (numberp pos))
+    (let* ((id1 (downcase (string-trim id)))
+           (sep-enabled (if (boundp 'carriage-mode-insert-separator-before-id)
+                            carriage-mode-insert-separator-before-id
+                          t))
+           (sep (if (and (boundp 'carriage-mode-separator-text)
+                         (stringp carriage-mode-separator-text)
+                         (> (length carriage-mode-separator-text) 0))
+                    carriage-mode-separator-text
+                  "-----"))
+           (inhibit-read-only t))
+      ;; Clamp POS and insert at BOL to avoid splitting a line or an Org block header.
+      (goto-char (max (point-min) (min pos (point-max))))
+      (beginning-of-line)
+      (when sep-enabled
+        (insert sep "\n"))
+      (insert (format "#+CARRIAGE_ITERATION_ID: %s\n" id1))
       (point))))
 
 (defun carriage-iteration-read-id ()
@@ -243,121 +218,6 @@ Returns the id string or nil."
                (re-search-forward rx-inline nil t))
         (downcase (match-string 1)))
        (t nil)))))
-
-;; Ensure the separator line is present directly above the newly inserted
-;; CARRIAGE_ITERATION_ID line, when enabled. We do it immediately after
-;; the inline marker insertion, so the visual order is:
-;;   separator (optional) -> CARRIAGE_ID -> spinner (on its own line).
-
-;; -------------------------------------------------------------------
-;; Robust inline marker writer (single source of truth + hard idempotency)
-;;
-;; Rationale:
-;; - We may be called more than once per request due to timers/transient/advices.
-;; - Duplicates typically manifest as:
-;;     ----- + ID
-;;     (preloader)
-;;     ID
-;; - Therefore we must make marker insertion *hermetically idempotent* based on
-;;   buffer text, not on fragile flags/advices.
-;;
-;; Policy:
-;; - Never insert duplicate marker for the same ID when it's already present at
-;;   (or immediately around) POS.
-;; - Guard works regardless of separator settings.
-;; - Return position at the beginning of the line *after* the marker when the
-;;   marker already exists or after insertion (for stream-origin / preloader).
-
-(defun carriage-iteration--write-inline-marker (pos id)
-  "Insert inline iteration marker at POS with optional separator, idempotently.
-
-Rules:
-- If POS is not at BOL, insert a single newline at POS (so marker appears directly below cursor).
-- If a marker for the same ID is already present at/around POS, do not insert again.
-  Return position after the existing marker.
-- If separator is enabled, ensure exactly one separator line directly above the marker.
-- Insert marker line \"#+CARRIAGE_ITERATION_ID: <id>\" (lowercased) and a trailing newline.
-Return buffer position after the marker (BOL of the next line), or nil when not inserted."
-  (when (and (stringp id)
-             (> (length (string-trim id)) 0)
-             (numberp pos))
-    (save-excursion
-      (goto-char pos)
-      (let* ((marker (format "#+CARRIAGE_ITERATION_ID: %s" (downcase id)))
-             (marker-trim (string-trim marker))
-             (sep (if (and (boundp 'carriage-mode-separator-text)
-                           (stringp carriage-mode-separator-text)
-                           (> (length carriage-mode-separator-text) 0))
-                      carriage-mode-separator-text
-                    "-----"))
-             (sep-trim (string-trim sep)))
-        ;; Normalize insertion point: put marker on its own line directly below cursor.
-        (unless (bolp)
-          (insert "\n"))
-        (catch 'carriage--inline-marker-done
-          ;; Helper to read trimmed line at point (without moving permanently).
-          (cl-labels
-              ((line-trim-at (p)
-                 (save-excursion
-                   (goto-char p)
-                   (string-trim
-                    (buffer-substring-no-properties
-                     (line-beginning-position) (line-end-position)))))
-               (safe-forward-line (n)
-                 (ignore-errors (forward-line n))))
-            (let* ((bol (line-beginning-position))
-                   (have-prev (> bol (point-min)))
-                   (prev-trim (and have-prev (line-trim-at (save-excursion (safe-forward-line -1) (point)))))
-                   (cur-trim  (line-trim-at (point)))
-                   (next-trim (let ((p (save-excursion (safe-forward-line 1) (point))))
-                                (and (< p (point-max)) (line-trim-at p)))))
-
-              ;; --- HARD idempotency guards (independent of separator setting) ---
-
-              ;; Case A: we are already on the marker line
-              (when (string= cur-trim marker-trim)
-                (safe-forward-line 1)
-                (throw 'carriage--inline-marker-done (point)))
-
-              ;; Case B: previous line is the marker (common after first insertion moves origin below marker)
-              (when (and (stringp prev-trim) (string= prev-trim marker-trim))
-                (throw 'carriage--inline-marker-done (point)))
-
-              ;; Case C: we are on separator and the next line is the marker
-              (when (and (string= cur-trim sep-trim)
-                         (stringp next-trim)
-                         (string= next-trim marker-trim))
-                (safe-forward-line 2)
-                (throw 'carriage--inline-marker-done (point)))
-
-              ;; Case D: previous line is separator and current is marker (paranoia)
-              (when (and (string= prev-trim sep-trim)
-                         (string= cur-trim marker-trim))
-                (safe-forward-line 1)
-                (throw 'carriage--inline-marker-done (point)))
-
-              ;; --- Ensure separator (optional), without duplication ---
-              (when (if (boundp 'carriage-mode-insert-separator-before-id)
-                        carriage-mode-insert-separator-before-id
-                      t)
-                (let* ((prev-line (when have-prev
-                                    (save-excursion
-                                      (safe-forward-line -1)
-                                      (buffer-substring-no-properties
-                                       (line-beginning-position) (line-end-position)))))
-                       (prev-trim2 (string-trim (or prev-line ""))))
-                  (unless (string= prev-trim2 sep-trim)
-                    (if (and have-prev (string-empty-p prev-trim2))
-                        ;; Replace empty previous line with separator.
-                        (save-excursion
-                          (safe-forward-line -1)
-                          (delete-region (line-beginning-position) (line-end-position))
-                          (insert sep))
-                      (insert sep "\n")))))
-
-              ;; --- Insert marker line ---
-              (insert marker "\n")
-              (throw 'carriage--inline-marker-done (point)))))))))
 
 (provide 'carriage-iteration)
 ;;; carriage-iteration.el ends here

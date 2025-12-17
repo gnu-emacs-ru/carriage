@@ -692,9 +692,15 @@ Choose a visible face for your theme; 'shadow can be too dim."
 
 (defun carriage-insert-inline-iteration-marker-now ()
   "Insert inline iteration marker immediately at the current position.
-Uses stream origin when available; never splits a patch block.
-Also adjusts stream origin to the next line after the marker so the spinner
-(preloader) appears strictly below it. Returns non-nil when inserted."
+
+Uses stream origin when available.
+Insertion never splits a line: marker is inserted at the beginning of the target line.
+Also adjusts stream origin to the line immediately after the marker so the preloader
+and streamed content start strictly below it.
+
+Policy: after insertion, move point to the new stream origin (preloader line).
+
+Returns non-nil when inserted."
   (interactive)
   (when (and (not carriage--iteration-inline-marker-inserted)
              (boundp 'carriage--last-iteration-id)
@@ -708,17 +714,15 @@ Also adjusts stream origin to the next line after the marker so the spinner
                        (buffer-live-p (marker-buffer carriage--stream-beg-marker)))
                   (marker-position carriage--stream-beg-marker))
                  (t (point))))
-           ;; Force separator insertion for send path so it's visible immediately.
-           (ins-pos (let ((carriage-mode-insert-separator-before-id t))
-                      (ignore-errors
-                        (carriage-iteration--write-inline-marker pos carriage--last-iteration-id)))))
-      ;; After inserting the marker line (which includes a trailing newline),
-      ;; move the stream-origin to the beginning of the next line so the preloader
-      ;; spinner is rendered strictly below the CARRIAGE_ID line.
-      (when (numberp ins-pos)
-        (setq carriage--stream-origin-marker (copy-marker ins-pos t)))
+           (endpos (ignore-errors
+                     (carriage-iteration--write-inline-marker pos carriage--last-iteration-id))))
+      (when (numberp endpos)
+        ;; Stream (and preloader) must start strictly after the marker.
+        (setq carriage--stream-origin-marker (copy-marker endpos t))
+        ;; Put cursor where the preloader will render (policy requirement).
+        (goto-char endpos))
       (setq carriage--iteration-inline-marker-inserted t)
-      t)))
+      (and (numberp endpos) t))))
 
 (defun carriage-stream-reset (&optional origin-marker)
   "Reset streaming state for current buffer and set ORIGIN-MARKER if provided.

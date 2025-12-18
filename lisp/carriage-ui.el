@@ -2924,16 +2924,88 @@ a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
 (defvar-local carriage--inline-id-inserted nil
   "Non-nil when the inline CARRIAGE_ITERATION_ID has already been inserted in this buffer for the current request.")
 
+(defvar-local carriage--fingerprint-inserted nil
+  "Non-nil when the per-send CARRIAGE_FINGERPRINT line has already been inserted for the current request.")
+
 (defun carriage--inline-id-reset (&rest _)
-  "Reset per-request inline-id flag."
-  (setq carriage--inline-id-inserted nil))
+  "Reset per-request inline-id/fingerprint flags."
+  (setq carriage--inline-id-inserted nil)
+  (setq carriage--fingerprint-inserted nil))
+
+(defun carriage--fingerprint--collect ()
+  "Collect a small, response-shaping fingerprint plist (best-effort).
+This must be safe and never signal. Only include keys that affect:
+- what the model does (intent/suite/model),
+- and what context it sees (ctx toggles/scope/profile/budgets/injection)."
+  (condition-case _e
+      (let* ((raw
+              (cond
+               ;; Prefer doc-state collector when available (already returns :CAR_* keys)
+               ((and (require 'carriage-doc-state nil t)
+                     (fboundp 'carriage-doc-state--collect-current))
+                (ignore-errors (carriage-doc-state--collect-current)))
+               (t
+                ;; Fallback: minimal set from common vars
+                (let ((pl '()))
+                  (when (boundp 'carriage-mode-intent)  (setq pl (plist-put pl :CAR_INTENT carriage-mode-intent)))
+                  (when (boundp 'carriage-mode-suite)   (setq pl (plist-put pl :CAR_SUITE carriage-mode-suite)))
+                  (when (boundp 'carriage-mode-model)   (setq pl (plist-put pl :CAR_MODEL carriage-mode-model)))
+                  (when (boundp 'carriage-mode-backend) (setq pl (plist-put pl :CAR_BACKEND carriage-mode-backend)))
+                  (when (boundp 'carriage-mode-provider) (setq pl (plist-put pl :CAR_PROVIDER carriage-mode-provider)))
+                  (when (boundp 'carriage-mode-include-doc-context) (setq pl (plist-put pl :CAR_CTX_DOC carriage-mode-include-doc-context)))
+                  (when (boundp 'carriage-mode-include-gptel-context) (setq pl (plist-put pl :CAR_CTX_GPTEL carriage-mode-include-gptel-context)))
+                  (when (boundp 'carriage-mode-include-visible-context) (setq pl (plist-put pl :CAR_CTX_VISIBLE carriage-mode-include-visible-context)))
+                  (when (boundp 'carriage-mode-include-patched-files) (setq pl (plist-put pl :CAR_CTX_PATCHED carriage-mode-include-patched-files)))
+                  (when (boundp 'carriage-doc-context-scope) (setq pl (plist-put pl :CAR_DOC_CTX_SCOPE carriage-doc-context-scope)))
+                  (when (boundp 'carriage-context-profile) (setq pl (plist-put pl :CAR_CTX_PROFILE carriage-context-profile)))
+                  (when (boundp 'carriage-mode-context-injection) (setq pl (plist-put pl :CAR_CTX_INJECTION carriage-mode-context-injection)))
+                  (when (boundp 'carriage-mode-context-max-files) (setq pl (plist-put pl :CAR_CTX_MAX_FILES carriage-mode-context-max-files)))
+                  (when (boundp 'carriage-mode-context-max-total-bytes) (setq pl (plist-put pl :CAR_CTX_MAX_BYTES carriage-mode-context-max-total-bytes)))
+                  pl))))
+             ;; Whitelist/normalize when helper exists (keeps budgets for tooltip later; still fine in fingerprint).
+             (imp (if (and (listp raw)
+                           (require 'carriage-doc-state nil t)
+                           (fboundp 'carriage-doc-state--important-plist))
+                      (ignore-errors (carriage-doc-state--important-plist raw))
+                    raw))
+             (iter (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id))
+             (ts (format-time-string "%Y-%m-%d %H:%M:%S")))
+        (setq imp (or imp '()))
+        ;; Add lightweight metadata without polluting :CAR_* namespace.
+        (plist-put (plist-put imp :ITER iter) :TS ts))
+    (error (list :TS (format-time-string "%Y-%m-%d %H:%M:%S")))))
+
+(defun carriage--fingerprint--line ()
+  "Return the canonical fingerprint line text."
+  (format "#+CARRIAGE_FINGERPRINT: %s\n"
+          (prin1-to-string (or (carriage--fingerprint--collect) '()))))
+
+(defun carriage--fingerprint--upsert-after-pos (pos)
+  "Upsert fingerprint line immediately after POS's line (best-effort, never signal)."
+  (ignore-errors
+    (when (and (numberp pos)
+               (>= pos (point-min))
+               (<= pos (point-max))
+               (derived-mode-p 'org-mode))
+      (save-excursion
+        (goto-char pos)
+        (beginning-of-line)
+        (forward-line 1)
+        (let ((inhibit-read-only t)
+              (case-fold-search t))
+          ;; If a fingerprint line is already right here, replace it (idempotent).
+          (when (looking-at "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b.*$")
+            (delete-region (line-beginning-position)
+                           (min (point-max) (1+ (line-end-position)))))
+          (insert (carriage--fingerprint--line)))))))
 
 ;; Reset the flag whenever a new stream is initialized.
 (ignore-errors
   (advice-add 'carriage-stream-reset :after #'carriage--inline-id-reset))
 
 (defun carriage--inline-id-around (orig-fun &rest args)
-  "Guard duplicate inline-id insertions. If already inserted, skip."
+  "Guard duplicate inline-id insertions. If already inserted, skip.
+On first insertion per request, also insert a CARRIAGE_FINGERPRINT line right after the marker."
   (if carriage--inline-id-inserted
       ;; Return a sensible position for downstream code: prefer stream-origin,
       ;; otherwise current point.
@@ -2943,6 +3015,10 @@ a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
           (point))
     (let ((res (apply orig-fun args)))
       (setq carriage--inline-id-inserted t)
+      ;; Insert fingerprint once per request (best-effort).
+      (unless carriage--fingerprint-inserted
+        (setq carriage--fingerprint-inserted t)
+        (carriage--fingerprint--upsert-after-pos (if (numberp res) res (point))))
       res)))
 
 (ignore-errors

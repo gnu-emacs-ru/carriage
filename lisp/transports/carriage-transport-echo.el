@@ -53,19 +53,40 @@
   :type 'integer :group 'carriage-transport-echo)
 
 (defun carriage--echo--prompt (source buffer mode)
-  "Build dev prompt string from BUFFER given SOURCE and MODE."
+  "Build dev prompt string from BUFFER given SOURCE and MODE.
+Strips any #+begin_carriage … #+end_carriage blocks and per-send fingerprint lines."
   (with-current-buffer buffer
-    (pcase source
-      ('subtree
-       (if (eq mode 'org-mode)
-           (save-excursion
-             (require 'org)
-             (ignore-errors (org-back-to-heading t))
-             (let ((beg (save-excursion (org-back-to-heading t) (point)))
-                   (end (save-excursion (org-end-of-subtree t t) (point))))
-               (buffer-substring-no-properties beg end)))
-         (buffer-substring-no-properties (point-min) (point-max))))
-      (_ (buffer-substring-no-properties (point-min) (point-max))))))
+    (let* ((raw
+            (pcase source
+              ('subtree
+               (if (eq mode 'org-mode)
+                   (save-excursion
+                     (require 'org)
+                     (ignore-errors (org-back-to-heading t))
+                     (let ((beg (save-excursion (org-back-to-heading t) (point)))
+                           (end (save-excursion (org-end-of-subtree t t) (point))))
+                       (buffer-substring-no-properties beg end)))
+                 (buffer-substring-no-properties (point-min) (point-max))))
+              (_ (buffer-substring-no-properties (point-min) (point-max))))))
+      (with-temp-buffer
+        (insert (or raw ""))
+        (goto-char (point-min))
+        (let ((case-fold-search t))
+          ;; Legacy/state blocks
+          (while (re-search-forward "^[ \t]*#\\+begin_carriage\\b" nil t)
+            (let ((beg (match-beginning 0)))
+              (if (re-search-forward "^[ \t]*#\\+end_carriage\\b" nil t)
+                  (let ((end (line-end-position)))
+                    (delete-region beg end)
+                    (when (looking-at "\n") (delete-char 1)))
+                (delete-region beg (point-max)))))
+          ;; Per-send fingerprint line(s)
+          (goto-char (point-min))
+          (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b.*$" nil t)
+            (delete-region (line-beginning-position)
+                           (min (point-max) (1+ (line-end-position))))
+            (goto-char (line-beginning-position))))
+        (buffer-substring-no-properties (point-min) (point-max))))))
 
 (defun carriage--echo--chunk-string (s n)
   "Return a list of chunks splitting S into pieces of at most N chars."

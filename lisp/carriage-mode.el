@@ -742,6 +742,7 @@ Does not modify buffer text; only clears markers/state so the next chunk opens a
   (setq carriage--reasoning-tail-marker nil)
   (setq carriage--reasoning-beg-marker nil)
   (setq carriage--iteration-inline-marker-inserted nil)
+  (setq carriage--fingerprint-inline-inserted nil)
   (carriage--undo-group-start)
   t)
 
@@ -1056,6 +1057,110 @@ Deduplicates segments if MODEL already contains provider/backend."
                       "")
                     ":" mo-str))))))))
 
+;; -------------------------------------------------------------------
+;; Per-send fingerprint (inline, near iteration marker)
+
+(defcustom carriage-mode-insert-fingerprint t
+  "When non-nil, Send commands insert an inline fingerprint line right under
+the inline iteration marker:
+
+  #+CARRIAGE_ITERATION_ID: <id>
+  #+CARRIAGE_FINGERPRINT: (<plist>)
+
+The fingerprint captures only response-shaping and context-shaping parameters
+(intent/suite/model/context toggles/scope/profile/budgets/injection), and MUST
+never be included in outgoing LLM prompts (transports must filter it)."
+  :type 'boolean
+  :group 'carriage)
+
+(defvar-local carriage--fingerprint-inline-inserted nil
+  "Non-nil when an inline CARRIAGE_FINGERPRINT line has been inserted for the current stream.")
+
+(defun carriage--fingerprint-plist (&optional iteration-id)
+  "Return a sanitized fingerprint plist for the current buffer.
+ITERATION-ID, when non-nil, is recorded under :CAR_ITERATION_ID."
+  (let* ((iter (and (stringp iteration-id) (string-trim iteration-id)))
+         (iter (and iter (not (string-empty-p iter)) (downcase iter))))
+    ;; IMPORTANT: keep only response/context shaping fields (no UI prefs, no secrets).
+    (list
+     :CAR_TS (float-time)
+     :CAR_ITERATION_ID iter
+
+     ;; Response shape
+     :CAR_INTENT (and (boundp 'carriage-mode-intent) carriage-mode-intent)
+     :CAR_SUITE  (and (boundp 'carriage-mode-suite) carriage-mode-suite)
+
+     ;; LLM identity
+     :CAR_BACKEND  (and (boundp 'carriage-mode-backend) carriage-mode-backend)
+     :CAR_PROVIDER (and (boundp 'carriage-mode-provider) carriage-mode-provider)
+     :CAR_MODEL    (and (boundp 'carriage-mode-model) carriage-mode-model)
+
+     ;; Context sources
+     :CAR_CTX_DOC     (and (boundp 'carriage-mode-include-doc-context)
+                           carriage-mode-include-doc-context)
+     :CAR_CTX_GPTEL   (and (boundp 'carriage-mode-include-gptel-context)
+                           carriage-mode-include-gptel-context)
+     :CAR_CTX_VISIBLE (and (boundp 'carriage-mode-include-visible-context)
+                           carriage-mode-include-visible-context)
+     :CAR_CTX_PATCHED (and (boundp 'carriage-mode-include-patched-files)
+                           carriage-mode-include-patched-files)
+
+     ;; Context shaping
+     :CAR_DOC_CTX_SCOPE (or (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+                            (and (boundp 'carriage-mode-doc-context-scope) carriage-mode-doc-context-scope))
+     :CAR_CTX_PROFILE   (or (and (boundp 'carriage-context-profile) carriage-context-profile)
+                            (and (boundp 'carriage-mode-context-profile) carriage-mode-context-profile))
+     :CAR_CTX_MAX_FILES (and (boundp 'carriage-mode-context-max-files)
+                             carriage-mode-context-max-files)
+     :CAR_CTX_MAX_BYTES (and (boundp 'carriage-mode-context-max-total-bytes)
+                             carriage-mode-context-max-total-bytes)
+     :CAR_CTX_INJECTION (and (boundp 'carriage-mode-context-injection)
+                             carriage-mode-context-injection))))
+
+(defun carriage-insert-inline-fingerprint-now ()
+  "Insert/update inline #+CARRIAGE_FINGERPRINT: ... line at current stream origin.
+
+Called by Send commands immediately after inserting the iteration marker.
+Also advances `carriage--stream-origin-marker' so preloader/streaming starts
+strictly below the fingerprint line."
+  (interactive)
+  (when (and (boundp 'carriage-mode-insert-fingerprint)
+             carriage-mode-insert-fingerprint
+             (not carriage--fingerprint-inline-inserted)
+             (boundp 'carriage--last-iteration-id)
+             (stringp carriage--last-iteration-id)
+             (not (string-empty-p (string-trim carriage--last-iteration-id))))
+    (let* ((pos (cond
+                 ((and (markerp carriage--stream-origin-marker)
+                       (buffer-live-p (marker-buffer carriage--stream-origin-marker)))
+                  (marker-position carriage--stream-origin-marker))
+                 ((and (markerp carriage--stream-beg-marker)
+                       (buffer-live-p (marker-buffer carriage--stream-beg-marker)))
+                  (marker-position carriage--stream-beg-marker))
+                 (t (point))))
+           (fp (carriage--fingerprint-plist carriage--last-iteration-id))
+           (line (format "#+CARRIAGE_FINGERPRINT: %s\n" (prin1-to-string fp)))
+           (inhibit-read-only t)
+           (newpos nil))
+      (save-excursion
+        (goto-char (max (point-min) (min pos (point-max))))
+        (beginning-of-line)
+        ;; Idempotent: if there is already a fingerprint line at origin, replace it.
+        (let ((case-fold-search t))
+          (when (looking-at "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b.*$")
+            (delete-region (line-beginning-position)
+                           (min (point-max) (1+ (line-end-position))))
+            (goto-char (line-beginning-position))))
+        (insert line)
+        (setq newpos (point)))
+      (when (numberp newpos)
+        ;; Stream (and preloader) must start strictly after the fingerprint.
+        (setq carriage--stream-origin-marker (copy-marker newpos t))
+        ;; Policy: keep point at the new stream origin (same as for iteration marker).
+        (goto-char newpos))
+      (setq carriage--fingerprint-inline-inserted t)
+      t)))
+
 (defun carriage--build-context (source buffer)
   "Return context plist for prompt builder with at least :payload.
 SOURCE is 'buffer or 'subtree. BUFFER is the source buffer.
@@ -1075,16 +1180,23 @@ May include :context-text and :context-target per v1.1."
                  (buffer-substring-no-properties (point-min) (point-max))))
               (_ (buffer-substring-no-properties (point-min) (point-max)))))
            ;; Do not leak document state into the LLM payload:
-           ;; remove file-level CARRIAGE_STATE property lines from the payload.
+           ;; remove file-level CARRIAGE_STATE property lines AND per-send fingerprint lines.
            (payload
             (let ((text (or payload "")))
               (with-temp-buffer
                 (insert text)
                 (goto-char (point-min))
                 (let ((case-fold-search t))
+                  ;; Doc-state (canonical)
                   (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b.*$" nil t)
                     (delete-region (line-beginning-position)
-                                   (min (point-max) (1+ (line-end-position))))))
+                                   (min (point-max) (1+ (line-end-position)))))
+                  ;; Per-send fingerprint (must never reach the LLM)
+                  (goto-char (point-min))
+                  (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b.*$" nil t)
+                    (delete-region (line-beginning-position)
+                                   (min (point-max) (1+ (line-end-position))))
+                    (goto-char (line-beginning-position))))
                 (buffer-substring-no-properties (point-min) (point-max)))))
            (target (if (boundp 'carriage-mode-context-injection)
                        carriage-mode-context-injection
@@ -1144,6 +1256,9 @@ May include :context-text and :context-target per v1.1."
     (when (fboundp 'carriage-insert-inline-iteration-marker-now)
       (let ((carriage-mode-insert-separator-before-id t))
         (ignore-errors (carriage-insert-inline-iteration-marker-now))))
+    ;; Insert per-send fingerprint right under the iteration marker (best-effort).
+    (when (fboundp 'carriage-insert-inline-fingerprint-now)
+      (ignore-errors (carriage-insert-inline-fingerprint-now)))
     (when (fboundp 'carriage--preloader-start)
       (ignore-errors (carriage--preloader-start)))
     (run-at-time
@@ -1226,6 +1341,9 @@ May include :context-text and :context-target per v1.1."
           ;; Keep behavior consistent with `carriage-send-buffer': separator first.
           (let ((carriage-mode-insert-separator-before-id t))
             (ignore-errors (carriage-insert-inline-iteration-marker-now))))
+        ;; Insert per-send fingerprint right under the iteration marker (best-effort).
+        (when (fboundp 'carriage-insert-inline-fingerprint-now)
+          (ignore-errors (carriage-insert-inline-fingerprint-now)))
         (when (fboundp 'carriage--preloader-start)
           (ignore-errors (carriage--preloader-start)))))
     ;; Keep spinner/active feedback during context build, then build context

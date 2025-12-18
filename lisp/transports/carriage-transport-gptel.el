@@ -87,13 +87,20 @@ Strips any #+begin_carriage … #+end_carriage blocks from the outgoing text."
         (insert (or raw ""))
         (goto-char (point-min))
         (let ((case-fold-search t))
+          ;; Legacy/state blocks
           (while (re-search-forward "^[ \t]*#\\+begin_carriage\\b" nil t)
             (let ((beg (match-beginning 0)))
               (if (re-search-forward "^[ \t]*#\\+end_carriage\\b" nil t)
                   (let ((end (line-end-position)))
                     (delete-region beg end)
                     (when (looking-at "\n") (delete-char 1)))
-                (delete-region beg (point-max))))))
+                (delete-region beg (point-max)))))
+          ;; Per-send fingerprint line(s) must never reach the LLM prompt.
+          (goto-char (point-min))
+          (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b.*$" nil t)
+            (delete-region (line-beginning-position)
+                           (min (point-max) (1+ (line-end-position))))
+            (goto-char (line-beginning-position))))
         (buffer-substring-no-properties (point-min) (point-max))))))
 
 (defun carriage--gptel--maybe-open-logs ()

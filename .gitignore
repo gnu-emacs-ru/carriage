@@ -20,4 +20,5 @@ dist/
 ...*
 
 org/
+doc/
 TODO.org

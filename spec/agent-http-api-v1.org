@@ -8,6 +8,9 @@ Meta
 - Spec-ID: carriage/agent/http/v1
 - Version: v1.0
 - Status: draft
+- Readiness: alpha
+- Ready-For: Token auth uniformity + envelope conformance + cache-discipline tests
+- Not-Ready-For: Expanding /api/cmd beyond whitelist (until Hub proxy + registry lifecycle is stable)
 - Normativity: RFC 2119 applies
 - Ownership: core, transport
 - Prompt-ABI: v1

@@ -8,6 +8,9 @@ Meta
 - Spec-ID: carriage/swarm/v1
 - Version: v1.0
 - Status: draft
+- Readiness: alpha
+- Ready-For: Spec-level conformance tests (Agent auth, Hub token-injection, Registry atomicity, Proxy boundedness)
+- Not-Ready-For: Broad UI/keys exposure beyond start/stop/open-dashboard (until Hub proxy + liveness model is proven by tests)
 - Normativity: RFC 2119 applies
 - Ownership: core, ui, transport
 - Prompt-ABI: v1
@@ -124,6 +127,14 @@ Performance and Asynchrony
 
 Testing and Conformance
 - Anchor: TST
+- Dialectic-Readiness:
+  - Thesis: Roles are separated (Agent serves; Hub proxies; Registry discovers; Main Emacs orchestrates only).
+  - Antithesis: Any ambiguity in liveness ownership, proxy boundedness (esp. SSE), or token handling reintroduces coupling and UI stalls.
+  - Synthesis: Conformance is achieved when FREEZE is the only numeric source of truth, Hub owns liveness updates, proxy is fully bounded, and tokens never reach browser.
+- Ready-For:
+  - Integration tests that start Agent + Hub and assert: auth-on-all-agent-endpoints, hub token-injection, bounded proxy caps/timeouts, atomic registry rewrite, stale cleanup.
+- Not-Ready-For:
+  - Expanding command surface beyond strict whitelist; any “arbitrary eval/RPC”.
 - Readiness (dialectic snapshot):
   - Thesis (strong): Swarm architecture is specified as a clean separation of responsibilities:
     Agent serves local API/SSE; Hub proxies and injects tokens; Registry is discovery; Main Emacs orchestrates processes only.

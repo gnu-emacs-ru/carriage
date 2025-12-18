@@ -658,17 +658,16 @@ We only apply FACE to the bracket chrome and to S only when S has no face."
        (< (point) (overlay-end ov))))
 
 (defun carriage-doc-state--summary-fold (ov summary tooltip)
-  "Fold OV: hide original text and show SUMMARY (with TOOLTIP)."
+  "Fold OV: show SUMMARY via overlay display, keep line navigable, attach TOOLTIP."
   (when (overlayp ov)
     (overlay-put ov 'help-echo tooltip)
-    (overlay-put ov 'invisible carriage-doc-state-invisibility-symbol)
-    ;; Preserve layout: our overlay usually includes the trailing newline, so add one in before-string.
-    (overlay-put ov 'before-string
-                 (propertize (concat summary "\n")
-                             'help-echo tooltip))
-    (setq carriage-doc-state--summary-folded t)
-    (unless (member carriage-doc-state-invisibility-symbol buffer-invisibility-spec)
-      (add-to-invisibility-spec carriage-doc-state-invisibility-symbol))))
+    ;; Use `display' instead of `invisible'+`before-string' to preserve line navigation (C-p/C-n)
+    ;; and allow point to enter the line for editing (reveal).
+    (overlay-put ov 'display summary)
+    ;; Ensure we don't also inject a phantom line.
+    (overlay-put ov 'before-string nil)
+    (overlay-put ov 'invisible nil)
+    (setq carriage-doc-state--summary-folded t)))
 
 (defun carriage-doc-state--summary-reveal (ov tooltip)
   "Reveal OV: show original text, hide summary placeholder."

@@ -41,6 +41,7 @@ spec/agent-http-api-v1.org
 spec/hub-http-api-v1.org
 spec/registry-v1.org
 spec/security-v2.org
+spec/errors-v2.org
 spec/logging-v2.org
 spec/ui-v2.org
 lisp/carriage-web.el
@@ -48,8 +49,8 @@ lisp/carriage-logging.el
 lisp/carriage-mode.el
 lisp/carriage-global-mode.el
 lisp/carriage-utils.el
-lisp/carriage-web-supervisor.el
-lisp/carriage-web-publish.el
+
+
 # планируемые новые:
 lisp/carriage-agent.el
 lisp/carriage-hub.el

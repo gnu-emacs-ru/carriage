@@ -117,12 +117,21 @@ Testing and Conformance
 - Normative: t
 - Stability: stable
 - Pack-Priority: P1
-- CHK-swarm-001: Agent health OK on loopback; token enforced
-- CHK-swarm-002: SSE emits ui/apply/report/transport/heartbeat; reconnects tolerated
-- CHK-swarm-003: Hub lists agents from Registry; stale entries cleaned
-- CHK-swarm-004: Hub proxies Agent API/stream; browser never sees tokens
-- CHK-swarm-005: Whitelist commands enforced; unknown → WEB_E_CMD
-- CHK-swarm-006: Payload caps respected; truncation metrics exposed
+- Compliance Checklist (minimum):
+  - CHK-swarm-001: Agents and Hub bind loopback (127.0.0.1); CORS disabled; no remote bind by default.
+  - CHK-swarm-002: Main Emacs MUST NOT host HTTP/SSE servers (agents/hub only).
+  - CHK-swarm-003: Agent requires token (X-Auth) for ALL endpoints including /stream; missing/invalid → WEB_E_AUTH.
+  - CHK-swarm-004: Hub proxies Agent API/SSE and injects X-Auth; browser never receives Agent tokens.
+  - CHK-swarm-005: /api/cmd is whitelist-only; unknown/disallowed → WEB_E_CMD; no arbitrary eval anywhere.
+  - CHK-swarm-006: Payload caps enforced; truncation counted/exposed; oversized requests rejected.
+  - CHK-swarm-007: Registry is atomic and self-healing: stale entries detected (pid/health) and cleaned.
+  - CHK-swarm-008: SSE reconnects tolerated; clients capped and idle-pruned; hub forwards SSE without blocking.
+- Test Matrix (integration; web processes only):
+  - TST-swarm-001: Start Agent → registry entry appears → Agent /api/health OK (token enforced).
+  - TST-swarm-002: Agent /api/sessions returns cached snapshot (O(1) handler); snapshot updates do not block handlers.
+  - TST-swarm-003: Agent /stream emits hello + heartbeat + ui/apply/report/transport; reconnect works.
+  - TST-swarm-004: Start Hub → /hub/agents lists registry entries; stale cleanup marks/removes dead agents.
+  - TST-swarm-005: Hub proxies Agent /api/* and /stream; browser never sees token; proxy timeouts are bounded.
 
 Cross-References and Anchors
 - Anchor: XREF

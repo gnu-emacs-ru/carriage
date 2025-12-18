@@ -1,0 +1,109 @@
+#+title: Swarm Operations v1 — Supervisor, runtime layout, lifecycle
+#+author: Carriage Team <dev@carriage>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Meta
+- Spec-ID: carriage/swarm/ops/v1
+- Version: v1.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: core, ui, transport
+- Prompt-ABI: v1
+- Pack-Profiles: P2-full
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Anchor: PURPOSE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Define operational model for running Swarm components:
+  - Agent processes (headless Emacs)
+  - Hub process (headless Emacs)
+  - Registry runtime directory layout and hygiene
+  - Supervisor commands (main Emacs client-side orchestration only)
+
+Operational Invariants
+- Anchor: INV
+- Normative: t
+- Stability: stable
+- Pack-Priority: P0
+- INV-ops-001: Main Emacs MUST NOT host HTTP/SSE. Only Agent/Hub processes may bind sockets.
+- INV-ops-002: All network calls from main Emacs MUST be asynchronous or fire-and-forget; no UI-blocking sync probes.
+- INV-ops-003: Tokens MUST NOT be printed in logs or displayed in browsers; only Hub may read token files.
+- INV-ops-004: All binds are loopback-only by default (127.0.0.1); CORS disabled.
+
+Runtime Files
+- Anchor: RUNTIME
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Base dir:
+  - $XDG_RUNTIME_DIR/carriage-swarm/
+  - fallback: /tmp/carriage-swarm-$USER/
+- Files:
+  - registry.ndjson                  ; atomic rewrite catalog (no tokens inside)
+  - agents/<id>/pid                  ; agent PID
+  - agents/<id>/port                 ; agent HTTP port
+  - agents/<id>/token                ; agent X-Auth token (0600)
+  - agents/<id>/meta.json            ; bind, started_ts, project, label, version
+
+Supervisor Commands (main Emacs)
+- Anchor: IFC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- These commands orchestrate processes only; they MUST NOT perform heavy I/O or blocking network calls.
+- Agents:
+  - carriage-swarm-agent-start
+    - Spawns headless Emacs Agent (port=0 default) for a project root.
+    - Returns agent id.
+  - carriage-swarm-agent-stop
+    - Stops process (best-effort) and removes registry entry (dir may remain until GC).
+  - carriage-swarm-gc-stale
+    - Removes stale entries (pid dead); optionally deletes per-agent dirs.
+- Hub:
+  - carriage-swarm-hub-start / carriage-swarm-hub-stop
+  - carriage-swarm-open-dashboard
+    - Opens http://127.0.0.1:<hub-port>/ in browser.
+
+Health / Cleanup
+- Anchor: ALG
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- ALG-ops-001: Liveness model
+  1) Hub performs bounded /api/health probes (timeouts + max-per-interval).
+  2) Hub writes alive/last_seen to registry atomically (no token in registry).
+  3) Supervisor GC removes entries with dead pid (optional; bounded).
+- ALG-ops-002: Restart model
+  - If an Agent dies: supervisor starts a new Agent; recovery is via doc-state/WIP workflow inside Carriage (outside this spec).
+
+Errors
+- Anchor: ERR
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- WEB_E_PUSH_AUTH is not used in Swarm Ops (push API is not part of Swarm baseline).
+- Registry errors map to errors-v2:
+  - WEB_E_NOT_FOUND for missing agent id in hub proxy
+  - WEB_E_CAP for proxy overload / max concurrent upstream
+  - WEB_E_PAYLOAD for malformed requests
+
+Cross-References
+- Anchor: XREF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Related:
+  - spec/swarm-v1.org
+  - spec/agent-http-api-v1.org
+  - spec/hub-http-api-v1.org
+  - spec/registry-v1.org
+  - spec/security-v2.org
+  - spec/errors-v2.org
+

@@ -88,9 +88,14 @@ Security and Limits
 - Normative: t
 - Stability: stable
 - Pack-Priority: P0
-- Loopback bind, token required; CORS disabled
-- Strict whitelist for /api/cmd; no arbitrary eval
-- Payload caps and truncation enforced; secrets not logged
+- Loopback bind (127.0.0.1) only; remote exposure forbidden by default; CORS disabled.
+- Token is REQUIRED for ALL endpoints, including /stream:
+  - Missing/invalid token → 401 with {"ok":false,"code":"WEB_E_AUTH"}.
+- Strict whitelist for /api/cmd; arbitrary eval is forbidden.
+- Enforce request-size limit for JSON bodies (e.g., POST /api/cmd) and reject oversized bodies as WEB_E_PAYLOAD.
+- Enforce json-max-bytes for responses/events; truncate beyond cap and increment truncation metrics (WEB_W_TRUNCATED may be logged).
+- Enforce SSE client caps and idle-prune; on cap overflow, reject handshake with a structured error (code WEB_E_CAP or WEB_E_LIMITS).
+- Secrets (tokens, raw prompts) MUST NOT be logged; logs are redacted/minimal.
 
 Performance
 - Anchor: PERF

@@ -4,8 +4,13 @@
 ;; Focus: pass unit/integration tests in test/carriage-web-tests.el.
 ;;
 ;; Specifications:
-;;   spec/web-dashboard-v1.org
-;;   spec/webd-ops-v1.org
+;;   spec/swarm-v1.org
+;;   spec/agent-http-api-v1.org
+;;   spec/registry-v1.org
+;;   spec/swarm-ops-v1.org
+;;   spec/security-v2.org
+;;   spec/errors-v2.org
+;;   spec/logging-v2.org
 ;;   spec/ui-v2.org
 ;;   spec/code-style-v2.org
 ;;   spec/code-style-essentials-v2.org
@@ -1462,10 +1467,10 @@ Supported types: ui, apply, report, snapshot, transport; unknown → passthrough
 
 (defun carriage-web-start ()
   "Start server if not already running; return process.
-In main Emacs this is disabled; use `carriage-webd-start'."
+In the main (UI) Emacs this is disabled; start an Agent process via `carriage-swarm-agent-start' or run `carriage-agent-main'."
   (interactive)
   (unless (or carriage-web-daemon-p carriage-web-enabled)
-    (user-error "carriage-web: in-process HTTP/SSE is disabled; use `carriage-webd-start'"))
+    (user-error "carriage-web: in-process HTTP/SSE is disabled in the main (UI) Emacs; start an Agent process via `carriage-swarm-agent-start'"))
   (if (and carriage-web--server-proc (process-live-p carriage-web--server-proc))
       (progn
         (let* ((pc1 (ignore-errors (process-contact carriage-web--server-proc :service)))

@@ -83,8 +83,8 @@ lisp/carriage-agent.el
 lisp/carriage-hub.el              
 lisp/carriage-swarm-registry.el   
 lisp/carriage-swarm-supervisor.el 
-lisp/carriage-web-publish.el
-lisp/carriage-web-supervisor.el
+
+
 lisp/carriage-global-mode.el
 lisp/carriage-mode.el
 lisp/carriage-logging.el

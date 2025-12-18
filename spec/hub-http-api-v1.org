@@ -64,8 +64,11 @@ Performance
 - Normative: t
 - Stability: stable
 - Pack-Priority: P2
-- All limits and behaviors in this section MUST match the Swarm FREEZE values defined in spec/swarm-v1.org (single source of truth).
-- Specs/docs MUST reference Swarm FREEZE *names* and MUST NOT restate the numeric values anywhere outside spec/swarm-v1.org.
+- All limits/caps/timeouts in this section MUST match the Swarm FREEZE values defined in spec/swarm-v1.org (single source of truth).
+  - Specs/docs MUST reference Swarm FREEZE *names* and MUST NOT restate numeric limit values outside spec/swarm-v1.org.
+  - Implementations MAY repeat numeric values when required, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
+  - Required FREEZE names referenced by this spec: bind, proxy-max-upstream, proxy-connect-timeout-sec, proxy-read-timeout-sec.
+- Specs/docs MUST reference Swarm FREEZE *names* for limits/caps/timeouts and MUST NOT restate those numeric limit values anywhere outside spec/swarm-v1.org.
 - Implementations MAY repeat the numeric values when required by runtime constraints, but SHOULD centralize them in code and MUST remain consistent with Swarm FREEZE.
 - Hub proxy is non-blocking; timeouts, caps, and bounded buffering are enforced:
   - Proxy GET/POST MUST have bounded connect timeout and bounded read timeout (see swarm FREEZE:

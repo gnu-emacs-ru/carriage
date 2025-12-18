@@ -76,9 +76,13 @@ Invariants
 - Normative: t
 - Stability: stable
 - Pack-Priority: P1
-- FREEZE values in this section are the single source of truth for Swarm.
-  - Specs/docs MUST reference these FREEZE *names* and MUST NOT restate the numeric values anywhere outside this section (no duplicates, no alternative constants).
-  - Implementations MAY repeat the numeric values when required by runtime constraints, but MUST remain consistent with the Swarm FREEZE values and SHOULD centralize them in code.
+- FREEZE values in this section are the single source of truth for Swarm (single source of truth).
+  - Specs/docs MUST reference these FREEZE *names* for all limits/caps/timeouts and MUST NOT restate the numeric values outside this section.
+    - Exception: protocol vocabulary (HTTP status codes, header names, and standard media types) may be stated where required.
+  - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with the Swarm FREEZE values and SHOULD centralize them in code.
+  - Specs/docs MUST reference these FREEZE *names* for all limits/caps/timeouts and MUST NOT restate those numeric limit values anywhere outside this section.
+    - Exception: protocol vocabulary (HTTP status codes, header names, and standard media types) may be stated where required.
+  - Implementations MAY repeat numeric limit values when required by runtime constraints, but MUST remain consistent with the Swarm FREEZE values and SHOULD centralize them in code.
 - FREEZE: bind = 127.0.0.1
 - FREEZE: sse-max-clients = 16
 - FREEZE: json-max-bytes = 131072

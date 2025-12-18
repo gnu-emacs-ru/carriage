@@ -39,7 +39,7 @@ Operational Invariants
 - INV-ops-004: All binds are loopback-only by default (127.0.0.1); CORS disabled.
 - INV-ops-005: Hub SHOULD own liveness probing and registry last_seen/alive updates; main Emacs MUST NOT run periodic probes.
 - INV-ops-006: Operational limits (caps/timeouts) MUST match Swarm FREEZE values in spec/swarm-v1.org (single source of truth).
-  - Specs/docs MUST reference the Swarm FREEZE *names* and MUST NOT restate the numeric values anywhere outside spec/swarm-v1.org (no duplicates, no alternative constants).
+  - Specs/docs MUST reference the Swarm FREEZE *names* for limits/caps/timeouts and MUST NOT restate those numeric limit values anywhere outside spec/swarm-v1.org (no duplicates, no alternative constants).
 - Implementations MAY repeat numeric values when required by runtime constraints, but SHOULD centralize them in code and MUST remain consistent with Swarm FREEZE.
 
 Runtime Files

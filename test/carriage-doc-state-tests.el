@@ -101,5 +101,67 @@
     (should (equal (buffer-local-value 'carriage-doc-context-scope (current-buffer)) 'LastCtx))
     (should (equal (buffer-local-value 'carriage-context-profile (current-buffer)) 'P1))))
 
+(ert-deftest carriage-doc-state/summary-overlay-fold-reveal-and-tooltip-budgets ()
+  "CARRIAGE_STATE summary overlay should fold to badges, reveal on cursor enter, and show budgets in tooltip."
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+title: Demo\n"
+            "#+PROPERTY: CARRIAGE_STATE (:CAR_MODE t :CAR_INTENT Code :CAR_SUITE udiff :CAR_BACKEND gptel :CAR_PROVIDER openai :CAR_MODEL gpt-4.1 "
+            ":CAR_CTX_DOC t :CAR_CTX_GPTEL nil :CAR_CTX_VISIBLE t :CAR_DOC_CTX_SCOPE last :CAR_CTX_PROFILE p1 "
+            ":CAR_CTX_MAX_FILES 10 :CAR_CTX_MAX_BYTES 1234 :CAR_CTX_INJECTION system)\n"
+            "\n* Note\nBody\n")
+    (setq-local carriage-doc-state-summary-enable t)
+
+    ;; Hide should create a summary overlay (best-effort).
+    (should (carriage-doc-state-hide (current-buffer)))
+    (should (overlayp carriage-doc-state--overlay))
+
+    ;; Folded state should have before-string (summary) and tooltip (help-echo) with budgets.
+    (let* ((ov carriage-doc-state--overlay)
+           (bs (overlay-get ov 'before-string))
+           (he (overlay-get ov 'help-echo)))
+      (should (stringp bs))
+      (should (> (length (string-trim bs)) 0))
+      (should (stringp he))
+      (should (string-match-p "Budgets: max-files=10 max-bytes=1234" he)))
+
+    ;; Move point onto the property line: should reveal (before-string becomes nil or invisible cleared).
+    (goto-char (overlay-start carriage-doc-state--overlay))
+    (run-hooks 'post-command-hook)
+    (should (null (overlay-get carriage-doc-state--overlay 'before-string)))
+    (should (null (overlay-get carriage-doc-state--overlay 'invisible)))
+
+    ;; Move point away: should fold again (invisible becomes set and before-string restored).
+    (goto-char (point-max))
+    (run-hooks 'post-command-hook)
+    (should (stringp (overlay-get carriage-doc-state--overlay 'before-string)))
+    (should (eq (overlay-get carriage-doc-state--overlay 'invisible)
+                carriage-doc-state-invisibility-symbol))))
+
+(ert-deftest carriage-doc-state/summary-overlay-updates-after-write ()
+  "After carriage-doc-state-write, summary overlay should refresh (best-effort) and not duplicate."
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+title: Demo\n#+PROPERTY: X 1\n\n* Note\n")
+    (setq-local carriage-doc-state-summary-enable t)
+    (carriage-doc-state-write '(:CAR_MODE t :CAR_INTENT Ask :CAR_SUITE udiff :CAR_BACKEND gptel :CAR_PROVIDER openai :CAR_MODEL gpt-4.1
+                                          :CAR_CTX_DOC t :CAR_CTX_GPTEL t :CAR_CTX_VISIBLE nil
+                                          :CAR_CTX_MAX_FILES 10 :CAR_CTX_MAX_BYTES 1234))
+    ;; Hide to ensure overlay exists
+    (carriage-doc-state-hide (current-buffer))
+    (let* ((ov carriage-doc-state--overlay)
+           (s1 (overlay-get ov 'before-string)))
+      (should (overlayp ov))
+      (should (stringp s1))
+      ;; Update state (intent/model), overlay must remain single and summary should change.
+      (carriage-doc-state-write '(:CAR_MODE t :CAR_INTENT Code :CAR_SUITE udiff :CAR_BACKEND gptel :CAR_PROVIDER openai :CAR_MODEL gpt-4o-mini
+                                            :CAR_CTX_DOC t :CAR_CTX_GPTEL t :CAR_CTX_VISIBLE nil
+                                            :CAR_CTX_MAX_FILES 10 :CAR_CTX_MAX_BYTES 1234))
+      (let* ((ov2 carriage-doc-state--overlay)
+             (s2 (overlay-get ov2 'before-string)))
+        (should (eq ov2 ov))
+        (should (stringp s2))
+        (should (not (equal s1 s2)))))))
+
 (provide 'carriage-doc-state-tests)
 ;;; carriage-doc-state-tests.el ends here

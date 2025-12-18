@@ -18,6 +18,7 @@
 (defvar carriage-mode-doc-context-scope nil)
 (defvar carriage-context-profile nil)
 (defvar carriage-mode-context-profile nil)
+(defvar carriage-mode-include-patched-files nil)
 
 (ert-deftest carriage-doc-state/write-inserts-carriage-state-property ()
   "Writing doc-state creates a single #+PROPERTY: CARRIAGE_STATE line in the header."
@@ -92,14 +93,16 @@
   (with-temp-buffer
     (org-mode)
     (insert "#+title: Demo\n"
-            "#+PROPERTY: CARRIAGE_STATE (:CAR_MODE t :CAR_DOC_CTX_SCOPE LastCtx :CAR_CTX_PROFILE P1)\n"
+            "#+PROPERTY: CARRIAGE_STATE (:CAR_MODE t :CAR_DOC_CTX_SCOPE LastCtx :CAR_CTX_PROFILE P1 :CAR_CTX_PATCHED t)\n"
             "\n* Note\nBody\n")
     ;; Ensure globals have non-matching values first, and check buffer-local after restore.
     (setq carriage-doc-context-scope 'AllCtx)
     (setq carriage-context-profile 'P0)
+    (setq carriage-mode-include-patched-files nil)
     (carriage-doc-state-restore (current-buffer))
     (should (equal (buffer-local-value 'carriage-doc-context-scope (current-buffer)) 'LastCtx))
-    (should (equal (buffer-local-value 'carriage-context-profile (current-buffer)) 'P1))))
+    (should (equal (buffer-local-value 'carriage-context-profile (current-buffer)) 'P1))
+    (should (eq (buffer-local-value 'carriage-mode-include-patched-files (current-buffer)) t))))
 
 (ert-deftest carriage-doc-state/summary-overlay-fold-reveal-and-tooltip-budgets ()
   "CARRIAGE_STATE summary overlay should fold to badges, reveal on cursor enter, and show budgets in tooltip."

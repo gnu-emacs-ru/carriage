@@ -31,7 +31,7 @@ Layout
 - Pack-Priority: P1
 - Base dir: $XDG_RUNTIME_DIR/carriage-swarm/ or /tmp/carriage-swarm-$USER/
 - Files and dirs:
-  - registry.ndjson     ; atomically rewritten index (temp file + rename; no partial writes; append forbidden)
+  - registry.ndjson     ; atomically rewritten index (temp file + rename; no partial writes; append FORBIDDEN)
   - agents/<id>/pid     ; PID of agent process
   - agents/<id>/port    ; HTTP port bound by agent
   - agents/<id>/token   ; shared secret for agent API (mode 0600), not exposed to browsers

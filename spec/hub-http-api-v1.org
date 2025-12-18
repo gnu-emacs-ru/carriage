@@ -53,7 +53,10 @@ Security
 - Stability: stable
 - Pack-Priority: P0
 - Hub binds loopback; CORS disabled
-- Browser does not receive Agent tokens; Hub injects X-Auth when proxying
+- Browser MUST NOT receive Agent tokens (never in HTML/JS/JSON/headers); Hub injects X-Auth server-side when proxying.
+- Token handling:
+  - Hub MAY read agents/<id>/token runtime files to proxy requests.
+  - Main Emacs MUST NOT read token files (or expose tokens) in the baseline Swarm model.
 - No arbitrary eval anywhere; Agents enforce whitelist
 
 Performance

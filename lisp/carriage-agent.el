@@ -85,7 +85,7 @@ Example:
     ;; Register in registry (writes runtime files, including token 0600)
     (carriage-swarm-registry-agent-register
      :id id
-     :pid (or (ignore-errors (emacs-pid)) 0)
+     :pid (emacs-pid)
      :port (or carriage-web-port 0)
      :bind bind
      :project (ignore-errors (file-name-nondirectory (directory-file-name default-directory)))

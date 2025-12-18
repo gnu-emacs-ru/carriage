@@ -1,6 +1,7 @@
 ;;; carriage-swarm-registry-tests.el --- Tests for swarm registry  -*- lexical-binding: t; -*-
 
 (require 'ert)
+(require 'cl-lib)
 (require 'carriage-swarm-registry)
 
 (ert-deftest carriage-swarm-registry--register-and-read ()

@@ -119,27 +119,24 @@
     (should (carriage-doc-state-hide (current-buffer)))
     (should (overlayp carriage-doc-state--overlay))
 
-    ;; Folded state should have before-string (summary) and tooltip (help-echo) with budgets.
+    ;; Folded state should have display (summary) and tooltip (help-echo) with budgets.
     (let* ((ov carriage-doc-state--overlay)
-           (bs (overlay-get ov 'before-string))
+           (disp (overlay-get ov 'display))
            (he (overlay-get ov 'help-echo)))
-      (should (stringp bs))
-      (should (> (length (string-trim bs)) 0))
+      (should (stringp disp))
+      (should (> (length (string-trim disp)) 0))
       (should (stringp he))
       (should (string-match-p "Budgets: max-files=10 max-bytes=1234" he)))
 
-    ;; Move point onto the property line: should reveal (before-string becomes nil or invisible cleared).
+    ;; Move point onto the property line: should reveal (display becomes nil).
     (goto-char (overlay-start carriage-doc-state--overlay))
     (run-hooks 'post-command-hook)
-    (should (null (overlay-get carriage-doc-state--overlay 'before-string)))
-    (should (null (overlay-get carriage-doc-state--overlay 'invisible)))
+    (should (null (overlay-get carriage-doc-state--overlay 'display)))
 
-    ;; Move point away: should fold again (invisible becomes set and before-string restored).
+    ;; Move point away: should fold again (display restored).
     (goto-char (point-max))
     (run-hooks 'post-command-hook)
-    (should (stringp (overlay-get carriage-doc-state--overlay 'before-string)))
-    (should (eq (overlay-get carriage-doc-state--overlay 'invisible)
-                carriage-doc-state-invisibility-symbol))))
+    (should (stringp (overlay-get carriage-doc-state--overlay 'display))))))
 
 (ert-deftest carriage-doc-state/summary-overlay-updates-after-write ()
   "After carriage-doc-state-write, summary overlay should refresh (best-effort) and not duplicate."

@@ -2962,11 +2962,18 @@ This must be safe and never signal. Only include keys that affect:
                   (when (boundp 'carriage-mode-context-max-files) (setq pl (plist-put pl :CAR_CTX_MAX_FILES carriage-mode-context-max-files)))
                   (when (boundp 'carriage-mode-context-max-total-bytes) (setq pl (plist-put pl :CAR_CTX_MAX_BYTES carriage-mode-context-max-total-bytes)))
                   pl))))
-             ;; Whitelist/normalize when helper exists (keeps budgets for tooltip later; still fine in fingerprint).
-             (imp (if (and (listp raw)
-                           (require 'carriage-doc-state nil t)
-                           (fboundp 'carriage-doc-state--important-plist))
-                      (ignore-errors (carriage-doc-state--important-plist raw))
+             ;; Whitelist fingerprint keys: response-shaping + context-shaping (INCLUDING budgets).
+             ;; Avoid UI-only toggles.
+             (imp (if (listp raw)
+                      (let ((pl raw)
+                            (out '()))
+                        (dolist (k '(:CAR_INTENT :CAR_SUITE :CAR_MODEL :CAR_BACKEND :CAR_PROVIDER
+                                     :CAR_CTX_DOC :CAR_CTX_GPTEL :CAR_CTX_VISIBLE :CAR_CTX_PATCHED
+                                     :CAR_DOC_CTX_SCOPE :CAR_CTX_PROFILE :CAR_CTX_INJECTION
+                                     :CAR_CTX_MAX_FILES :CAR_CTX_MAX_BYTES))
+                          (when (plist-member pl k)
+                            (setq out (plist-put out k (plist-get pl k)))))
+                        out)
                     raw))
              (iter (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id))
              (ts (format-time-string "%Y-%m-%d %H:%M:%S")))

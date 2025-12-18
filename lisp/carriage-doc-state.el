@@ -530,9 +530,20 @@ Budgets are intentionally NOT included in the summary subset (they go to tooltip
     (error fallback)))
 
 (defun carriage-doc-state--badge (s &optional face)
-  "Build a small badge string S with FACE."
-  (let ((txt (format "[%s]" (or s "-"))))
-    (if face (propertize txt 'face face) txt)))
+  "Build a small badge string S with FACE.
+
+Important: preserve any existing face/font properties on S (e.g. all-the-icons).
+We only apply FACE to the bracket chrome and to S only when S has no face."
+  (let* ((content (cond
+                   ((null s) "-")
+                   ((stringp s) s)
+                   (t (format "%s" s))))
+         (content2 (if (and face (stringp content) (not (get-text-property 0 'face content)))
+                       (propertize content 'face face)
+                     content))
+         (lb (if face (propertize "[" 'face face) "["))
+         (rb (if face (propertize "]" 'face face) "]")))
+    (concat lb content2 rb)))
 
 (defun carriage-doc-state--ctx-flag-badge (label on &optional icon-key)
   "Badge for a context source flag."

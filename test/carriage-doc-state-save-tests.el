@@ -36,10 +36,11 @@
     (let ((pl (carriage-doc-state-read (current-buffer))))
       (should (eq (plist-get pl :CAR_MODE) t)))
 
-    ;; It should be hidden (invisibility spec enabled). We don't assert overlay internals,
-    ;; just the public-facing invisibility switch.
-    (should (and (listp buffer-invisibility-spec)
-                 (member 'carriage-doc-state buffer-invisibility-spec)))))
+    ;; It should be folded (summary overlay enabled). We assert the overlay is present
+    ;; and is in folded mode (overlay 'display is a non-empty string).
+    (should (overlayp carriage-doc-state--overlay))
+    (should (stringp (overlay-get carriage-doc-state--overlay 'display)))
+    (should (> (length (string-trim (overlay-get carriage-doc-state--overlay 'display))) 0)))))
 
 (provide 'carriage-doc-state-save-tests)
 ;;; carriage-doc-state-save-tests.el ends here

@@ -97,7 +97,7 @@ Strips any #+begin_carriage … #+end_carriage blocks from the outgoing text."
                 (delete-region beg (point-max)))))
           ;; Doc-state and per-send markers must never reach the LLM prompt.
           (goto-char (point-min))
-          (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b.*$" nil t)
+          (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+\\(CARRIAGE_STATE\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
             (delete-region (line-beginning-position)
                            (min (point-max) (1+ (line-end-position))))
             (goto-char (line-beginning-position)))

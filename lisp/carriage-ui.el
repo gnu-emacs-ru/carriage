@@ -3012,7 +3012,7 @@ This must be safe and never signal. Only include keys that affect:
 
 (defun carriage--inline-id-around (orig-fun &rest args)
   "Guard duplicate inline-id insertions. If already inserted, skip.
-On first insertion per request, also insert a CARRIAGE_FINGERPRINT line right after the marker."
+Fingerprint insertion is handled by send commands (carriage-mode) to avoid duplicates."
   (if carriage--inline-id-inserted
       ;; Return a sensible position for downstream code: prefer stream-origin,
       ;; otherwise current point.
@@ -3022,10 +3022,6 @@ On first insertion per request, also insert a CARRIAGE_FINGERPRINT line right af
           (point))
     (let ((res (apply orig-fun args)))
       (setq carriage--inline-id-inserted t)
-      ;; Insert fingerprint once per request (best-effort).
-      (unless carriage--fingerprint-inserted
-        (setq carriage--fingerprint-inserted t)
-        (carriage--fingerprint--upsert-after-pos (if (numberp res) res (point))))
       res)))
 
 (ignore-errors

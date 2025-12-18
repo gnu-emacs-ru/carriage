@@ -266,6 +266,9 @@ Never signals on parse/format errors; returns non-nil on success."
                 (when (and (boundp 'carriage-doc-state-summary-enable)
                            carriage-doc-state-summary-enable
                            (fboundp 'carriage-doc-state-summary-refresh))
+                  ;; Ensure hooks are installed so fold/reveal follows point automatically,
+                  ;; even when callers only write state (without calling hide/enable explicitly).
+                  (carriage-doc-state--summary-install-hooks)
                   (carriage-doc-state-summary-refresh (current-buffer))))
               t)))
       (error nil))))
@@ -383,6 +386,13 @@ Best-effort: invalid/unreadable state results in no changes (defaults remain)."
         (carriage-doc-state--apply-if-bound 'carriage-context-profile (plist-get pl :CAR_CTX_PROFILE))
         (carriage-doc-state--apply-if-bound 'carriage-mode-context-profile (plist-get pl :CAR_CTX_PROFILE))
 
+        ;; Best-effort: if summary folding is enabled, fold the line immediately
+        ;; so users see badges by default after restore (e.g., on buffer open).
+        (ignore-errors
+          (when (and (boundp 'carriage-doc-state-summary-enable)
+                     carriage-doc-state-summary-enable
+                     (derived-mode-p 'org-mode))
+            (carriage-doc-state-hide (current-buffer))))
         t))))
 
 ;;;###autoload
@@ -773,5 +783,36 @@ If `carriage-doc-state-summary-enable' is non-nil, show compact badges/icons ins
         (carriage-doc-state-show (current-buffer))
       (carriage-doc-state-hide (current-buffer)))))
 
+;; ---------------------------------------------------------------------------
+;; NEXT STEPS (after these patches)
+;;
+;; 1) Run tests (ERT):
+;;    - M-x ert RET carriage-doc-state/write-inserts-carriage-state-property RET
+;;    - M-x ert RET carriage-doc-state/write-is-idempotent RET
+;;    - M-x ert RET carriage-doc-state/before-save-normalizes-carriage-state RET
+;;    - M-x ert RET carriage-doc-state/summary-overlay-fold-reveal-and-tooltip-budgets RET
+;;    - M-x ert RET carriage-doc-state/summary-overlay-updates-after-write RET
+;;    - M-x ert RET carriage-doc-state/idempotent-before-save-normalizes-carriage-state RET
+;;    - M-x ert RET carriage-doc-state/idempotent-before-save-recovers-from-invalid-carriage-state RET
+;;    - M-x ert RET carriage-doc-state/before-save-persists-and-hides-carriage-state RET
+;;
+;; 2) Manual UX check in a real Org buffer:
+;;    - Ensure a #+PROPERTY: CARRIAGE_STATE ... line exists (or call `carriage-doc-state-write`).
+;;    - Ensure summary folding is enabled (default): `M-x carriage-doc-state-summary-enable`.
+;;    - Behavior:
+;;      - point NOT on the CARRIAGE_STATE line => raw line is hidden; summary badges are shown.
+;;      - point ON the line => raw property line is revealed automatically.
+;;      - tooltip (help-echo) shows details AND budgets:
+;;        "Budgets: max-files=... max-bytes=..." (budgets are tooltip-only by design).
+;;
+;; 3) Check refresh/update (no duplication):
+;;    - Rewrite state (e.g., change :CAR_INTENT and/or :CAR_MODEL) via `carriage-doc-state-write`.
+;;    - Ensure: only one overlay exists (no duplicates) and summary string changes.
+;;
+;; 4) Optional integration/polish:
+;;    - If you want it enabled everywhere automatically, integrate enable/refresh
+;;      in carriage-mode on Org buffer open/restore when CARRIAGE_STATE exists.
+;;    - Optional UX: make summary badges clickable (open menu / select intent/suite/model).
+;;
 (provide 'carriage-doc-state)
 ;;; carriage-doc-state.el ends here

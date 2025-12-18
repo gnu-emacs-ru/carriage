@@ -72,10 +72,9 @@ Security
 - Stability: stable
 - Pack-Priority: P0
 - Registry format and liveness ownership MUST be treated as the single source of truth for Swarm discovery (see spec/swarm-v1.org and spec/swarm-ops-v1.org); parallel inventory formats are forbidden.
-- Any discovery/limits-related constants MUST be defined only via Swarm FREEZE in spec/swarm-v1.org (single source of truth).
-  - Specs/docs MUST reference Swarm FREEZE *names* and MUST NOT restate numeric limit values outside spec/swarm-v1.org.
-  - Implementations MAY repeat numeric values when required, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
-- Specs/docs MUST reference Swarm FREEZE *names* for limits/caps/timeouts and MUST NOT restate those numeric limit values anywhere outside spec/swarm-v1.org; implementations MAY repeat numeric limit values when required but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
+- Any discovery/limits-related constants referenced by Registry MUST be defined ONLY via Swarm FREEZE names (spec/swarm-v1.org#INV).
+  - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate Swarm limit numbers outside spec/swarm-v1.org.
+  - Implementations MAY repeat numbers when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
 - token file must be 0600; never printed in logs
 - registry.ndjson must not contain raw tokens; token references via path/hash only
 

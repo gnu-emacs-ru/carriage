@@ -71,6 +71,8 @@ Security
 - Normative: t
 - Stability: stable
 - Pack-Priority: P0
+- Registry format and liveness ownership MUST be treated as the single source of truth for Swarm discovery (see spec/swarm-v1.org and spec/swarm-ops-v1.org); parallel inventory formats are forbidden.
+- Any discovery/limits-related numeric constants MUST be defined only via Swarm FREEZE in spec/swarm-v1.org; duplicating numeric literals elsewhere is forbidden.
 - token file must be 0600; never printed in logs
 - registry.ndjson must not contain raw tokens; token references via path/hash only
 

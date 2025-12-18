@@ -76,6 +76,7 @@ Invariants
 - Normative: t
 - Stability: stable
 - Pack-Priority: P1
+- FREEZE values in this section are the single source of truth for Swarm; all other specs MUST reference them and MUST NOT redefine conflicting values.
 - FREEZE: bind = 127.0.0.1
 - FREEZE: sse-max-clients = 16
 - FREEZE: json-max-bytes = 131072

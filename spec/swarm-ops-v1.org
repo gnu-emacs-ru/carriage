@@ -38,6 +38,8 @@ Operational Invariants
   - Main Emacs MUST NOT read token files and MUST NOT transport tokens into UI buffers/overlays/menus.
 - INV-ops-004: All binds are loopback-only by default (127.0.0.1); CORS disabled.
 - INV-ops-005: Hub SHOULD own liveness probing and registry last_seen/alive updates; main Emacs MUST NOT run periodic probes.
+- INV-ops-006: Operational limits (caps/timeouts) MUST match Swarm FREEZE values in spec/swarm-v1.org; duplicate/conflicting limits in code/specs/docs are forbidden.
+  - Implementations and other specs MUST reference the Swarm FREEZE *names*; duplicating numeric literals outside spec/swarm-v1.org is forbidden.
 
 Runtime Files
 - Anchor: RUNTIME

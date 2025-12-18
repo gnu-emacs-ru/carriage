@@ -91,6 +91,8 @@ Security and Limits
 - Normative: t
 - Stability: stable
 - Pack-Priority: P0
+- All numeric limits and behaviors in this section MUST match the Swarm FREEZE values in spec/swarm-v1.org (single source of truth).
+- Implementations and other specs MUST reference the Swarm FREEZE *names*; duplicating numeric literals outside spec/swarm-v1.org is forbidden.
 - Loopback bind (127.0.0.1) only; remote exposure forbidden by default; CORS disabled.
 - Token is REQUIRED for ALL endpoints, including /stream:
   - Missing/invalid token → 401 with {"ok":false,"code":"WEB_E_AUTH"}.

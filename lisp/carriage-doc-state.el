@@ -540,16 +540,24 @@ Budgets are intentionally NOT included in the summary subset (they go to tooltip
   "Build a small badge string S with FACE.
 
 Important: preserve any existing face/font properties on S (e.g. all-the-icons).
-We only apply FACE to the bracket chrome and to S only when S has no face."
+We apply FACE to the bracket chrome, and for the content we only apply FACE to
+runs that have no explicit `face' property, so icon glyphs keep their font/face."
   (let* ((content (cond
                    ((null s) "-")
                    ((stringp s) s)
                    (t (format "%s" s))))
-         (content2 (if (and face (stringp content) (not (get-text-property 0 'face content)))
-                       (propertize content 'face face)
-                     content))
+         (content2 (if (stringp content) (copy-sequence content) content))
          (lb (if face (propertize "[" 'face face) "["))
          (rb (if face (propertize "]" 'face face) "]")))
+    (when (and face (stringp content2))
+      (let ((i 0)
+            (len (length content2)))
+        (while (< i len)
+          (let* ((next (or (next-single-property-change i 'face content2) len))
+                 (f (get-text-property i 'face content2)))
+            (unless f
+              (put-text-property i next 'face face content2))
+            (setq i next)))))
     (concat lb content2 rb)))
 
 (defun carriage-doc-state--ctx-flag-badge (label on &optional icon-key)
@@ -582,9 +590,11 @@ We only apply FACE to the bracket chrome and to S only when S has no face."
                       (_       (carriage-doc-state--ui-icon 'ask "A"))))
          (suite-ic (carriage-doc-state--ui-icon 'suite nil))
          (model-ic (carriage-doc-state--ui-icon 'model nil))
-         (intent-b (carriage-doc-state--badge (format "%s" intent-ic) 'mode-line-emphasis))
-         (suite-b  (carriage-doc-state--badge (format "%s%s" (or suite-ic "") (or suite "-")) 'shadow))
-         (model-b  (carriage-doc-state--badge (format "%s%s" (or model-ic "")
+         ;; IMPORTANT: do not use `format' with icon strings, it drops text properties
+         ;; (all-the-icons font/face). Use `concat' to preserve icon properties.
+         (intent-b (carriage-doc-state--badge (or intent-ic "-") 'mode-line-emphasis))
+         (suite-b  (carriage-doc-state--badge (concat (or suite-ic "") (carriage-doc-state--as-string (or suite "-"))) 'shadow))
+         (model-b  (carriage-doc-state--badge (concat (or model-ic "")
                                                       (carriage-doc-state--llm-display-name backend provider model))
                                               'mode-line-emphasis))
          (ctx-b (string-join
@@ -655,7 +665,7 @@ We only apply FACE to the bracket chrome and to S only when S has no face."
        (numberp (overlay-start ov))
        (numberp (overlay-end ov))
        (>= (point) (overlay-start ov))
-       (< (point) (overlay-end ov))))
+       (<= (point) (overlay-end ov))))
 
 (defun carriage-doc-state--summary-fold (ov summary tooltip)
   "Fold OV: show SUMMARY via overlay display, keep line navigable, attach TOOLTIP."

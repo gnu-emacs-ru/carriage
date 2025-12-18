@@ -80,7 +80,12 @@ Strips any #+begin_carriage … #+end_carriage blocks and per-send fingerprint l
                     (delete-region beg end)
                     (when (looking-at "\n") (delete-char 1)))
                 (delete-region beg (point-max)))))
-          ;; Per-send fingerprint / iteration marker lines
+          ;; Doc-state and per-send fingerprint / iteration marker lines
+          (goto-char (point-min))
+          (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b.*$" nil t)
+            (delete-region (line-beginning-position)
+                           (min (point-max) (1+ (line-end-position))))
+            (goto-char (line-beginning-position)))
           (goto-char (point-min))
           (while (re-search-forward "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
             (delete-region (line-beginning-position)

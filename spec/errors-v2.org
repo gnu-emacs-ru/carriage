@@ -93,6 +93,11 @@ Errors and Diagnostics
   - SEC_E_PATH: error — Path invalid/outside root.
   - SEC_E_REMOTE: error — TRAMP/remote refused.
   - SEC_E_LIMITS: error — Limits exceeded.
+  - WEB_E_AUTH: error — Missing/invalid X-Auth token.
+  - WEB_E_CMD: error — Unknown or disallowed command (strict whitelist).
+  - WEB_E_NOT_FOUND: error — Resource not found (agent id/doc id).
+  - WEB_E_CAP: error — Capacity/limit exceeded (SSE clients, proxy upstream, etc).
+  - WEB_E_PAYLOAD: error — Malformed or oversized request payload.
 
 Security and Limits
 - Anchor: SEC

@@ -150,7 +150,7 @@
     ;; Hide to ensure overlay exists
     (carriage-doc-state-hide (current-buffer))
     (let* ((ov carriage-doc-state--overlay)
-           (s1 (overlay-get ov 'before-string)))
+           (s1 (overlay-get ov 'display)))
       (should (overlayp ov))
       (should (stringp s1))
       ;; Update state (intent/model), overlay must remain single and summary should change.
@@ -158,7 +158,7 @@
                                             :CAR_CTX_DOC t :CAR_CTX_GPTEL t :CAR_CTX_VISIBLE nil
                                             :CAR_CTX_MAX_FILES 10 :CAR_CTX_MAX_BYTES 1234))
       (let* ((ov2 carriage-doc-state--overlay)
-             (s2 (overlay-get ov2 'before-string)))
+             (s2 (overlay-get ov2 'display)))
         (should (eq ov2 ov))
         (should (stringp s2))
         (should (not (equal s1 s2)))))))

@@ -62,11 +62,14 @@ Performance
 - Stability: stable
 - Pack-Priority: P2
 - Hub proxy is non-blocking; timeouts, caps, and bounded buffering are enforced:
-  - Proxy GET/POST MUST have a bounded connect+read timeout.
-  - Proxy SSE MUST not accumulate unbounded data; slow clients are disconnected.
-  - Hub MUST enforce max concurrent proxy connections (implementation-defined) to protect itself.
+  - Proxy GET/POST MUST have bounded connect timeout and bounded read timeout (see swarm FREEZE:
+    proxy-connect-timeout-sec, proxy-read-timeout-sec).
+  - Proxy SSE MUST NOT accumulate unbounded data; forwarding MUST be chunk-by-chunk; slow clients MUST be disconnected.
+  - Hub MUST enforce max concurrent proxy upstream connections (see swarm FREEZE proxy-max-upstream);
+    on overflow reject with 503 + {"ok":false,"code":"WEB_E_CAP"}.
 - Registry reads are O(1) per listing; cleanup is batched and bounded (no unbounded scans in request handlers).
 - Hub MUST NOT leak Agent tokens to the browser; token injection happens server-side only.
+- Errors MUST be structured envelopes and MUST avoid secret leakage; long strings MUST be clipped (errors-v2).
 
 Testing
 - Anchor: TST

@@ -36,6 +36,7 @@ Operational Invariants
 - INV-ops-002: All network calls from main Emacs MUST be asynchronous or fire-and-forget; no UI-blocking sync probes.
 - INV-ops-003: Tokens MUST NOT be printed in logs or displayed in browsers; only Hub may read token files.
 - INV-ops-004: All binds are loopback-only by default (127.0.0.1); CORS disabled.
+- INV-ops-005: Hub SHOULD own liveness probing and registry last_seen/alive updates; main Emacs MUST NOT run periodic probes.
 
 Runtime Files
 - Anchor: RUNTIME

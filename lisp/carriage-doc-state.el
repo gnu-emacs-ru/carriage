@@ -185,7 +185,10 @@ STATE may be nil, a plist, or an alist."
 
 (defun carriage-doc-state--find-state-lines ()
   "Return (BEG . END) covering all CARRIAGE_STATE property lines, or nil.
-BEG is beginning of the first matching line, END is end position after the last matching line."
+BEG is beginning of the first matching line, END is end position of the last matching line.
+
+Important: END intentionally does NOT include the trailing newline. This keeps
+line navigation (C-p/C-n) stable when a summary overlay is applied."
   (save-excursion
     (save-restriction
       (widen)
@@ -195,7 +198,7 @@ BEG is beginning of the first matching line, END is end position after the last 
             (end nil))
         (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b.*$" nil t)
           (setq beg (or beg (line-beginning-position)))
-          (setq end (min (point-max) (1+ (line-end-position)))))
+          (setq end (line-end-position)))
         (when (and (numberp beg) (numberp end) (> end beg))
           (cons beg end))))))
 
@@ -370,9 +373,13 @@ Best-effort: invalid/unreadable state results in no changes (defaults remain)."
         (carriage-doc-state--apply-if-bound 'carriage-mode-show-diffs (plist-get pl :CAR_SHOW_DIFFS))
         (carriage-doc-state--apply-if-bound 'carriage-mode-confirm-apply-all (plist-get pl :CAR_CONFIRM_APPLY_ALL))
         (carriage-doc-state--apply-if-bound 'carriage-mode-confirm-apply (plist-get pl :CAR_CONFIRM_APPLY))
-        (carriage-doc-state--apply-if-bound 'carriage-mode-use-icons (plist-get pl :CAR_USE_ICONS))
-        (carriage-doc-state--apply-if-bound 'carriage-mode-use-suite-icon (plist-get pl :CAR_USE_SUITE_ICON))
-        (carriage-doc-state--apply-if-bound 'carriage-mode-use-engine-icon (plist-get pl :CAR_USE_ENGINE_ICON))
+        ;; UI toggles: apply only when explicitly present, to avoid clobbering defaults.
+        (when (plist-member pl :CAR_USE_ICONS)
+          (carriage-doc-state--apply-if-bound 'carriage-mode-use-icons (plist-get pl :CAR_USE_ICONS)))
+        (when (plist-member pl :CAR_USE_SUITE_ICON)
+          (carriage-doc-state--apply-if-bound 'carriage-mode-use-suite-icon (plist-get pl :CAR_USE_SUITE_ICON)))
+        (when (plist-member pl :CAR_USE_ENGINE_ICON)
+          (carriage-doc-state--apply-if-bound 'carriage-mode-use-engine-icon (plist-get pl :CAR_USE_ENGINE_ICON)))
         (carriage-doc-state--apply-if-bound 'carriage-mode-flash-patches (plist-get pl :CAR_FLASH_PATCHES))
         (carriage-doc-state--apply-if-bound 'carriage-mode-audio-notify (plist-get pl :CAR_AUDIO_NOTIFY))
         (carriage-doc-state--apply-if-bound 'carriage-mode-report-open-policy (plist-get pl :CAR_REPORT_OPEN_POLICY))

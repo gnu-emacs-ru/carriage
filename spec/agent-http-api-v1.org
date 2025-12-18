@@ -92,10 +92,13 @@ Security and Limits
 - Token is REQUIRED for ALL endpoints, including /stream:
   - Missing/invalid token → 401 with {"ok":false,"code":"WEB_E_AUTH"}.
 - Strict whitelist for /api/cmd; arbitrary eval is forbidden.
-- Enforce request-size limit for JSON bodies (e.g., POST /api/cmd) and reject oversized bodies as WEB_E_PAYLOAD.
+- Cache discipline: all handlers (including /stream) MUST answer from cached state; heavy work MUST NOT run in request filters/handlers.
+- Enforce request-size limit for JSON bodies (e.g., POST /api/cmd) and reject oversized bodies:
+  - MUST reject with 413 (preferred) or 400, envelope code WEB_E_PAYLOAD.
 - Enforce json-max-bytes for responses/events; truncate beyond cap and increment truncation metrics (WEB_W_TRUNCATED may be logged).
-- Enforce SSE client caps and idle-prune; on cap overflow, reject handshake with a structured error (code WEB_E_CAP or WEB_E_LIMITS).
-- Secrets (tokens, raw prompts) MUST NOT be logged; logs are redacted/minimal.
+- Enforce SSE client caps and idle-prune:
+  - On cap overflow, reject handshake with 503 and envelope code WEB_E_CAP.
+- Secrets (tokens, raw prompts) MUST NOT be logged; logs are redacted/minimal (see errors-v2/sec-v2 for clipping/redaction requirements).
 
 Performance
 - Anchor: PERF

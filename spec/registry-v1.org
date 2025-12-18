@@ -31,7 +31,7 @@ Layout
 - Pack-Priority: P1
 - Base dir: $XDG_RUNTIME_DIR/carriage-swarm/ or /tmp/carriage-swarm-$USER/
 - Files and dirs:
-  - registry.ndjson     ; atomically rewritten index (temp file + rename; no partial writes)
+  - registry.ndjson     ; atomically rewritten index (temp file + rename; no partial writes; append forbidden)
   - agents/<id>/pid     ; PID of agent process
   - agents/<id>/port    ; HTTP port bound by agent
   - agents/<id>/token   ; shared secret for agent API (mode 0600), not exposed to browsers
@@ -56,13 +56,15 @@ Operations
 - Pack-Priority: P1
 - Registration:
   - Agent creates agents/<id>/, writes pid/port/token/meta.json.
-  - Agent (or Hub) updates registry.ndjson ONLY via atomic rewrite (write temp → fsync when available → rename).
+  - Agent writes registry.ndjson ONLY via atomic rewrite (write temp → fsync when available → rename).
 - Update:
-  - Hub SHOULD own liveness: it updates last_seen_ts and alive flag via atomic rewrite after bounded health probes.
+  - Hub SHOULD own liveness: it updates last_seen_ts and alive flag via bounded health probes and atomic rewrite.
+  - Liveness probes MUST be bounded (timeouts + max-per-interval) and MUST NOT perform unbounded scans.
 - Cleanup:
   - Stale detection is bounded and deterministic:
     - missing PID OR repeated health failures (bounded retries/backoff) → mark alive=false.
   - GC MAY remove dead entries and agent dirs; GC MUST be safe under concurrent agents (atomic rename; tolerate missing dirs).
+  - Registry operations MUST tolerate missing per-agent dirs/files and partial process termination.
 
 Security
 - Anchor: SEC

@@ -78,7 +78,7 @@ Invariants
 - Pack-Priority: P1
 - FREEZE values in this section are the single source of truth for Swarm limits/caps/timeouts.
   - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate Swarm limit numbers anywhere outside this FREEZE list.
-    - Exception: protocol vocabulary (HTTP status codes, header names, standard media types) may be stated where required.
+    - Exception: protocol vocabulary (HTTP status codes, header names, standard media types) and file permission bits (e.g., 0600) may be stated where required.
   - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
 - FREEZE: bind = 127.0.0.1
 - FREEZE: sse-max-clients = 16
@@ -124,6 +124,20 @@ Performance and Asynchrony
 
 Testing and Conformance
 - Anchor: TST
+- Readiness (dialectic snapshot):
+  - Thesis (strong): Swarm architecture is specified as a clean separation of responsibilities:
+    Agent serves local API/SSE; Hub proxies and injects tokens; Registry is discovery; Main Emacs orchestrates processes only.
+  - Antithesis (risk): Any ambiguity around ownership (liveness), proxy boundedness (SSE), and error envelopes will reintroduce coupling and hidden blocking paths.
+  - Synthesis (what must be true to be “single source of truth”):
+    - All caps/timeouts/limits in specs MUST be referenced by Swarm FREEZE *names* (spec/swarm-v1.org#INV) and MUST NOT be restated numerically elsewhere (except protocol vocabulary and file permission bits).
+    - Agent endpoints MUST uniformly enforce X-Auth (including /stream); Hub MUST ensure browser never sees tokens; Registry catalog MUST never contain tokens.
+    - Hub proxy MUST be fully bounded: connect/read timeouts, concurrent upstream cap, and SSE forwarding without unbounded buffering.
+    - Error envelopes MUST be consistent (errors-v2) and secret-safe (no token leakage; clipped strings).
+  - Practical readiness checklist (for implementation + tests):
+    - CHK: Agent auth on ALL endpoints, including /stream → 401 WEB_E_AUTH.
+    - CHK: Hub injects X-Auth server-side; tokens never appear in Hub responses.
+    - CHK: Registry writes are atomic and append is forbidden; stale handling is bounded/deterministic.
+    - CHK: Hub proxy caps/timeouts are enforced with no counter leaks on early exits.
 - Normative: t
 - Stability: stable
 - Pack-Priority: P1

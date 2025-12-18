@@ -555,7 +555,8 @@ We only apply FACE to the bracket chrome and to S only when S has no face."
 (defun carriage-doc-state--ctx-flag-badge (label on &optional icon-key)
   "Badge for a context source flag."
   (let* ((ic (and icon-key (carriage-doc-state--ui-icon icon-key nil)))
-         (name (if ic (format "%s%s" ic label) label))
+         ;; Important: preserve icon text-properties (all-the-icons).
+         (name (if ic (concat ic label) label))
          (face (if on 'success 'shadow)))
     (carriage-doc-state--badge name face)))
 

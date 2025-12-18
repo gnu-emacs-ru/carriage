@@ -1376,7 +1376,13 @@ May include :context-text and :context-target per v1.1."
                                          :system sys
                                          :buffer srcbuf
                                          :mode (symbol-name (buffer-local-value 'major-mode srcbuf))
-                                         :insert-marker origin-marker)
+                                         ;; Keep consistent with `carriage-send-buffer': when we inserted inline marker
+                                         ;; and fingerprint, `carriage--stream-origin-marker' was advanced to start
+                                         ;; strictly below them. Use it when available.
+                                         :insert-marker (or (and (markerp carriage--stream-origin-marker)
+                                                                 (buffer-live-p (marker-buffer carriage--stream-origin-marker))
+                                                                 carriage--stream-origin-marker)
+                                                            origin-marker))
             t)
         (error
          (carriage-log "send-subtree error: %s" (error-message-string err))

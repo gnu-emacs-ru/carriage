@@ -31,6 +31,14 @@
 (autoload 'carriage-branching-transient "carriage-task" "Open Branching UI: choose template and inheritance." t)
 (autoload 'carriage-ui-context-delta-assist "carriage-ui" "Suggest and apply context delta (with confirmation)." t)
 
+;; Swarm supervisor (main Emacs): orchestration only (no HTTP/SSE in main session).
+(autoload 'carriage-swarm-agent-start "carriage-swarm-supervisor" "Start a headless Carriage Swarm Agent." t)
+(autoload 'carriage-swarm-agent-stop "carriage-swarm-supervisor" "Stop a headless Carriage Swarm Agent (best-effort)." t)
+(autoload 'carriage-swarm-gc-stale "carriage-swarm-supervisor" "GC stale Swarm registry entries." t)
+(autoload 'carriage-swarm-hub-start "carriage-swarm-supervisor" "Start the Carriage Swarm Hub process." t)
+(autoload 'carriage-swarm-hub-stop "carriage-swarm-supervisor" "Stop the Carriage Swarm Hub process." t)
+(autoload 'carriage-swarm-open-dashboard "carriage-swarm-supervisor" "Open Swarm Hub dashboard in a browser." t)
+
 (defgroup carriage-keyspec nil
   "Centralized key binding model for Carriage."
   :group 'applications
@@ -113,6 +121,15 @@ Each value is a plist with :add and/or :remove lists of (:id ID :keys (..)).")
     (:id show-traffic :cmd carriage-show-traffic            :keys ("T")     :contexts (carriage report global) :section logs :desc-key :show-traffic)
     (:id aux-quit     :cmd quit-window                      :keys ("q")     :contexts (report log traffic)     :section navigate :desc-key :quit)
     (:id open-buffer  :cmd carriage-open-buffer             :keys ("e")     :contexts (global)                 :section session :desc-key :open-buffer)
+
+    ;; Swarm (Supervisor) — orchestration commands from main Emacs (no blocking network).
+    (:id swarm-agent-start :cmd carriage-swarm-agent-start   :keys ("z a")  :contexts (carriage org global) :section session :desc-key :swarm-agent-start :label "Swarm: start agent")
+    (:id swarm-agent-stop  :cmd carriage-swarm-agent-stop    :keys ("z k")  :contexts (carriage org global) :section session :desc-key :swarm-agent-stop  :label "Swarm: stop agent…")
+    (:id swarm-gc-stale    :cmd carriage-swarm-gc-stale      :keys ("z g")  :contexts (carriage org global) :section session :desc-key :swarm-gc-stale    :label "Swarm: cleanup stale")
+    (:id swarm-hub-start   :cmd carriage-swarm-hub-start     :keys ("z h")  :contexts (carriage org global) :section session :desc-key :swarm-hub-start   :label "Swarm: start hub")
+    (:id swarm-hub-stop    :cmd carriage-swarm-hub-stop      :keys ("z H")  :contexts (carriage org global) :section session :desc-key :swarm-hub-stop    :label "Swarm: stop hub")
+    (:id swarm-dashboard   :cmd carriage-swarm-open-dashboard :keys ("z o") :contexts (carriage org global) :section session :desc-key :swarm-dashboard   :label "Swarm: open dashboard")
+
     (:id task-new     :cmd carriage-create-task-doc         :keys ("n")     :contexts (carriage org global) :section tools :desc-key :task-new :label "Create task doc")
     (:id branch-doc   :cmd carriage-branching-transient     :keys ("N")     :contexts (carriage org global) :section tools :desc-key :branch-doc :label "Branch from template")
     (:id file-chat    :cmd carriage-open-file-chat          :keys ("f")     :contexts (carriage org global) :section tools :desc-key :file-chat :label "File chat")

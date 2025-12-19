@@ -84,6 +84,9 @@ Invariants
 - Stability: stable
 - Pack-Priority: P1
 - FREEZE values in this section are the single source of truth for Swarm limits/caps/timeouts.
+  - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate the numeric values outside this FREEZE list.
+    - Exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600.
+  - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
   - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate Swarm limit numbers anywhere outside this FREEZE list.
     - Exception: protocol vocabulary (HTTP status codes, header names, standard media types) and file permission bits (e.g., 0600) may be stated where required.
   - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.

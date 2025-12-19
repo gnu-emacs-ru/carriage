@@ -71,7 +71,9 @@ Performance
 - Normative: t
 - Stability: stable
 - Pack-Priority: P2
-- Limits/caps/timeouts for the Hub are defined ONLY by Swarm FREEZE (spec/swarm-v1.org#INV).
+- Limits/caps/timeouts for the Hub are defined ONLY by Swarm FREEZE (spec/swarm-v1.org#INV) and MUST be referenced by FREEZE *names* in all specs/docs.
+  - Specs/docs MUST NOT restate the numeric values (exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600).
+  - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
   - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate Swarm limit numbers outside spec/swarm-v1.org.
   - Implementations MAY repeat numbers when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
   - FREEZE names referenced by this spec: bind, proxy-max-upstream, proxy-connect-timeout-sec, proxy-read-timeout-sec, probe-interval-sec, probe-timeout-sec, probe-max-per-interval.

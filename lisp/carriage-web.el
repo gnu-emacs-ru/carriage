@@ -19,7 +19,6 @@
 (require 'json)
 (require 'subr-x)
 (require 'url-util)
-(require 'url-http)
 
 ;; Safety shim: define a minimal normalizer when older bytecode lacks it.
 ;; This prevents timer crashes (void-function carriage-web--payload-normalize)
@@ -1522,204 +1521,16 @@ Useful during debugging to ensure no long-lived connections remain."
     n))
 
 ;; -------------------------------------------------------------------
-;; Client-side publishing (main Emacs) — push to webd and snapshot idle sender
-
-(defcustom carriage-web-publish-backend 'local
-  "Backend for event publication from the main Emacs:
-- 'local — legacy in-process SSE (deprecated; server only).
-- 'push  — HTTP POST /api/push to the external web daemon (recommended)."
-  :type '(choice (const local) (const push))
-  :group 'carriage-web)
-
-(defcustom carriage-web-snapshot-idle-interval 2.0
-  "Idle interval in seconds for publishing sessions snapshot to webd when using 'push."
-  :type 'number :group 'carriage-web)
-
-(defvar carriage-web--snapshot-timer nil
-  "Idle timer used to periodically publish sessions snapshot to webd when using 'push' backend.")
-
-(defvar carriage-web--snapshot-last-hash nil
-  "Last hash (md5) of the snapshot payload posted to webd (best-effort dedupe).")
-
-(defun carriage-web--http-post-json (path payload &optional _on-done)
-  "Thin wrapper to POST PAYLOAD to PATH using raw TCP helper.
-All callers should go through this function; it normalizes payload and never signals."
-  (carriage-web--http-post-json-raw path payload))
-
+;; Publication API (Agent-only)
+;;
+;; Swarm v1: the main (UI) Emacs MUST NOT host HTTP/SSE and MUST NOT push events
+;; into Agents. `carriage-web-publish' is meaningful only inside the Agent process
+;; where `carriage-web-daemon-p' is non-nil.
 (defun carriage-web-publish (type payload)
-  "Publish event TYPE with PAYLOAD via /api/push to webd (daemon); in daemon process, fan-out locally.
-
-When running inside the web daemon process (`carriage-web-daemon-p' non-nil), events are fanned
-out locally to SSE clients. Outside of the daemon (main Emacs), events are always published
-via a short HTTP POST /api/push (fire-and-forget). No local SSE fallback is used to avoid
-serving HTTP/SSE from the main Emacs."
-  (if carriage-web-daemon-p
-      (carriage-web-pub type payload)
-    (let* ((pl (if (plist-member payload :type) payload
-                 (plist-put (copy-sequence payload) :type (format "%s" type)))))
-      (carriage-web--http-post-json "/api/push" pl))))
-
-(defun carriage-web--snapshot-build ()
-  "Build lightweight sessions snapshot (list of snapshots) in the main Emacs.
-
-Include any live buffer with carriage-mode enabled (a \"session\").
-Skip only remote (TRAMP) buffers to avoid expensive ops; ephemeral/non-file
-buffers are allowed and identified by buffer-name."
-  (let* ((total (length (buffer-list)))
-         (res (cl-loop for b in (buffer-list)
-                       when (and (buffer-live-p b)
-                                 (with-current-buffer b
-                                   (and (boundp 'carriage-mode)
-                                        carriage-mode
-                                        (not (file-remote-p (or buffer-file-name ""))))))
-                       for snap = (ignore-errors (carriage-web--buffer-session-snapshot b))
-                       when snap collect snap))
-         (data (cl-remove-if-not #'identity res)))
-    (carriage-web--log "snapshot-build: total=%d filtered=%d"
-                       (or total -1)
-                       (condition-case _e (length data) (error -1)))
-    data))
-
-(defun carriage-web--snapshot-publish-now ()
-  "Publish a full sessions snapshot to webd immediately (type:\"snapshot\").
-Fire-and-forget; never signal to callers.
-Best-effort dedupe: if the payload hash has not changed, do not re-post."
-  (condition-case err
-      (let* ((data (carriage-web--snapshot-build))
-             ;; Build raw plist first; normalize guardedly (fallback keeps main Emacs safe even if older code is loaded).
-             (pl (list :type "snapshot" :data data))
-             ;; Normalize locally to avoid any load-order issues (no external dependency).
-             (payload
-              (let* ((d (plist-get pl :data))
-                     (ndata (cond
-                             ((null d) '())
-                             ((vectorp d) (append d nil))
-                             ;; Single object → list of one
-                             ((or (hash-table-p d)
-                                  (and (listp d)
-                                       (or (keywordp (car d))
-                                           (symbolp (car d)))))
-                              (list d))
-                             ;; List — keep as-is
-                             ((listp d) d)
-                             (t (list d)))))
-                (list
-                 (cons "type" "snapshot")
-                 (cons "data"
-                       (mapcar
-                        (lambda (it)
-                          (cond
-                           ((hash-table-p it)
-                            (let (acc)
-                              (maphash (lambda (k v) (push (cons (format "%s" k) v) acc)) it)
-                              (nreverse acc)))
-                           ;; Top-level plist object → alist with string keys
-                           ((and (listp it) (keywordp (car it)))
-                            (let (acc lst)
-                              (setq lst it)
-                              (while lst
-                                (let ((k (car lst)) (v (cadr lst)))
-                                  (push (cons (substring (symbol-name k) 1) v) acc))
-                                (setq lst (cddr lst)))
-                              (nreverse acc)))
-                           ;; Alist → keep
-                           ((and (listp it) (consp (car it))) it)
-                           (t it)))
-                        ndata)))))
-             (json (json-encode payload))
-             ;; Ensure body is bytes (unibyte). The raw transport requires this.
-             (body (encode-coding-string json 'utf-8 t))
-             (h (md5 body)))
-        (if (and (stringp carriage-web--snapshot-last-hash)
-                 (string= carriage-web--snapshot-last-hash h))
-            (carriage-web--log "push: snapshot dedupe (unchanged), skip; count=%d"
-                               (condition-case _e (length data) (error -1)))
-          (setq carriage-web--snapshot-last-hash h)
-          (carriage-web--log "push: snapshot post; count=%d bytes=%d"
-                             (condition-case _e (length data) (error -1))
-                             (string-bytes body))
-          ;; Single POST path (raw TCP) — will normalize again when available; keeps call sites consistent.
-          (carriage-web--http-post-json "/api/push" payload)))
-    (error
-     (carriage-web--log "push: snapshot error: %S" err))))
-
-(defun carriage-web-snapshot-start ()
-  "Start idle snapshot publisher when not in daemon (always push snapshot to webd)."
-  (interactive)
-  (when (and (not carriage-web-daemon-p)
-             (not (timerp carriage-web--snapshot-timer)))
-    (let ((intv (or carriage-web-snapshot-idle-interval 2.0)))
-      (carriage-web--log "snapshot-start: interval=%.2fs" intv)
-      (setq carriage-web--snapshot-timer
-            (run-with-idle-timer
-             intv t
-             (lambda ()
-               (ignore-errors (carriage-web--snapshot-publish-now))))))))
-
-(defun carriage-web-snapshot-stop ()
-  "Stop idle snapshot publisher timer if active."
-  (interactive)
-  (when (timerp carriage-web--snapshot-timer)
-    (cancel-timer carriage-web--snapshot-timer))
-  (setq carriage-web--snapshot-timer nil))
-
-;; Utility: force-send a snapshot right now (interactive seed).
-(defun carriage-web-snapshot-seed ()
-  "Send a full sessions snapshot to webd immediately (interactive seed)."
-  (interactive)
-  (carriage-web--log "snapshot-seed: requested by user")
-  (ignore-errors (carriage-web--snapshot-publish-now))
-  (message "carriage-web: snapshot seed sent"))
-
-
-;; Raw HTTP POST helper (fire-and-forget, no url.el)
-(defun carriage-web--http-post-json-raw (path payload)
-  "Send PAYLOAD as JSON via a raw HTTP/1.1 POST to PATH on carriage-web-bind:carriage-web-port.
-Always fire-and-forget; errors are swallowed unless `carriage-web-debug' is non-nil."
-  (let* ((bind (or carriage-web-bind "127.0.0.1"))
-         (port (or carriage-web-port 8787))
-         (host (format "%s:%s" bind port))
-         ;; Guard normalizer usage to avoid void-function in mixed/older loads.
-         (norm (if (fboundp 'carriage-web--payload-normalize)
-                   (carriage-web--payload-normalize payload)
-                 payload))
-         (json (json-encode norm))
-         (body (encode-coding-string json 'utf-8 t))
-         (len  (string-bytes body))
-         (auth (and carriage-web-auth-token (format "X-Auth: %s\r\n" carriage-web-auth-token)))
-         (req  (concat
-                (format "POST %s HTTP/1.1\r\n" path)
-                (format "Host: %s\r\n" host)
-                "Content-Type: application/json; charset=utf-8\r\n"
-                (format "Content-Length: %d\r\n" len)
-                "Connection: close\r\n"
-                (or auth "")
-                "\r\n"
-                body)))
-    (condition-case err
-        (let ((proc (make-network-process
-                     :name "carriage-web-raw-post"
-                     :buffer nil
-                     :host bind
-                     :service port
-                     :noquery t
-                     :family 'ipv4
-                     :coding 'binary)))
-          (when proc
-            (process-send-string proc req)
-            (process-send-eof proc)
-            (ignore-errors (delete-process proc)))
-          (when (and carriage-web-debug (fboundp 'message))
-            (message "web: raw-post %s bytes=%d" path len)))
-      (error
-       (when (and carriage-web-debug (fboundp 'message))
-         (message "web: raw-post error %S" err)))))
-  nil)
-
-;; Safety net: drop any legacy debug advices on url-http when present.
-(with-eval-after-load 'url-http
-  (ignore-errors (advice-remove 'url-http-create-request 'carriage-web--dbg-url-http))
-  (ignore-errors (advice-remove 'url-http-create-request 'carriage-webd--dbg-url-http)))
+  "Publish SSE event TYPE with PAYLOAD in the Agent process.
+Outside the Agent (when `carriage-web-daemon-p' is nil), this is a no-op."
+  (when carriage-web-daemon-p
+    (carriage-web-pub type payload)))
 
 (provide 'carriage-web)
 

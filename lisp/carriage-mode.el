@@ -745,6 +745,7 @@ Does not modify buffer text; only clears markers/state so the next chunk opens a
   (setq carriage--reasoning-beg-marker nil)
   (setq carriage--iteration-inline-marker-inserted nil)
   (setq carriage--fingerprint-inline-inserted nil)
+  (setq carriage--separator-inserted nil)
   (carriage--undo-group-start)
   t)
 
@@ -1077,6 +1078,8 @@ never be included in outgoing LLM prompts (transports must filter it)."
 
 (defvar-local carriage--fingerprint-inline-inserted nil
   "Non-nil when an inline CARRIAGE_FINGERPRINT line has been inserted for the current stream.")
+(defvar-local carriage--separator-inserted nil
+  "Non-nil when a visual separator '-----' was already inserted for the current stream.")
 
 (defun carriage--fingerprint-plist ()
   "Return a sanitized fingerprint plist for the current buffer.
@@ -1152,9 +1155,20 @@ so preloader/streaming starts strictly below the fingerprint line."
         ;; Stream (and preloader) must start strictly after the fingerprint.
         (setq carriage--stream-origin-marker (copy-marker newpos t))
         ;; Policy: keep point at the new stream origin.
-        (goto-char newpos))
-      (setq carriage--fingerprint-inline-inserted t)
-      t)))
+        (goto-char newpos)
+        ;; Defensive de-dup: if any stray separators were added below the fingerprint line
+        ;; (e.g., by legacy advice or double calls), remove up to two consecutive ones.
+        (save-excursion
+          (beginning-of-line)              ;; we are on the line after the inserted fingerprint
+          (let ((k 0))
+            (while (and (< k 2)
+                        (looking-at "^-----[ \t]*$")
+                        (< (line-end-position) (point-max)))
+              (delete-region (line-beginning-position)
+                             (min (point-max) (1+ (line-end-position))))
+              (setq k (1+ k)))))))
+    (setq carriage--fingerprint-inline-inserted t)
+    t))
 
 (defun carriage--build-context (source buffer)
   "Return context plist for prompt builder with at least :payload.
@@ -1248,7 +1262,9 @@ May include :context-text and :context-target per v1.1."
     (carriage-stream-reset origin-marker)
     (when (fboundp 'carriage-begin-iteration)
       (ignore-errors (carriage-begin-iteration)))
-    ;; Insert per-send fingerprint at stream origin (single canonical line).
+    ;; Insert separator first, then per-send fingerprint at stream origin (single canonical line).
+    (when (fboundp 'carriage-insert-send-separator)
+      (ignore-errors (carriage-insert-send-separator)))
     (when (fboundp 'carriage-insert-inline-fingerprint-now)
       (ignore-errors (carriage-insert-inline-fingerprint-now)))
     (when (fboundp 'carriage--preloader-start)
@@ -2414,31 +2430,36 @@ Designed for use from `after-load-functions' so commands loaded later
   :type 'boolean :group 'carriage-send-ui)
 
 (defun carriage-insert-send-separator ()
-  "Insert a separator line \"-----\" near the reply insertion point when enabled.
-This is a best-effort helper: does nothing when `carriage-send-insert-separator' is nil."
+  "Insert a separator line \"-----\" above the reply insertion point when enabled.
+Idempotent:
+- Only runs when `carriage-send-insert-separator' is non-nil.
+- Skips when separator was already inserted in this stream.
+- Skips when adjacent lines already contain a single \"-----\"."
   (when carriage-send-insert-separator
-    (save-excursion
-      (let ((pos (and (fboundp 'carriage--reply-insertion-point)
-                      (carriage--reply-insertion-point))))
-        (when pos (goto-char pos)))
-      ;; Ensure separator is on its own line; avoid duplicates.
-      (let* ((bol (line-beginning-position))
-             (eol (line-end-position))
-             (line (buffer-substring-no-properties bol eol)))
-        (goto-char eol)
-        (unless (string-match-p "^-----\\s-*$" line)
-          (unless (bolp) (insert "\n"))
-          (insert "-----\n"))))))
+    (unless carriage--separator-inserted
+      (save-excursion
+        (let ((pos (and (fboundp 'carriage--reply-insertion-point)
+                        (carriage--reply-insertion-point))))
+          (when pos (goto-char pos)))
+        ;; Insert separator ABOVE current line; avoid duplicates with previous/this line.
+        (let* ((here-bol (line-beginning-position))
+               (cur-line (buffer-substring-no-properties
+                          (line-beginning-position) (line-end-position)))
+               (prev-line (save-excursion
+                            (forward-line -1)
+                            (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position)))))
+          (goto-char here-bol)
+          (unless (or (string-match-p "^-----\\s-*$" prev-line)
+                      (string-match-p "^-----\\s-*$" cur-line))
+            (insert "-----\n")
+            (setq carriage--separator-inserted t)))))))
 
 (defun carriage--after-insert-fingerprint-advice (&rest _)
   "Advice: run after fingerprint insertion to add visual separator."
   (ignore-errors (carriage-insert-send-separator)))
 
 ;; Wire the advice when function is present (defined earlier in this file).
-(when (fboundp 'carriage-insert-inline-fingerprint-now)
-  (ignore-errors
-    (advice-add 'carriage-insert-inline-fingerprint-now
-                :after #'carriage--after-insert-fingerprint-advice)))
 
 ;; Separator insertion after Send
 
@@ -2451,28 +2472,5 @@ This is a best-effort helper: does nothing when `carriage-send-insert-separator'
   :type 'boolean
   :group 'carriage-separator)
 
-(defun carriage-insert-send-separator ()
-  "Insert a visual separator line \"-----\" under the just-inserted fingerprint.
-Idempotent: if the next line already equals \"-----\", do nothing."
-  (when carriage-send-insert-separator
-    (save-excursion
-      ;; go to end of current line (assumed to be the fingerprint line)
-      (end-of-line)
-      ;; ensure there's a following line to place the separator
-      (when (eobp) (insert "\n"))
-      (forward-line 1)
-      (beginning-of-line)
-      (let ((line (buffer-substring-no-properties
-                   (line-beginning-position) (line-end-position))))
-        (unless (string= line "-----")
-          (insert "-----\n"))))))
-
-(defun carriage--maybe-insert-send-separator (&rest _args)
-  "Advice: insert a visual separator after fingerprint insertion."
-  (carriage-insert-send-separator))
-
-;; Add advice immediately; this file defines `carriage-insert-inline-fingerprint-now'
-;; earlier, so the symbol is fbound by the time this form is evaluated.
-(advice-add 'carriage-insert-inline-fingerprint-now :after #'carriage--maybe-insert-send-separator)
 
 ;;; carriage-mode.el ends here

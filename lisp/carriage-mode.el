@@ -1157,18 +1157,20 @@ so preloader/streaming starts strictly below the fingerprint line."
         ;; Policy: keep point at the new stream origin.
         (goto-char newpos)
         ;; Defensive de-dup: if any stray separators were added below the fingerprint line
-        ;; (e.g., by legacy advice or double calls), remove up to two consecutive ones.
+        ;; (e.g., by legacy advice or double calls), remove a few consecutive ones under it.
         (save-excursion
-          (beginning-of-line)              ;; we are on the line after the inserted fingerprint
+          (end-of-line)
+          (forward-line 1)                 ;; go to the line after the inserted fingerprint
           (let ((k 0))
-            (while (and (< k 2)
-                        (looking-at "^-----[ \t]*$")
+            (while (and (< k 3)
+                        (looking-at "^[ \t]*-----[ \t]*$")
                         (< (line-end-position) (point-max)))
               (delete-region (line-beginning-position)
                              (min (point-max) (1+ (line-end-position))))
-              (setq k (1+ k)))))))
-    (setq carriage--fingerprint-inline-inserted t)
-    t))
+              ;; do not advance point: after deletion the next candidate is at the same line-beg
+              (setq k (1+ k))))))))
+  (setq carriage--fingerprint-inline-inserted t)
+  t)
 
 (defun carriage--build-context (source buffer)
   "Return context plist for prompt builder with at least :payload.

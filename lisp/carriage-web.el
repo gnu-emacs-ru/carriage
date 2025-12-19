@@ -120,8 +120,12 @@ Nested objects are passed through unchanged in this shim (full normalize may do 
   :type 'integer :group 'carriage-web)
 
 (defcustom carriage-web-auth-token nil
-  "Optional shared token; when set, API and stream require it.
-For SSE, token may be passed via query (?token=...)."
+  "Optional shared token; when set, Agent API and SSE require it.
+
+Swarm v1 note:
+- Agent endpoints MUST authenticate via X-Auth header.
+- Tokens MUST NOT be accepted via URL/query parameters (to avoid leaks via URLs/logs/referrers).
+The Hub is the browser entrypoint and injects X-Auth server-side."
   :type '(choice (const nil) string) :group 'carriage-web)
 
 (defcustom carriage-web-api-commands-enabled nil

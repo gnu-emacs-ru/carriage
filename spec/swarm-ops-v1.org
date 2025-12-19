@@ -7,8 +7,9 @@
 Meta
 - Spec-ID: carriage/swarm/ops/v1
 - Version: v1.0
-- Status: draft
-- Readiness: alpha (ops model defined; needs enforcement that Main Emacs never blocks on network)
+- Status: ГОТОВО
+- Gate: ГОТОВО (ready to implement; main Emacs is process-only; hub-owned liveness; no sync network calls)
+- Readiness: beta (spec-pass complete; READY/ГОТОВО for implementation; tests must prove no sync network in Main Emacs and hub-owned liveness)
 - Dialectic-Readiness (summary):
   - Thesis: Main Emacs is an orchestrator only (process start/stop/open dashboard/GC); Hub owns network probes and keeps registry alive/last_seen fresh.
   - Antithesis (risk): Any synchronous probing from Main Emacs reintroduces UI stalls; any token handling in Main Emacs risks leaks.
@@ -47,11 +48,9 @@ Operational Invariants
 - INV-ops-004: All binds are loopback-only by default (127.0.0.1); CORS disabled.
 - INV-ops-005: Hub SHOULD own liveness probing and registry last_seen/alive updates; main Emacs MUST NOT run periodic probes.
   - Probing schedule and budgets MUST be bounded by Swarm FREEZE names: probe-interval-sec, probe-timeout-sec, probe-max-per-interval.
-- INV-ops-006: Operational limits (caps/timeouts) MUST reference Swarm FREEZE names (spec/swarm-v1.org#INV), which are the single source of truth.
-  - Specs/docs MUST NOT restate the numeric values outside spec/swarm-v1.org#INV (exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600).
+- INV-ops-006: Operational limits (caps/timeouts) MUST reference Swarm FREEZE names (spec/swarm-v1.org#INV), the single source of truth for numeric limits.
+  - Specs/docs MUST NOT restate numeric limit values outside spec/swarm-v1.org#INV (exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600).
   - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
-  - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate Swarm limit numbers outside spec/swarm-v1.org.
-  - Implementations MAY repeat numbers when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
 
 Runtime Files
 - Anchor: RUNTIME

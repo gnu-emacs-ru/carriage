@@ -7,8 +7,9 @@
 Meta
 - Spec-ID: carriage/agent/http/v1
 - Version: v1.0
-- Status: draft
-- Readiness: alpha (contract close; needs conformance tests for auth-uniformity + cache discipline)
+- Status: ГОТОВО
+- Gate: ГОТОВО (ready to implement; auth-uniformity + cache-discipline + caps must be proven by tests)
+- Readiness: beta (spec-pass complete; READY/ГОТОВО for implementation; conformance tests must prove auth-uniformity + cache discipline)
 - Dialectic-Readiness (summary):
   - Thesis: Agent API is minimal and local; token auth is uniform; handlers are cache-only; /api/cmd is whitelist-only.
   - Antithesis (risk): Any handler doing heavy work (buffer scans, git, context builds) or any token acceptance via URL/query breaks “no stalls / no leaks”.
@@ -99,11 +100,9 @@ Security and Limits
 - Normative: t
 - Stability: stable
 - Pack-Priority: P0
-- Limits/caps/timeouts for the Agent are defined ONLY by Swarm FREEZE (spec/swarm-v1.org#INV) and MUST be referenced by FREEZE *names* in all specs/docs.
-  - Specs/docs MUST NOT restate the numeric values (exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600).
+- Limits/caps/timeouts for the Agent are defined ONLY by Swarm FREEZE (spec/swarm-v1.org#INV) and MUST be referenced by FREEZE names in all specs/docs.
+  - Specs/docs MUST NOT restate numeric limit values outside spec/swarm-v1.org#INV (exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600).
   - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
-  - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate Swarm limit numbers outside spec/swarm-v1.org.
-  - Implementations MAY repeat numbers when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
   - FREEZE names referenced by this spec: bind, sse-max-clients, json-max-bytes, request-max-bytes.
 - Loopback bind (127.0.0.1) only; remote exposure forbidden by default; CORS disabled.
 - Token is REQUIRED for ALL endpoints, including /stream:

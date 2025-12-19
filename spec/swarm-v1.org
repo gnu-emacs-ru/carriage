@@ -7,8 +7,9 @@
 Meta
 - Spec-ID: carriage/swarm/v1
 - Version: v1.0
-- Status: draft
-- Readiness: alpha (spec-pass in progress; implementation/tests must prove bounded proxy + liveness ownership)
+- Status: ГОТОВО
+- Gate: ГОТОВО (specs are internally consistent; ready to implement; tests must confirm bounded proxy + hub-owned liveness)
+- Readiness: beta (spec-pass complete; READY/ГОТОВО for implementation; tests must prove bounded proxy + liveness ownership)
 - Dialectic-Readiness (summary):
   - Thesis: Separation of concerns is specified (Agent serves; Hub proxies/injects token; Registry discovers; Main Emacs orchestrates only).
   - Antithesis (risk): Any ambiguity in (a) liveness ownership, (b) SSE proxy boundedness, (c) token non-leakage reintroduces coupling and UI stalls.
@@ -84,11 +85,8 @@ Invariants
 - Stability: stable
 - Pack-Priority: P1
 - FREEZE values in this section are the single source of truth for Swarm limits/caps/timeouts.
-  - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate the numeric values outside this FREEZE list.
-    - Exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600.
-  - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
-  - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate Swarm limit numbers anywhere outside this FREEZE list.
-    - Exception: protocol vocabulary (HTTP status codes, header names, standard media types) and file permission bits (e.g., 0600) may be stated where required.
+  - Specs/docs MUST reference FREEZE names (not numbers) and MUST NOT restate numeric limit values outside this FREEZE list.
+    - Exceptions: protocol vocabulary (HTTP status codes, header names, standard media types) and file permission bits (e.g., 0600) may be stated where required.
   - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
 - FREEZE: bind = 127.0.0.1
 - FREEZE: sse-max-clients = 16

@@ -7,8 +7,9 @@
 Meta
 - Spec-ID: carriage/hub/http/v1
 - Version: v1.0
-- Status: draft
-- Readiness: alpha (proxy boundedness is the critical path; must be proven by tests)
+- Status: ГОТОВО
+- Gate: ГОТОВО (ready to implement; bounded proxy + token non-leakage must be proven by tests)
+- Readiness: beta (spec-pass complete; READY/ГОТОВО for implementation; tests must prove proxy boundedness: caps/timeouts/SSE)
 - Dialectic-Readiness (summary):
   - Thesis: Hub is the only browser entrypoint; it proxies Agent API/SSE and injects X-Auth server-side; browser never sees tokens.
   - Antithesis (risk): SSE proxy can easily become unbounded (buffering/slow clients), and upstream caps/timeouts/counters can leak under errors.
@@ -71,11 +72,9 @@ Performance
 - Normative: t
 - Stability: stable
 - Pack-Priority: P2
-- Limits/caps/timeouts for the Hub are defined ONLY by Swarm FREEZE (spec/swarm-v1.org#INV) and MUST be referenced by FREEZE *names* in all specs/docs.
-  - Specs/docs MUST NOT restate the numeric values (exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600).
+- Limits/caps/timeouts for the Hub are defined ONLY by Swarm FREEZE (spec/swarm-v1.org#INV) and MUST be referenced by FREEZE names in all specs/docs.
+  - Specs/docs MUST NOT restate numeric limit values outside spec/swarm-v1.org#INV (exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600).
   - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
-  - Specs/docs MUST reference FREEZE *names* (not numbers) and MUST NOT restate Swarm limit numbers outside spec/swarm-v1.org.
-  - Implementations MAY repeat numbers when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
   - FREEZE names referenced by this spec: bind, proxy-max-upstream, proxy-connect-timeout-sec, proxy-read-timeout-sec, probe-interval-sec, probe-timeout-sec, probe-max-per-interval.
 - Hub proxy is non-blocking; timeouts, caps, and bounded buffering are enforced:
   - Proxy GET/POST MUST have bounded connect timeout and bounded read timeout (see swarm FREEZE:

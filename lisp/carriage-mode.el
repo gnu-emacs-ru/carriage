@@ -1341,11 +1341,12 @@ May include :context-text and :context-target per v1.1."
           ;; Keep behavior consistent with `carriage-send-buffer': separator first.
           (let ((carriage-mode-insert-separator-before-id t))
             (ignore-errors (carriage-insert-inline-iteration-marker-now))))
-        ;; Insert per-send fingerprint right under the iteration marker (best-effort).
-        (when (fboundp 'carriage-insert-inline-fingerprint-now)
-          (ignore-errors (carriage-insert-inline-fingerprint-now)))
         (when (fboundp 'carriage--preloader-start)
-          (ignore-errors (carriage--preloader-start)))))
+          (ignore-errors (carriage--preloader-start))))
+      ;; Insert per-send fingerprint right under the iteration marker (best-effort).
+      ;; Do this even when the marker was inserted earlier in the pipeline; insertion is idempotent.
+      (when (fboundp 'carriage-insert-inline-fingerprint-now)
+        (ignore-errors (carriage-insert-inline-fingerprint-now)))))
     ;; Keep spinner/active feedback during context build, then build context
     (carriage-ui-set-state 'sending)
     (setq ctx (carriage--build-context 'subtree srcbuf))

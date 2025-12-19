@@ -74,5 +74,26 @@ which-key hints are registered if available."
         (remove-hook 'find-file-hook #'carriage-doc-state-auto-enable))
       (message "carriage-global-mode disabled"))))
 
+;; Auto-enable carriage-mode and fold CARRIAGE_STATE summary on open (best-effort).
+;;
+;; Goal: when an Org buffer contains `#+PROPERTY: CARRIAGE_STATE (:CAR_MODE t ...)`,
+;; opening the file should automatically:
+;;  - enable `carriage-mode` (if not enabled yet),
+;;  - fold `#+PROPERTY: CARRIAGE_STATE ...` into icon/summary view (overlay),
+;; so users see badges immediately without manual commands.
+(defun carriage-global-mode--maybe-auto-enable-doc-state ()
+  "Best-effort: auto-enable carriage-mode from CARRIAGE_STATE and fold summary."
+  (when (derived-mode-p 'org-mode)
+    (when (require 'carriage-doc-state nil t)
+      ;; Enable carriage-mode if the document requests it.
+      (ignore-errors (carriage-doc-state-auto-enable (current-buffer)))
+      ;; Always try to fold CARRIAGE_STATE into summary when present.
+      ;; (Works even if carriage-mode isn't enabled; it is just a visual layer.)
+      (ignore-errors
+        (carriage-doc-state-hide (current-buffer))))))
+
+(unless (member #'carriage-global-mode--maybe-auto-enable-doc-state org-mode-hook)
+  (add-hook 'org-mode-hook #'carriage-global-mode--maybe-auto-enable-doc-state))
+
 (provide 'carriage-global-mode)
 ;;; carriage-global-mode.el ends here

@@ -526,14 +526,22 @@ Budgets are intentionally NOT included in the summary subset (they go to tooltip
       (or raw "-"))))
 
 (defun carriage-doc-state--ui-icon (key fallback)
-  "Return icon string for KEY using carriage-ui when available; otherwise FALLBACK."
+  "Return icon string for KEY using carriage-ui when available; otherwise FALLBACK.
+
+Important: when `carriage-mode' isn't loaded yet (e.g. file just opened and
+carriage-mode auto-enable hasn't run), `carriage-mode-use-icons' may be unbound.
+We best-effort load carriage-mode so the icon availability checks work and
+default to enabled."
   (condition-case _e
-      (if (and (require 'carriage-ui nil t)
-               (fboundp 'carriage-ui--icons-available-p)
-               (carriage-ui--icons-available-p)
-               (fboundp 'carriage-ui--icon))
-          (or (carriage-ui--icon key) fallback)
-        fallback)
+      (progn
+        ;; Ensure `carriage-mode-use-icons' and icon params exist before calling carriage-ui.
+        (require 'carriage-mode nil t)
+        (if (and (require 'carriage-ui nil t)
+                 (fboundp 'carriage-ui--icons-available-p)
+                 (carriage-ui--icons-available-p)
+                 (fboundp 'carriage-ui--icon))
+            (or (carriage-ui--icon key) fallback)
+          fallback))
     (error fallback)))
 
 (defun carriage-doc-state--badge (s &optional face)

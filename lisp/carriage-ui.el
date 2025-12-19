@@ -1383,27 +1383,33 @@ Uses precomputed patch ranges to avoid regex scans on redisplay."
   "Cached boolean result for last-iteration presence detection.")
 
 (defun carriage-ui--last-iteration-present-p ()
-  "Return non-nil when there are blocks of the last iteration in the buffer.
+  "Return non-nil when there are patch blocks below the last CARRIAGE_FINGERPRINT.
 
-Detection strategy (optimized):
-- If `carriage--last-iteration-id' is non-nil, search for any text position
-  with property 'carriage-iteration-id equal to that id using text-property-any
-  (C-implemented scan), avoiding regex over the whole buffer.
-- Results are cached per buffer; if last check was true for the same id,
-  we trust it until the id changes (avoid re-scanning on mere text edits)."
-  (let* ((id (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id))
-         (tick (buffer-chars-modified-tick)))
-    (if (and (equal id carriage-ui--last-iter-cache-id)
-             (or (eq tick carriage-ui--last-iter-cache-tick)
-                 carriage-ui--last-iter-cache-result)) ;; keep true without re-scan until id changes
+Strategy:
+- Find last \"#+CARRIAGE_FINGERPRINT:\" line (case-insensitive).
+- Check if there exists any #+begin_patch block whose start is at/after that line.
+- Cache result per buffer-chars-modified-tick."
+  (let* ((tick (buffer-chars-modified-tick)))
+    (if (and carriage-ui--last-iter-cache-tick
+             (= tick carriage-ui--last-iter-cache-tick))
         carriage-ui--last-iter-cache-result
-      (let* ((pos (and id (text-property-any (point-min) (point-max)
-                                             'carriage-iteration-id id)))
-             (found (and pos t)))
-        (setq carriage-ui--last-iter-cache-id id
-              carriage-ui--last-iter-cache-tick tick
-              carriage-ui--last-iter-cache-result found)
-        found))))
+      (let ((case-fold-search t)
+            (last-pos nil))
+        (save-excursion
+          (goto-char (point-min))
+          (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b" nil t)
+            (setq last-pos (line-beginning-position))))
+        (let ((found
+               (when (numberp last-pos)
+                 (let* ((ranges (carriage-ui--get-patch-ranges)))
+                   (cl-some (lambda (r) (and (consp r)
+                                             (>= (car r) last-pos)))
+                            ranges)))))
+          (setq carriage-ui--last-iter-cache-tick tick
+                carriage-ui--last-iter-cache-result (and found t)
+                ;; repurpose id cache slot to store last-pos (debug/consistency)
+                carriage-ui--last-iter-cache-id last-pos)
+          carriage-ui--last-iter-cache-result)))))
 
 (defcustom carriage-mode-headerline-show-outline t
   "When non-nil, show org outline segment in header-line. Turning it off reduces overhead in large Org files."

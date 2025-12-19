@@ -63,12 +63,12 @@ Behavior:
   :group 'carriage-doc-state)
 
 (defvar-local carriage-doc-state--overlay nil
-  "Overlay used to render the CARRIAGE_STATE property line(s) as a compact summary when folded.
+  "Overlay used to render the CARRIAGE_STATE property line as a compact summary (display-based fold).
 
-When `carriage-doc-state-summary-enable' is non-nil, this overlay uses:
-- `invisible' to hide the original line(s),
-- `before-string' to show summary badges/icons,
-- auto-reveal when point enters the overlay and auto-hide when point leaves.")
+Implementation details:
+- Uses only overlay 'display to replace the visible text with a compact summary.
+- When point is on the line, 'display is nil (original text is shown and editable).
+- When point leaves the line, 'display is set back to the summary.")
 
 (defvar-local carriage-doc-state--summary-hooks-installed nil
   "Non-nil when post-command/after-change hooks for the CARRIAGE_STATE summary are installed.")
@@ -660,34 +660,8 @@ Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tes
       (setq carriage-doc-state--overlay carriage-doc-state--fold-state-ov)
       t)))
 
-(defun carriage-doc-state--summary-refresh-debounced ()
-  "Schedule a debounced refresh of the summary overlay."
-  (carriage-doc-state--summary-cancel-timer)
-  (let ((buf (current-buffer))
-        (d (max 0.01 (or carriage-doc-state-summary-debounce-seconds 0.15))))
-    (setq carriage-doc-state--summary-refresh-timer
-          (run-at-time
-           d nil
-           (lambda (b)
-             (when (buffer-live-p b)
-               (with-current-buffer b
-                 (setq carriage-doc-state--summary-refresh-timer nil)
-                 (ignore-errors (carriage-doc-state-summary-refresh b)))))
-           buf))))
 
-(defun carriage-doc-state--summary-after-change (_beg _end _len)
-  "After-change hook: refresh summary overlay (debounced)."
-  (when (and (boundp 'carriage-doc-state-summary-enable)
-             carriage-doc-state-summary-enable)
-    (carriage-doc-state--summary-refresh-debounced)))
 
-(defun carriage-doc-state--summary-post-command ()
-  "post-command hook: auto-reveal on cursor enter and auto-hide on cursor leave."
-  (when (and (boundp 'carriage-doc-state-summary-enable)
-             carriage-doc-state-summary-enable
-             (overlayp carriage-doc-state--overlay))
-    (ignore-errors
-      (carriage-doc-state-summary-refresh (current-buffer)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Harmonious fold UI for CARRIAGE_STATE and CARRIAGE_FINGERPRINT
@@ -925,7 +899,7 @@ Supported canonical format (no backwards compatibility): `#+CARRIAGE_FINGERPRINT
     (when (overlayp ov) (delete-overlay ov)))
   (setq carriage-doc-state--fold-fp-ovs nil))
 
-;; Best-effort auto-enable: if carriage-mode is on (or user wants it), allow folding.
+;; Best-effort auto-enable: if carriage-mode is on (or user wants it), allow folding (display-based).
 (add-hook 'carriage-mode-hook
           (lambda ()
             (when carriage-doc-state-summary-enable

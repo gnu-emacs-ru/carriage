@@ -179,6 +179,12 @@ Appendix (catalog snapshot)
   - carriage/core/observability/v2 → spec/observability-v2.org (P2, draft)
   - carriage/docs/golden-fixtures/v2 → spec/golden-fixtures-v2.org (P1, draft)
   - carriage/docs/spec-refresh-plan/v2 → spec/spec-refresh-plan-v2.org (P3, draft)
+- Swarm (v1):
+  - carriage/swarm/v1 → spec/swarm-v1.org (P0, stable)
+  - carriage/swarm/ops/v1 → spec/swarm-ops-v1.org (P1, stable)
+  - carriage/agent/http/v1 → spec/agent-http-api-v1.org (P1, stable)
+  - carriage/hub/http/v1 → spec/hub-http-api-v1.org (P1, stable)
+  - carriage/registry/v1 → spec/registry-v1.org (P1, stable)
 - Gap closure (new):
   - carriage/docs/cleanup-tools/v2 → spec/cleanup-tools-v2.org (P3, draft)
   - carriage/core/git-history/v2 → spec/git-history-v2.org (P3, draft)

@@ -97,15 +97,14 @@
         (should (plist-member pl :CAR_CTX_MAX_FILES))
         (should (plist-member pl :CAR_CTX_MAX_BYTES))))))
 
-(ert-deftest carriage-fingerprint/transports-filter-fingerprint-and-iteration-id ()
-  "Transport prompt builders must remove fingerprint/iteration-id markers from outgoing text."
+(ert-deftest carriage-fingerprint/transports-filter-fingerprint-and-state ()
+  "Transport prompt builders must remove fingerprint/state markers from outgoing text."
   (with-temp-buffer
     (org-mode)
     (insert "#+title: Demo\n"
             "#+PROPERTY: CARRIAGE_STATE (:CAR_MODE t)\n"
             "\n"
             "-----\n"
-            "#+CARRIAGE_ITERATION_ID: deadbeef\n"
             "#+CARRIAGE_FINGERPRINT: (:CAR_INTENT Ask :CAR_SUITE aibo :CAR_CTX_MAX_FILES 10)\n"
             "\n"
             "* Body\nHello\n")
@@ -118,11 +117,9 @@
                        (carriage--echo--prompt 'buffer buf 'org-mode))))
       (when (stringp gptel-out)
         (should (not (string-match-p "CARRIAGE_FINGERPRINT" gptel-out)))
-        (should (not (string-match-p "CARRIAGE_ITERATION_ID" gptel-out)))
         (should (not (string-match-p "PROPERTY:[ \t]+CARRIAGE_STATE" gptel-out))))
       (when (stringp echo-out)
         (should (not (string-match-p "CARRIAGE_FINGERPRINT" echo-out)))
-        (should (not (string-match-p "CARRIAGE_ITERATION_ID" echo-out)))
         (should (not (string-match-p "PROPERTY:[ \t]+CARRIAGE_STATE" echo-out)))))))
 
 (provide 'carriage-fingerprint-tests)

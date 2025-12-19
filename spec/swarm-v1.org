@@ -8,7 +8,11 @@ Meta
 - Spec-ID: carriage/swarm/v1
 - Version: v1.0
 - Status: draft
-- Readiness: alpha
+- Readiness: alpha (spec-pass in progress; implementation/tests must prove bounded proxy + liveness ownership)
+- Dialectic-Readiness (summary):
+  - Thesis: Separation of concerns is specified (Agent serves; Hub proxies/injects token; Registry discovers; Main Emacs orchestrates only).
+  - Antithesis (risk): Any ambiguity in (a) liveness ownership, (b) SSE proxy boundedness, (c) token non-leakage reintroduces coupling and UI stalls.
+  - Synthesis (gate): Ready when FREEZE is the only numeric source of truth, Hub owns probes+registry updates, proxy is bounded (caps/timeouts/no buffering), and auth/envelopes are uniform.
 - Ready-For: Spec-level conformance tests (Agent auth, Hub token-injection, Registry atomicity, Proxy boundedness)
 - Not-Ready-For: Broad UI/keys exposure beyond start/stop/open-dashboard (until Hub proxy + liveness model is proven by tests)
 - Normativity: RFC 2119 applies
@@ -160,7 +164,7 @@ Testing and Conformance
   - CHK-swarm-005: /api/cmd is whitelist-only; unknown/disallowed → WEB_E_CMD; no arbitrary eval anywhere.
   - CHK-swarm-006: Payload caps enforced; truncation counted/exposed; oversized requests rejected.
   - CHK-swarm-007: Registry is atomic and self-healing: stale entries detected (pid/health) and cleaned.
-  - CHK-swarm-008: SSE reconnects tolerated; clients capped and idle-pruned; hub forwards SSE without blocking.
+  - CHK-swarm-008: SSE reconnects tolerated; clients capped and idle-pruned; Hub forwards SSE without unbounded buffering and disconnects slow clients (bounded by Swarm FREEZE proxy-read-timeout-sec).
 - Test Matrix (integration; web processes only):
   - TST-swarm-001: Start Agent → registry entry appears → Agent /api/health OK (token enforced).
   - TST-swarm-002: Agent /api/sessions returns cached snapshot (O(1) handler); snapshot updates do not block handlers.

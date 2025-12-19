@@ -8,7 +8,11 @@ Meta
 - Spec-ID: carriage/swarm/ops/v1
 - Version: v1.0
 - Status: draft
-- Readiness: alpha
+- Readiness: alpha (ops model defined; needs enforcement that Main Emacs never blocks on network)
+- Dialectic-Readiness (summary):
+  - Thesis: Main Emacs is an orchestrator only (process start/stop/open dashboard/GC); Hub owns network probes and keeps registry alive/last_seen fresh.
+  - Antithesis (risk): Any synchronous probing from Main Emacs reintroduces UI stalls; any token handling in Main Emacs risks leaks.
+  - Synthesis (gate): Ready when supervisor commands are process-only and all health/liveness is Hub-side (bounded), with registry as the only discovery channel.
 - Ready-For: Process-only supervisor commands (no sync network), registry GC, hub start/stop, dashboard open
 - Not-Ready-For: Main-Emacs liveness probing (forbidden); token handling in main Emacs (forbidden)
 - Normativity: RFC 2119 applies
@@ -37,6 +41,7 @@ Operational Invariants
 - Pack-Priority: P0
 - INV-ops-001: Main Emacs MUST NOT host HTTP/SSE. Only Agent/Hub processes may bind sockets.
 - INV-ops-002: All network calls from main Emacs MUST be asynchronous or fire-and-forget; no UI-blocking sync probes.
+  - Main Emacs MUST NOT run liveness probes; Hub owns probing + registry alive/last_seen updates (bounded, timer-driven).
 - INV-ops-003: Tokens MUST NOT be printed in logs or displayed in browsers; only Hub may read token files.
   - Main Emacs MUST NOT read token files and MUST NOT transport tokens into UI buffers/overlays/menus.
 - INV-ops-004: All binds are loopback-only by default (127.0.0.1); CORS disabled.

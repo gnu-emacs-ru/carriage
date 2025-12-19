@@ -8,7 +8,11 @@ Meta
 - Spec-ID: carriage/registry/v1
 - Version: v1.0
 - Status: draft
-- Readiness: alpha
+- Readiness: alpha (layout and atomicity defined; needs hard guarantees for stale+GC behavior)
+- Dialectic-Readiness (summary):
+  - Thesis: Registry is the single source of truth for discovery; per-agent runtime dirs contain pid/port/token/meta; catalog is atomically rewritten.
+  - Antithesis (risk): Concurrent writers and partial crashes can corrupt inventory unless atomic rewrite is absolute and missing dirs/files are tolerated.
+  - Synthesis (gate): Ready when tests prove atomic rewrite (no partial writes), safe tolerance for missing per-agent files, and deterministic bounded stale detection/GC consistent with Hub-owned liveness.
 - Ready-For: Atomic rewrite + runtime layout + GC-by-pid tests
 - Not-Ready-For: Complex concurrent writers without an explicit lock protocol (not required for v1)
 - Normativity: RFC 2119 applies
@@ -64,8 +68,13 @@ Operations
   - Hub SHOULD own liveness: it updates last_seen_ts and alive flag via bounded health probes and atomic rewrite.
   - Liveness probes MUST be bounded (timeouts + max-per-interval) and MUST NOT perform unbounded scans.
 - Cleanup:
-  - Stale detection is bounded and deterministic:
-    - missing PID OR repeated health failures (bounded retries/backoff) → mark alive=false.
+  - Stale detection MUST be bounded and deterministic (Hub-owned):
+    - PID missing/invalid OR PID not alive (best-effort) ⇒ mark alive=false immediately.
+    - PID alive but health probe fails ⇒ mark alive=false only after bounded failure budget:
+      - Probe uses bounded timeout (see Swarm FREEZE proxy-connect-timeout-sec/proxy-read-timeout-sec).
+      - Probe attempts per tick MUST be capped (see Swarm FREEZE names; Hub spec defines scheduling).
+      - Retries/backoff MUST be bounded (no unbounded exponential loops).
+    - When an entry is marked alive=false, Hub MUST still keep the catalog consistent via atomic rewrite.
   - GC MAY remove dead entries and agent dirs; GC MUST be safe under concurrent agents (atomic rename; tolerate missing dirs).
   - Registry operations MUST tolerate missing per-agent dirs/files and partial process termination.
 

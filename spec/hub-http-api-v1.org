@@ -8,7 +8,11 @@ Meta
 - Spec-ID: carriage/hub/http/v1
 - Version: v1.0
 - Status: draft
-- Readiness: alpha
+- Readiness: alpha (proxy boundedness is the critical path; must be proven by tests)
+- Dialectic-Readiness (summary):
+  - Thesis: Hub is the only browser entrypoint; it proxies Agent API/SSE and injects X-Auth server-side; browser never sees tokens.
+  - Antithesis (risk): SSE proxy can easily become unbounded (buffering/slow clients), and upstream caps/timeouts/counters can leak under errors.
+  - Synthesis (gate): Ready when proxy has bounded connect/read timeouts, hard cap on concurrent upstream, chunk-by-chunk SSE forwarding with slow-client disconnect, and strict envelope errors without token leakage.
 - Ready-For: Proxy boundedness tests (caps/timeouts/SSE forwarding) + token non-leakage checks
 - Not-Ready-For: Browser-direct-to-Agent (forbidden); multi-user/remote exposure (out of scope)
 - Normativity: RFC 2119 applies
@@ -74,7 +78,12 @@ Performance
 - Hub proxy is non-blocking; timeouts, caps, and bounded buffering are enforced:
   - Proxy GET/POST MUST have bounded connect timeout and bounded read timeout (see swarm FREEZE:
     proxy-connect-timeout-sec, proxy-read-timeout-sec).
-  - Proxy SSE MUST NOT accumulate unbounded data; forwarding MUST be chunk-by-chunk; slow clients MUST be disconnected.
+  - Proxy SSE MUST NOT accumulate unbounded data.
+    - Forwarding MUST be chunk-by-chunk (raw bytes) as they arrive from the Agent upstream; Hub MUST NOT parse, rebuffer, or “repackage” SSE.
+    - Hub MUST treat downstream backpressure as a fault condition: if the browser client cannot accept data promptly, Hub MUST disconnect that browser client rather than buffering unboundedly.
+    - Hub MUST enforce a bounded “slow client” rule:
+      - If downstream write repeatedly fails or stalls for longer than Swarm FREEZE proxy-read-timeout-sec, Hub MUST close the downstream connection.
+      - Hub MUST also close upstream (Agent) when the downstream client is gone, to avoid leaking proxy_active slots.
   - Hub MUST enforce max concurrent proxy upstream connections (see swarm FREEZE proxy-max-upstream);
     on overflow reject with 503 + {"ok":false,"code":"WEB_E_CAP"}.
 - Registry reads are O(1) per listing; cleanup is batched and bounded (no unbounded scans in request handlers).

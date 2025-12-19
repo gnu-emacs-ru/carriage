@@ -5,7 +5,7 @@
 ;; - registry.ndjson: atomically rewritten catalog (one JSON object per line)
 ;; - agents/<id>/{pid,port,token,meta.json}: per-agent runtime files (token is 0600)
 ;;
-;; Specs:
+;; Specifications:
 ;;   spec/registry-v1.org
 ;;   spec/swarm-v1.org
 ;;   spec/security-v2.org

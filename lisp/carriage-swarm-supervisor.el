@@ -5,7 +5,7 @@
 ;; - starts/stops agent and hub Emacs processes
 ;; - registry is the source of truth for discovery
 ;;
-;; Specs:
+;; Specifications:
 ;;   spec/swarm-v1.org
 ;;   spec/registry-v1.org
 ;;   spec/hub-http-api-v1.org

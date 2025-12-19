@@ -5,7 +5,7 @@
 ;; - registers itself in Swarm registry (pid/port/token/meta)
 ;; - never serves remote; loopback only
 ;;
-;; Specs:
+;; Specifications:
 ;;   spec/swarm-v1.org
 ;;   spec/agent-http-api-v1.org
 ;;   spec/registry-v1.org

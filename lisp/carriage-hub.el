@@ -6,7 +6,7 @@
 ;; - proxies browser requests to agents, injecting X-Auth server-side
 ;; - browser never sees agent tokens
 ;;
-;; Specs:
+;; Specifications:
 ;;   spec/swarm-v1.org
 ;;   spec/hub-http-api-v1.org
 ;;   spec/registry-v1.org

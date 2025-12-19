@@ -569,7 +569,7 @@ Return an alist of (downcased-name . value)."
    "<div>Pub: <span id='mPublished'>0</span> · Trunc: <span id='mTruncated'>0</span> · Clients: <span id='mClients'>0</span> · Rejected: <span id='mRejected'>0</span> · Sessions: <span id='mSessions'>0</span></div>"
    "</div>"
    "<div style='margin-top:.6rem' class='muted'>"
-   "Tip: save token to use auth‑gated APIs; SSE accepts ?token= as well."
+   "Tip: in Swarm v1, browsers should connect via Hub (tokens never go to the browser)."
    "</div>"
    "</div>"
    "</div>"
@@ -601,7 +601,7 @@ Return an alist of (downcased-name . value)."
    "function refreshList(){ api('/api/sessions').then(json).then(o=>{ if(o&&o.ok) renderList(o.data||[]); }).catch(()=>{}); api('/api/metrics').then(json).then(o=>{ if(o&&o.ok){ const d=o.data||{}; $('#mPublished').textContent = d.published||0; $('#mTruncated').textContent = d.truncated||0; $('#mClients').textContent = d.clients||0; $('#mRejected').textContent = d.rejected_by_cap||0; $('#mSessions').textContent = d.sessions_count||0; }}).catch(()=>{}); }"
    "function loadSession(doc){ api('/api/session/'+encodeURIComponent(doc)).then(json).then(o=>{ if(o&&o.ok) updateSessionCard(o.data); }).catch(()=>{}); }"
    "function connect(){ try{ if(S.es){ try{S.es.close();}catch(e){} S.es=null; }"
-   " const params = []; if (S.doc) params.push('doc='+encodeURIComponent(S.doc)); if (S.token) params.push('token='+encodeURIComponent(S.token));"
+   " const params = []; if (S.doc) params.push('doc='+encodeURIComponent(S.doc));"
    " const url = '/stream' + (params.length?('?'+params.join('&')):'');"
    " const es = new EventSource(url); S.es=es; setStatus('connecting');"
    " es.addEventListener('open', ()=>setStatus('online'));"
@@ -773,14 +773,16 @@ Adds :type TYPE to payload and debounces delivery."
 
 ;; Authorization
 
-(defun carriage-web--auth-ok (headers query &optional allow-query-token)
+(defun carriage-web--auth-ok (headers _query &optional _allow-query-token)
+  "Return non-nil when request is authenticated for Agent endpoints.
+
+Swarm v1 requirement: Agent tokens MUST NOT be accepted via URL/query parameters.
+Only X-Auth header is allowed (Hub injects it server-side)."
   (if (not carriage-web-auth-token)
       t
-    (let ((hdr (assoc-default "x-auth" headers))
-          (qtok (and allow-query-token
-                     (assoc-default "token" query))))
-      (and (stringp (or hdr qtok))
-           (string= carriage-web-auth-token (or hdr qtok))))))
+    (let ((hdr (assoc-default "x-auth" headers)))
+      (and (stringp hdr)
+           (string= carriage-web-auth-token hdr)))))
 
 ;; -------- Snapshot helpers (refactor of large handlers) --------
 
@@ -1214,85 +1216,6 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
           (carriage-web--sse-send proc "hello" (list :type "hello" :ts (float-time)))
           t)))))
 
-;; Internal push handler (for webd mode and external publishers)
-(defun carriage-web--handle-push (proc req)
-  "Handle POST /api/push from a trusted publisher (loopback + token).
-REQ is a plist with :headers, :query and :body (JSON).
-Supported types: ui, apply, report, snapshot, transport; unknown → passthrough."
-  (let* ((body   (or (plist-get req :body) ""))
-         (hdrs   (plist-get req :headers))
-         (ctype  (and (listp hdrs) (assoc-default "content-type" hdrs))))
-    ;; 1) Размер
-    (when (and (integerp carriage-web-max-request-bytes)
-               (> (string-bytes body) carriage-web-max-request-bytes))
-      (carriage-web--log "push: payload too large bytes=%d limit=%d"
-                         (string-bytes body) carriage-web-max-request-bytes)
-      (carriage-web--send-json proc "400 Bad Request"
-                               (list :ok json-false :error "payload too large" :code "WEB_E_PAYLOAD"))
-      (cl-return-from carriage-web--handle-push t))
-    ;; 2) Content-Type
-    (unless (and (stringp ctype)
-                 (string-match-p "\\`application/json\\b" (downcase ctype)))
-      (carriage-web--log "push: bad content-type ctype=%S" ctype)
-      (carriage-web--send-json proc "400 Bad Request"
-                               (list :ok json-false :error "bad content-type" :code "WEB_E_PAYLOAD"))
-      (cl-return-from carriage-web--handle-push t))
-    ;; 3) JSON
-    (let* ((obj (condition-case _e
-                    (let ((json-object-type 'plist)
-                          (json-array-type 'list)
-                          (json-false :false))
-                      (json-read-from-string body))
-                  (error nil))))
-      (if (not (and (listp obj) (plist-get obj :type)))
-          (carriage-web--send-json proc "400 Bad Request"
-                                   (list :ok json-false :error "bad request" :code "WEB_E_PAYLOAD"))
-        (let* ((typ (plist-get obj :type))
-               (doc (plist-get obj :doc)))
-          (pcase (and (stringp typ) typ)
-            ("ui"
-             (let ((st (plist-get obj :state)))
-               (when (and (stringp doc) (listp st))
-                 (puthash doc st carriage-web--ui-by-doc)
-                 (carriage-web-pub "ui" (list :doc doc :state st))))
-             (carriage-web--send-json proc "200 OK" (list :ok t)))
-            ((or "apply" "report")
-             (let ((sum (plist-get obj :summary)))
-               (when (and (stringp doc) (listp sum))
-                 (puthash doc sum carriage-web--last-report-by-doc)
-                 (carriage-web-pub typ (list :doc doc :summary sum))))
-             (carriage-web--send-json proc "200 OK" (list :ok t)))
-            ("snapshot"
-             (let ((data (plist-get obj :data)))
-               ;; Нормализуем форму данных снапшота, чтобы кэш никогда не превращался в nil.
-               (setq data
-                     (cond
-                      ((null data) '())
-                      ((vectorp data) (append data nil))
-                      ;; один объект (plist/алист) — оборачиваем в список
-                      ((and (listp data) (plist-get data :id)) (list data))
-                      ((and (listp data) (consp (car data))) data)
-                      (t data)))
-               (setq carriage-web--sessions-cache (or data '()))
-               (setq carriage-web--sessions-cache-time (float-time))
-               (carriage-web--log "push: snapshot updated count=%d"
-                                  (condition-case _e (length carriage-web--sessions-cache) (error 0)))
-               (carriage-web-pub "snapshot" (list :ts (float-time))))
-             (carriage-web--send-json proc "200 OK" (list :ok t)))
-            ("transport"
-             (let ((ph (plist-get obj :phase))
-                   (meta (plist-get obj :meta)))
-               (when (stringp doc)
-                 (carriage-web-pub "transport"
-                                   (append (list :doc doc :phase ph)
-                                           (and (listp meta) (list :meta meta))))))
-             (carriage-web--send-json proc "200 OK" (list :ok t)))
-            (_
-             (carriage-web-pub (or typ "message") (or obj (list)))
-             (carriage-web--send-json proc "200 OK" (list :ok t)))))))))
-
-
-
 ;; Dispatcher
 
 (defun carriage-web--dispatch (proc method path query headers body)
@@ -1334,12 +1257,6 @@ Supported types: ui, apply, report, snapshot, transport; unknown → passthrough
       (carriage-web--send-json proc "401 Unauthorized"
                                (list :ok json-false :error "auth required" :code "WEB_E_AUTH"))))
 
-   ;; Internal publisher endpoint (loopback + token required)
-   ((and (string= method "POST") (string= path "/api/push"))
-    (if (carriage-web--auth-ok headers query nil)
-        (carriage-web--handle-push proc (list :query query :headers headers :body body))
-      (carriage-web--send-json proc "401 Unauthorized"
-                               (list :ok json-false :error "auth required" :code "WEB_E_PUSH_AUTH"))))
 
    ((and (string= method "POST") (string= path "/api/cmd"))
     (if (carriage-web--auth-ok headers query nil)

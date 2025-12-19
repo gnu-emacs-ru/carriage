@@ -7,7 +7,7 @@
 Meta
 - Spec-ID: carriage/agent/http/v1
 - Version: v1.0
-- Status: ГОТОВО
+- Status: stable
 - Gate: ГОТОВО (ready to implement; auth-uniformity + cache-discipline + caps must be proven by tests)
 - Readiness: beta (spec-pass complete; READY/ГОТОВО for implementation; conformance tests must prove auth-uniformity + cache discipline)
 - Dialectic-Readiness (summary):

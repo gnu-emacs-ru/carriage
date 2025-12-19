@@ -21,6 +21,7 @@
 ;; - Idempotent write/normalization.
 ;; - Robustness: invalid/unreadable CARRIAGE_STATE must not break anything; restore becomes
 ;;   best-effort and defaults remain active.
+;; - UI: folded summary uses overlay 'display (no invisible/before-string); reveal on point.
 ;;
 ;;; Code:
 

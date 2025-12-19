@@ -44,10 +44,6 @@ This is implemented via advices in carriage-mode and must be best-effort."
   :type 'boolean
   :group 'carriage-doc-state)
 
-(defcustom carriage-doc-state-invisibility-symbol 'carriage-doc-state
-  "Symbol used in `buffer-invisibility-spec' to hide the CARRIAGE_STATE property line."
-  :type 'symbol
-  :group 'carriage-doc-state)
 
 (defcustom carriage-doc-state-summary-enable t
   "When non-nil, fold `#+PROPERTY: CARRIAGE_STATE ...` into a compact summary via overlay.
@@ -269,9 +265,7 @@ Never signals on parse/format errors; returns non-nil on success."
                 (when (and (boundp 'carriage-doc-state-summary-enable)
                            carriage-doc-state-summary-enable
                            (fboundp 'carriage-doc-state-summary-refresh))
-                  ;; Ensure hooks are installed so fold/reveal follows point automatically,
-                  ;; even when callers only write state (without calling hide/enable explicitly).
-                  (carriage-doc-state--summary-install-hooks)
+                  (carriage-doc-state-summary-enable)
                   (carriage-doc-state-summary-refresh (current-buffer))))
               t)))
       (error nil))))
@@ -399,7 +393,8 @@ Best-effort: invalid/unreadable state results in no changes (defaults remain)."
           (when (and (boundp 'carriage-doc-state-summary-enable)
                      carriage-doc-state-summary-enable
                      (derived-mode-p 'org-mode))
-            (carriage-doc-state-hide (current-buffer))))
+            (carriage-doc-state-summary-enable)
+            (carriage-doc-state-summary-refresh (current-buffer))))
         t))))
 
 ;;;###autoload
@@ -423,7 +418,10 @@ Must be a no-op when `carriage-doc-state-save-on-save' is nil."
     ;; Best-effort: invalid state must not break saving.
     (ignore-errors (carriage-doc-state-restore (current-buffer)))
     (ignore-errors (carriage-doc-state-write-current (current-buffer)))
-    (ignore-errors (carriage-doc-state-hide (current-buffer)))))
+    (ignore-errors
+      (when (derived-mode-p 'org-mode)
+        (carriage-doc-state-summary-enable)
+        (carriage-doc-state-summary-refresh (current-buffer))))))
 
 ;;;###autoload
 (defun carriage-doc-state-install-save-hook (&optional buffer)
@@ -435,32 +433,9 @@ Must be a no-op when `carriage-doc-state-save-on-save' is nil."
       (setq carriage-doc-state--save-hook-installed t)
       t)))
 
-(defun carriage-doc-state--delete-overlay ()
-  "Delete doc-state overlay if present."
-  (when (overlayp carriage-doc-state--overlay)
-    (delete-overlay carriage-doc-state--overlay))
-  (setq carriage-doc-state--overlay nil)
-  (setq carriage-doc-state--summary-folded nil))
 
-(defun carriage-doc-state--summary-cancel-timer ()
-  "Cancel pending debounce timer for summary refresh, if any."
-  (when (timerp carriage-doc-state--summary-refresh-timer)
-    (ignore-errors (cancel-timer carriage-doc-state--summary-refresh-timer)))
-  (setq carriage-doc-state--summary-refresh-timer nil))
 
-(defun carriage-doc-state--summary-install-hooks ()
-  "Install buffer-local hooks for auto folding/revealing of the CARRIAGE_STATE overlay."
-  (unless carriage-doc-state--summary-hooks-installed
-    (setq carriage-doc-state--summary-hooks-installed t)
-    (add-hook 'post-command-hook #'carriage-doc-state--summary-post-command nil t)
-    (add-hook 'after-change-functions #'carriage-doc-state--summary-after-change nil t)))
 
-(defun carriage-doc-state--summary-remove-hooks ()
-  "Remove buffer-local hooks for the CARRIAGE_STATE overlay."
-  (when carriage-doc-state--summary-hooks-installed
-    (setq carriage-doc-state--summary-hooks-installed nil)
-    (remove-hook 'post-command-hook #'carriage-doc-state--summary-post-command t)
-    (remove-hook 'after-change-functions #'carriage-doc-state--summary-after-change t)))
 
 (defun carriage-doc-state--as-symbol (v)
   "Normalize V into a symbol when possible (best-effort)."
@@ -663,68 +638,26 @@ runs that have no explicit `face' property, so icon glyphs keep their font/face.
             (format "Raw: %s" (prin1-to-string (or pl '())))))
      "\n")))
 
-(defun carriage-doc-state--summary-range ()
-  "Return (BEG . END) range for the CARRIAGE_STATE property line(s), or nil."
-  (carriage-doc-state--find-state-lines))
 
-(defun carriage-doc-state--summary-point-inside-p (ov)
-  "Return non-nil if point is within OV bounds."
-  (and (overlayp ov)
-       (numberp (overlay-start ov))
-       (numberp (overlay-end ov))
-       (>= (point) (overlay-start ov))
-       (<= (point) (overlay-end ov))))
 
-(defun carriage-doc-state--summary-fold (ov summary tooltip)
-  "Fold OV: show SUMMARY via overlay display, keep line navigable, attach TOOLTIP."
-  (when (overlayp ov)
-    (overlay-put ov 'help-echo tooltip)
-    ;; Use `display' instead of `invisible'+`before-string' to preserve line navigation (C-p/C-n)
-    ;; and allow point to enter the line for editing (reveal).
-    (overlay-put ov 'display summary)
-    ;; Ensure we don't also inject a phantom line.
-    (overlay-put ov 'before-string nil)
-    (overlay-put ov 'invisible nil)
-    (setq carriage-doc-state--summary-folded t)))
 
-(defun carriage-doc-state--summary-reveal (ov tooltip)
-  "Reveal OV: show original text, hide summary placeholder."
-  (when (overlayp ov)
-    (overlay-put ov 'help-echo tooltip)
-    (overlay-put ov 'before-string nil)
-    (overlay-put ov 'invisible nil)
-    (setq carriage-doc-state--summary-folded nil)))
 
 (defun carriage-doc-state-summary-refresh (&optional buffer)
-  "Rebuild/refresh CARRIAGE_STATE summary overlay in BUFFER (or current buffer)."
+  "Rebuild/refresh overlays for state/fingerprint in BUFFER (or current buffer).
+
+Unified, display-based fold engine:
+- No invisible/before-string usage.
+- Always applies fold/reveal according to current point at the end.
+Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tests."
   (interactive)
   (with-current-buffer (or buffer (current-buffer))
     (when (derived-mode-p 'org-mode)
-      (let ((rg (carriage-doc-state--summary-range)))
-        (if (not (consp rg))
-            (progn
-              (carriage-doc-state--delete-overlay)
-              nil)
-          (let* ((pl (or (ignore-errors (carriage-doc-state-read (current-buffer))) '()))
-                 (summary (ignore-errors (carriage-doc-state--summary-string pl)))
-                 (tooltip (ignore-errors (carriage-doc-state--tooltip-string pl)))
-                 (beg (car rg))
-                 (end (cdr rg))
-                 (ov carriage-doc-state--overlay))
-            (unless (and (overlayp ov)
-                         (= (overlay-start ov) beg)
-                         (= (overlay-end ov) end))
-              (when (overlayp ov) (delete-overlay ov))
-              (setq ov (make-overlay beg end (current-buffer) t t))
-              (overlay-put ov 'evaporate t)
-              (overlay-put ov 'category 'carriage-doc-state)
-              (overlay-put ov 'carriage-doc-state-summary t)
-              (setq carriage-doc-state--overlay ov))
-            ;; Fold/reveal depending on point location.
-            (if (carriage-doc-state--summary-point-inside-p ov)
-                (carriage-doc-state--summary-reveal ov tooltip)
-              (carriage-doc-state--summary-fold ov summary tooltip))
-            t))))))
+      ;; Ensure fold engine is enabled, then refresh overlays and apply fold/reveal.
+      (setq carriage-doc-state--fold-enabled t)
+      (ignore-errors (carriage-doc-state--fold--refresh-overlays))
+      ;; Back-compat for older tests expecting `carriage-doc-state--overlay'.
+      (setq carriage-doc-state--overlay carriage-doc-state--fold-state-ov)
+      t)))
 
 (defun carriage-doc-state--summary-refresh-debounced ()
   "Schedule a debounced refresh of the summary overlay."
@@ -755,69 +688,258 @@ runs that have no explicit `face' property, so icon glyphs keep their font/face.
     (ignore-errors
       (carriage-doc-state-summary-refresh (current-buffer)))))
 
-;;;###autoload
-(defun carriage-doc-state-summary-enable (&optional buffer)
-  "Enable compact summary overlay for CARRIAGE_STATE in BUFFER (or current buffer)."
-  (interactive)
-  (with-current-buffer (or buffer (current-buffer))
-    (setq carriage-doc-state-summary-enable t)
-    (carriage-doc-state--summary-install-hooks)
-    (carriage-doc-state-summary-refresh (current-buffer))))
+;; ---------------------------------------------------------------------------
+;; Harmonious fold UI for CARRIAGE_STATE and CARRIAGE_FINGERPRINT
+;;
+;; Invariants:
+;; - Never uses `invisible`/`before-string` for these lines (navigation must work).
+;; - Uses only overlay `display` to replace the visible representation.
+;; - If point is on the line: show original text (display=nil) and allow editing.
+;; - If point leaves the line: restore summary badges (display=summary).
+;; - After any refresh (write/after-change/open): fold/reveal is re-applied for point.
 
-;;;###autoload
-(defun carriage-doc-state-summary-disable (&optional buffer)
-  "Disable compact summary overlay for CARRIAGE_STATE in BUFFER (or current buffer)."
-  (interactive)
-  (with-current-buffer (or buffer (current-buffer))
-    (setq carriage-doc-state-summary-enable nil)
-    (carriage-doc-state--summary-cancel-timer)
-    (carriage-doc-state--summary-remove-hooks)
-    (carriage-doc-state--delete-overlay)
-    t))
+(require 'cl-lib)
+(require 'subr-x)
 
+(defgroup carriage-doc-state-fold nil
+  "Fold UI for Carriage state/fingerprint lines."
+  :group 'carriage)
+
+
+
+(defvar-local carriage-doc-state--fold-state-ov nil)
+(defvar-local carriage-doc-state--fold-fp-ovs nil)
+(defvar-local carriage-doc-state--fold-refresh-timer nil)
+(defvar-local carriage-doc-state--fold-enabled nil)
+
+(defun carriage-doc-state--fold--line-range-at-point ()
+  "Return (BEG . END) for current logical line, excluding trailing newline."
+  (save-excursion
+    (cons (line-beginning-position)
+          (line-end-position))))
+
+(defun carriage-doc-state--fold--point-inside-ov-p (ov)
+  "Non-nil if point is inside OV. End position is treated as inside (EOL)."
+  (and (overlayp ov)
+       (<= (overlay-start ov) (point))
+       (<= (point) (overlay-end ov))))
+
+(defun carriage-doc-state--fold--ov-set-folded (ov)
+  (when (overlayp ov)
+    (overlay-put ov 'display (overlay-get ov 'carriage-fold-summary))
+    (overlay-put ov 'help-echo (overlay-get ov 'carriage-fold-tooltip))
+    (overlay-put ov 'mouse-face 'highlight)))
+
+(defun carriage-doc-state--fold--ov-set-revealed (ov)
+  (when (overlayp ov)
+    (overlay-put ov 'display nil)
+    (overlay-put ov 'help-echo (overlay-get ov 'carriage-fold-tooltip))
+    (overlay-put ov 'mouse-face nil)))
+
+(defun carriage-doc-state--fold--apply-for-point ()
+  "Apply reveal/fold depending on current point for all fold overlays."
+  (when carriage-doc-state--fold-enabled
+    (when (overlayp carriage-doc-state--fold-state-ov)
+      (if (carriage-doc-state--fold--point-inside-ov-p carriage-doc-state--fold-state-ov)
+          (carriage-doc-state--fold--ov-set-revealed carriage-doc-state--fold-state-ov)
+        (carriage-doc-state--fold--ov-set-folded carriage-doc-state--fold-state-ov)))
+    (dolist (ov carriage-doc-state--fold-fp-ovs)
+      (when (overlayp ov)
+        (if (carriage-doc-state--fold--point-inside-ov-p ov)
+            (carriage-doc-state--fold--ov-set-revealed ov)
+          (carriage-doc-state--fold--ov-set-folded ov))))))
+
+(defun carriage-doc-state--fold--maybe-summary-from-plist (pl kind)
+  "Render summary badges from PL. KIND is a symbol: state|fingerprint."
+  (let* ((pl2 (if (fboundp 'carriage-doc-state--important-plist)
+                  (carriage-doc-state--important-plist pl)
+                pl))
+         ;; Prefer a dedicated UI renderer if it exists; otherwise fallback.
+         (summary
+          (cond
+           ((and (fboundp 'carriage-ui--render-doc-state-summary)
+                 (ignore-errors (require 'carriage-ui nil t)))
+            (or (ignore-errors (carriage-ui--render-doc-state-summary pl2))
+                "Carriage"))
+           ((fboundp 'carriage-doc-state--summary-fallback)
+            (carriage-doc-state--summary-fallback pl2))
+           (t
+            (format "%s" (or (plist-get pl2 :CAR_MODEL)
+                             (plist-get pl2 :CAR_INTENT)
+                             kind))))))
+    (or summary (format "%s" kind))))
+
+(defun carriage-doc-state--fold--tooltip (raw-line pl kind)
+  "Build tooltip text for RAW-LINE + PL."
+  (let ((pretty
+         (cond
+          ((fboundp 'carriage-doc-state--tooltip-string)
+           (ignore-errors (carriage-doc-state--tooltip-string pl)))
+          (t
+           (ignore-errors (pp-to-string pl))))))
+    (string-join
+     (delq nil
+           (list
+            (format "%s" kind)
+            "—"
+            (string-trim-right (or raw-line ""))
+            (when (and pretty (not (string-empty-p (string-trim pretty))))
+              (string-trim-right pretty))))
+     "\n")))
+
+(defun carriage-doc-state--fold--parse-sexp (s)
+  (when (and s (not (string-empty-p (string-trim s))))
+    (condition-case _err
+        (read s)
+      (error nil))))
+
+(defun carriage-doc-state--fold--scan-state-line ()
+  "Return plist describing the CARRIAGE_STATE line, or nil.
+Returned plist keys: :beg :end :raw :pl."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((rx "^#\\+PROPERTY:\\s-+CARRIAGE_STATE\\s-+\\(.*\\)$"))
+      (when (re-search-forward rx nil t)
+        (let* ((beg (line-beginning-position))
+               (end (line-end-position))
+               (raw (buffer-substring-no-properties beg end))
+               (sexp (match-string-no-properties 1))
+               (pl (carriage-doc-state--fold--parse-sexp sexp)))
+          (list :beg beg :end end :raw raw :pl pl))))))
+
+(defun carriage-doc-state--fold--scan-fingerprint-lines ()
+  "Return list of plists describing all fingerprint lines.
+Supported canonical format (no backwards compatibility): `#+CARRIAGE_FINGERPRINT: <sexp>`."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((rx "^#\\+CARRIAGE_FINGERPRINT:\\s-*\\(.*\\)$")
+          (acc nil))
+      (while (re-search-forward rx nil t)
+        (let* ((beg (line-beginning-position))
+               (end (line-end-position))
+               (raw (buffer-substring-no-properties beg end))
+               (sexp (match-string-no-properties 1))
+               (pl (carriage-doc-state--fold--parse-sexp sexp)))
+          (push (list :beg beg :end end :raw raw :pl pl) acc)))
+      (nreverse acc))))
+
+(defun carriage-doc-state--fold--ov-upsert (ov beg end summary tooltip)
+  (unless (overlayp ov)
+    (setq ov (make-overlay beg end nil t t))
+    (overlay-put ov 'evaporate t)
+    (overlay-put ov 'priority 9000)
+    (overlay-put ov 'category 'carriage-doc-state-fold))
+  (move-overlay ov beg end)
+  (overlay-put ov 'carriage-fold-summary summary)
+  (overlay-put ov 'carriage-fold-tooltip tooltip)
+  ;; Always start folded unless point is inside (apply-for-point fixes it).
+  (carriage-doc-state--fold--ov-set-folded ov)
+  ov)
+
+(defun carriage-doc-state--fold--refresh-overlays ()
+  "Rescan buffer and rebuild fold overlays, then apply fold/reveal for point."
+  (when carriage-doc-state--fold-enabled
+    ;; State line (single).
+    (let ((st (carriage-doc-state--fold--scan-state-line)))
+      (if (not st)
+          (when (overlayp carriage-doc-state--fold-state-ov)
+            (delete-overlay carriage-doc-state--fold-state-ov)
+            (setq carriage-doc-state--fold-state-ov nil))
+        (let* ((pl (plist-get st :pl))
+               (raw (plist-get st :raw))
+               (summary (carriage-doc-state--fold--maybe-summary-from-plist pl 'state))
+               (tooltip (carriage-doc-state--fold--tooltip raw pl 'CARRIAGE_STATE)))
+          (setq carriage-doc-state--fold-state-ov
+                (carriage-doc-state--fold--ov-upsert
+                 carriage-doc-state--fold-state-ov
+                 (plist-get st :beg) (plist-get st :end)
+                 summary tooltip)))))
+
+    ;; Fingerprints (many).
+    (let* ((fps (carriage-doc-state--fold--scan-fingerprint-lines))
+           (wanted (length fps))
+           (existing (cl-remove-if-not #'overlayp carriage-doc-state--fold-fp-ovs)))
+      ;; Trim extra overlays.
+      (when (> (length existing) wanted)
+        (dolist (ov (nthcdr wanted existing))
+          (when (overlayp ov) (delete-overlay ov)))
+        (setq existing (cl-subseq existing 0 wanted)))
+      ;; Extend overlays list.
+      (while (< (length existing) wanted)
+        (push nil existing))
+      (setq existing (nreverse existing))
+
+      ;; Upsert/move each overlay.
+      (setq carriage-doc-state--fold-fp-ovs
+            (cl-loop for fp in fps
+                     for ov in existing
+                     collect
+                     (let* ((pl (plist-get fp :pl))
+                            (raw (plist-get fp :raw))
+                            (summary (carriage-doc-state--fold--maybe-summary-from-plist pl 'fingerprint))
+                            (tooltip (carriage-doc-state--fold--tooltip raw pl 'CARRIAGE_FINGERPRINT)))
+                       (carriage-doc-state--fold--ov-upsert
+                        ov (plist-get fp :beg) (plist-get fp :end)
+                        summary tooltip))))))
+
+  ;; Critical: restore folded/revealed according to current point after refresh.
+  (carriage-doc-state--fold--apply-for-point))
+
+(defun carriage-doc-state--fold--schedule-refresh (&rest _)
+  (when carriage-doc-state--fold-enabled
+    (when (timerp carriage-doc-state--fold-refresh-timer)
+      (cancel-timer carriage-doc-state--fold-refresh-timer))
+    (setq carriage-doc-state--fold-refresh-timer
+          (run-with-idle-timer
+           carriage-doc-state-summary-debounce-seconds
+           nil
+           (lambda (buf)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (setq carriage-doc-state--fold-refresh-timer nil)
+                 (carriage-doc-state--fold--refresh-overlays))))
+           (current-buffer)))))
+
+(defun carriage-doc-state-summary-enable ()
+  "Enable summary folding for `CARRIAGE_STATE` and `CARRIAGE_FINGERPRINT` lines in current buffer."
+  (interactive)
+  (setq carriage-doc-state--fold-enabled t)
+  (add-hook 'post-command-hook #'carriage-doc-state--fold--apply-for-point nil t)
+  (add-hook 'after-change-functions #'carriage-doc-state--fold--schedule-refresh nil t)
+  (carriage-doc-state--fold--refresh-overlays))
+
+(defun carriage-doc-state-summary-disable ()
+  "Disable summary folding in current buffer and remove fold overlays."
+  (interactive)
+  (setq carriage-doc-state--fold-enabled nil)
+  (remove-hook 'post-command-hook #'carriage-doc-state--fold--apply-for-point t)
+  (remove-hook 'after-change-functions #'carriage-doc-state--fold--schedule-refresh t)
+  (when (timerp carriage-doc-state--fold-refresh-timer)
+    (cancel-timer carriage-doc-state--fold-refresh-timer))
+  (setq carriage-doc-state--fold-refresh-timer nil)
+  (when (overlayp carriage-doc-state--fold-state-ov)
+    (delete-overlay carriage-doc-state--fold-state-ov))
+  (setq carriage-doc-state--fold-state-ov nil)
+  (dolist (ov carriage-doc-state--fold-fp-ovs)
+    (when (overlayp ov) (delete-overlay ov)))
+  (setq carriage-doc-state--fold-fp-ovs nil))
+
+;; Best-effort auto-enable: if carriage-mode is on (or user wants it), allow folding.
+(add-hook 'carriage-mode-hook
+          (lambda ()
+            (when carriage-doc-state-summary-enable
+              (ignore-errors (carriage-doc-state-summary-enable)))))
+
+;; Legacy shim: keep old entry-point name working with the new fold UI.
 ;;;###autoload
 (defun carriage-doc-state-hide (&optional buffer)
-  "Hide CARRIAGE_STATE property line(s) in BUFFER.
-If `carriage-doc-state-summary-enable' is non-nil, show compact badges/icons instead."
-  (with-current-buffer (or buffer (current-buffer))
-    (if (and (boundp 'carriage-doc-state-summary-enable)
-             carriage-doc-state-summary-enable)
-        (progn
-          (carriage-doc-state--summary-install-hooks)
-          (carriage-doc-state-summary-refresh (current-buffer)))
-      ;; Legacy: pure hide without summary
-      (carriage-doc-state--delete-overlay)
-      (let ((rg (carriage-doc-state--find-state-lines)))
-        (when (consp rg)
-          (let ((ov (make-overlay (car rg) (cdr rg) (current-buffer) t t)))
-            (overlay-put ov 'evaporate t)
-            (overlay-put ov 'category 'carriage-doc-state)
-            (overlay-put ov 'invisible carriage-doc-state-invisibility-symbol)
-            (setq carriage-doc-state--overlay ov)
-            (unless (member carriage-doc-state-invisibility-symbol buffer-invisibility-spec)
-              (add-to-invisibility-spec carriage-doc-state-invisibility-symbol))
-            t))))))
-
-;;;###autoload
-(defun carriage-doc-state-show (&optional buffer)
-  "Show (unfold) the raw CARRIAGE_STATE property line(s) in BUFFER (disable summary overlay)."
-  (with-current-buffer (or buffer (current-buffer))
-    ;; Disable the summary hooks and remove overlay entirely: this is an explicit \"show raw\".
-    (carriage-doc-state--summary-cancel-timer)
-    (carriage-doc-state--summary-remove-hooks)
-    (carriage-doc-state--delete-overlay)
-    t))
-
-;;;###autoload
-(defun carriage-doc-state-toggle-visibility (&optional buffer)
-  "Toggle visibility of CARRIAGE_STATE property line(s) in BUFFER."
+  "Legacy alias: enable summary fold UI and refresh.
+Best-effort: safe to call even when overlays are already installed."
   (interactive)
   (with-current-buffer (or buffer (current-buffer))
-    (if (and (overlayp carriage-doc-state--overlay)
-             (or carriage-doc-state--summary-folded
-                 (overlay-get carriage-doc-state--overlay 'invisible)))
-        (carriage-doc-state-show (current-buffer))
-      (carriage-doc-state-hide (current-buffer)))))
+    (ignore-errors (carriage-doc-state-summary-enable))
+    (ignore-errors (carriage-doc-state-summary-refresh (current-buffer)))
+    t))
 
 (provide 'carriage-doc-state)
 ;;; carriage-doc-state.el ends here

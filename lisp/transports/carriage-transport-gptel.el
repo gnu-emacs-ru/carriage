@@ -67,35 +67,8 @@ If MODEL cannot be interned meaningfully, return it unchanged."
    (t model)))
 
 (defun carriage--gptel--strip-carriage-markers (text)
-  "Remove Carriage doc-state and per-send marker lines from TEXT (best-effort).
-
-This is a hard safety belt: even if callers pass a pre-built prompt that still
-contains markers, transports must never leak them to the LLM."
-  (with-temp-buffer
-    (insert (or text ""))
-    (goto-char (point-min))
-    (let ((case-fold-search t))
-      ;; Legacy/state blocks
-      (while (re-search-forward "^[ \t]*#\\+begin_carriage\\b" nil t)
-        (let ((beg (match-beginning 0)))
-          (if (re-search-forward "^[ \t]*#\\+end_carriage\\b" nil t)
-              (let ((end (line-end-position)))
-                (delete-region beg end)
-                (when (looking-at "\n") (delete-char 1)))
-            (delete-region beg (point-max)))))
-      ;; Doc-state and iteration id in Org property headers
-      (goto-char (point-min))
-      (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+\\(CARRIAGE_STATE\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
-        (delete-region (line-beginning-position)
-                       (min (point-max) (1+ (line-end-position))))
-        (goto-char (line-beginning-position)))
-      ;; Per-send inline markers
-      (goto-char (point-min))
-      (while (re-search-forward "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
-        (delete-region (line-beginning-position)
-                       (min (point-max) (1+ (line-end-position))))
-        (goto-char (line-beginning-position))))
-    (buffer-substring-no-properties (point-min) (point-max))))
+  "Return TEXT with internal Carriage marker lines stripped (centralized)."
+  (carriage-transport--strip-internal-lines text))
 
 (defun carriage--gptel--prompt (source buffer mode)
   "Build prompt string for GPTel from SOURCE and BUFFER in MODE.

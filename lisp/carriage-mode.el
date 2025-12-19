@@ -1347,47 +1347,47 @@ May include :context-text and :context-target per v1.1."
       ;; Do this even when the marker was inserted earlier in the pipeline; insertion is idempotent.
       (when (fboundp 'carriage-insert-inline-fingerprint-now)
         (ignore-errors (carriage-insert-inline-fingerprint-now)))))
-    ;; Keep spinner/active feedback during context build, then build context
-    (carriage-ui-set-state 'sending)
-    (setq ctx (carriage--build-context 'subtree srcbuf))
-    (setq built (carriage-build-prompt intent suite ctx)
-          sys   (plist-get built :system)
-          pr    (plist-get built :prompt))
-    (carriage-ui-set-state 'dispatch)
-    (carriage-log "send-subtree: intent=%s suite=%s backend=%s model=%s"
-                  intent suite backend model)
-    ;; Best-effort derive a small payload boundary for logs
-    (when (derived-mode-p 'org-mode)
-      (carriage-log "send-subtree: org-mode detected; using subtree-at-point as payload"))
-    (when (and carriage-mode-auto-open-log (not (bound-and-true-p noninteractive)))
-      (ignore-errors (carriage-show-log)))
-    (when (and carriage-mode-auto-open-traffic (not (bound-and-true-p noninteractive)))
-      (ignore-errors (carriage-show-traffic)))
+  ;; Keep spinner/active feedback during context build, then build context
+  (carriage-ui-set-state 'sending)
+  (setq ctx (carriage--build-context 'subtree srcbuf))
+  (setq built (carriage-build-prompt intent suite ctx)
+        sys   (plist-get built :system)
+        pr    (plist-get built :prompt))
+  (carriage-ui-set-state 'dispatch)
+  (carriage-log "send-subtree: intent=%s suite=%s backend=%s model=%s"
+                intent suite backend model)
+  ;; Best-effort derive a small payload boundary for logs
+  (when (derived-mode-p 'org-mode)
+    (carriage-log "send-subtree: org-mode detected; using subtree-at-point as payload"))
+  (when (and carriage-mode-auto-open-log (not (bound-and-true-p noninteractive)))
+    (ignore-errors (carriage-show-log)))
+  (when (and carriage-mode-auto-open-traffic (not (bound-and-true-p noninteractive)))
+    (ignore-errors (carriage-show-traffic)))
 
-    (carriage--ensure-transport)
-    (let* ((unreg (carriage-transport-begin)))
-      (carriage-traffic-log 'out "request begin: source=subtree backend=%s model=%s"
-                            backend model)
-      (condition-case err
-          (progn
-            (carriage-transport-dispatch :source 'subtree
-                                         :backend backend
-                                         :model model
-                                         :prompt pr
-                                         :system sys
-                                         :buffer srcbuf
-                                         :mode (symbol-name (buffer-local-value 'major-mode srcbuf))
-                                         ;; Keep consistent with `carriage-send-buffer': when we inserted inline marker
-                                         ;; and fingerprint, `carriage--stream-origin-marker' was advanced to start
-                                         ;; strictly below them. Use it when available.
-                                         :insert-marker (or (and (markerp carriage--stream-origin-marker)
-                                                                 (buffer-live-p (marker-buffer carriage--stream-origin-marker))
-                                                                 carriage--stream-origin-marker)
-                                                            origin-marker))
-            t)
-        (error
-         (carriage-log "send-subtree error: %s" (error-message-string err))
-         (carriage-transport-complete t))))))
+  (carriage--ensure-transport)
+  (let* ((unreg (carriage-transport-begin)))
+    (carriage-traffic-log 'out "request begin: source=subtree backend=%s model=%s"
+                          backend model)
+    (condition-case err
+        (progn
+          (carriage-transport-dispatch :source 'subtree
+                                       :backend backend
+                                       :model model
+                                       :prompt pr
+                                       :system sys
+                                       :buffer srcbuf
+                                       :mode (symbol-name (buffer-local-value 'major-mode srcbuf))
+                                       ;; Keep consistent with `carriage-send-buffer': when we inserted inline marker
+                                       ;; and fingerprint, `carriage--stream-origin-marker' was advanced to start
+                                       ;; strictly below them. Use it when available.
+                                       :insert-marker (or (and (markerp carriage--stream-origin-marker)
+                                                               (buffer-live-p (marker-buffer carriage--stream-origin-marker))
+                                                               carriage--stream-origin-marker)
+                                                          origin-marker))
+          t)
+      (error
+       (carriage-log "send-subtree error: %s" (error-message-string err))
+       (carriage-transport-complete t)))))
 
 ;;;###autoload
 (defun carriage-dry-run-at-point ()

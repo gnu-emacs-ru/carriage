@@ -68,30 +68,7 @@ Strips any #+begin_carriage … #+end_carriage blocks and per-send fingerprint l
                        (buffer-substring-no-properties beg end)))
                  (buffer-substring-no-properties (point-min) (point-max))))
               (_ (buffer-substring-no-properties (point-min) (point-max))))))
-      (with-temp-buffer
-        (insert (or raw ""))
-        (goto-char (point-min))
-        (let ((case-fold-search t))
-          ;; Legacy/state blocks
-          (while (re-search-forward "^[ \t]*#\\+begin_carriage\\b" nil t)
-            (let ((beg (match-beginning 0)))
-              (if (re-search-forward "^[ \t]*#\\+end_carriage\\b" nil t)
-                  (let ((end (line-end-position)))
-                    (delete-region beg end)
-                    (when (looking-at "\n") (delete-char 1)))
-                (delete-region beg (point-max)))))
-          ;; Doc-state and per-send fingerprint / iteration marker lines
-          (goto-char (point-min))
-          (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+\\(CARRIAGE_STATE\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
-            (delete-region (line-beginning-position)
-                           (min (point-max) (1+ (line-end-position))))
-            (goto-char (line-beginning-position)))
-          (goto-char (point-min))
-          (while (re-search-forward "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
-            (delete-region (line-beginning-position)
-                           (min (point-max) (1+ (line-end-position))))
-            (goto-char (line-beginning-position))))
-        (buffer-substring-no-properties (point-min) (point-max))))))
+      (carriage-transport--strip-internal-lines raw))))
 
 (defun carriage--echo--chunk-string (s n)
   "Return a list of chunks splitting S into pieces of at most N chars."

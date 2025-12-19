@@ -94,6 +94,9 @@ Invariants
 - FREEZE: proxy-max-upstream = 32
 - FREEZE: proxy-connect-timeout-sec = 0.5
 - FREEZE: proxy-read-timeout-sec = 2.0
+- FREEZE: probe-interval-sec = 5.0
+- FREEZE: probe-timeout-sec = 0.5
+- FREEZE: probe-max-per-interval = 12
 - INV-swarm-001: Agents and Hub MUST never block UI on network I/O; all HTTP/SSE I/O runs via non-blocking filters and timers.
 - INV-swarm-002: No heavy artifacts (patch bodies, large diffs) are streamed by default; details are fetched on demand.
 

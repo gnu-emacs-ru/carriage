@@ -71,8 +71,8 @@ Operations
   - Stale detection MUST be bounded and deterministic (Hub-owned):
     - PID missing/invalid OR PID not alive (best-effort) ⇒ mark alive=false immediately.
     - PID alive but health probe fails ⇒ mark alive=false only after bounded failure budget:
-      - Probe uses bounded timeout (see Swarm FREEZE proxy-connect-timeout-sec/proxy-read-timeout-sec).
-      - Probe attempts per tick MUST be capped (see Swarm FREEZE names; Hub spec defines scheduling).
+      - Probe uses bounded timeout (see Swarm FREEZE probe-timeout-sec).
+      - Probe attempts per tick MUST be capped (see Swarm FREEZE probe-max-per-interval; Hub spec defines scheduling via probe-interval-sec).
       - Retries/backoff MUST be bounded (no unbounded exponential loops).
     - When an entry is marked alive=false, Hub MUST still keep the catalog consistent via atomic rewrite.
   - GC MAY remove dead entries and agent dirs; GC MUST be safe under concurrent agents (atomic rename; tolerate missing dirs).

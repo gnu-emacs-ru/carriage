@@ -1,0 +1,54 @@
+#+title: Badges/Overlay notes — icons-only summary (no brackets), per-kind minimal mode
+#+author: Carriage Team
+#+language: en
+#+options: toc:nil num:nil
+
+Goal
+- Fold UI for CARRIAGE_STATE and CARRIAGE_FINGERPRINT shows icons + short segments (no square brackets).
+- When point enters the line: overlay display=nil, original text is shown and editable.
+- When point leaves: overlay shows summary again.
+- Budgets remain in tooltip; summary focuses on response/context shaping.
+
+Defaults
+- Icons are used for all segments when available (suite/model/context toggles/intent; optionally scope/profile/injection).
+- No square brackets in summary; segments are space-separated.
+- Minimal per-kind:
+  - carriage-state-badge-overlay-minimal (default: nil)
+  - carriage-fingerprint-badge-overlay-minimal (default: nil)
+  - nil → rich summary (suite, model, context toggles; optionally intent/scope/profile/injection).
+  - t → minimal summary (only model icon + display name).
+- STATE and FINGERPRINT share the same renderer and visual style by default; only the per-kind minimal switches change which segments appear.
+
+Implementation
+- lisp/carriage-doc-state.el
+  - Summary builder renders the same format for STATE and FINGERPRINT; chooses minimal by kind.
+  - Overlay uses 'display' only (no invisible/before-string), range is bol..eol (no newline).
+  - post-command toggles fold/reveal; after-change debounce refresh ends with apply-for-point.
+  - Tooltip: raw line + formatted details (budgets only here).
+- lisp/carriage-ui.el
+  - Icon keys for suite/model/ctx toggles exist; added scope/profile/injection icon support.
+  - Do not wrap icons with format/propertize that clobber font; concat segments instead.
+
+Transports
+- lisp/transports/carriage-transport.el: centralized stripper removes:
+  - #+PROPERTY: CARRIAGE_STATE…
+  - #+CARRIAGE_FINGERPRINT: …
+  - #+PROPERTY: CARRIAGE_ITERATION_ID… (legacy)
+  - Inline #+CARRIAGE_ITERATION_ID… (legacy)
+  - #+begin_carriage … #+end_carriage blocks
+
+Send pipeline
+- Separator insertion “-----” happens before fingerprint line (idempotent).
+- Fingerprint is a single canonical line: #+CARRIAGE_FINGERPRINT: (<plist>).
+- After insertion → overlay refresh immediately.
+
+Last iteration (apply area)
+- “Last iteration” is defined by the last #+CARRIAGE_FINGERPRINT line.
+- Apply/Diff last iteration operates on all #+begin_patch blocks strictly below it, to end of buffer.
+
+Tests (guidelines)
+- Do not assert brackets; check presence of suite/ctx tokens or non-empty display.
+- Minimal mode: check that only model is present (no suite/ctx markers).
+- Fold/reveal invariants: display non-nil when away; display=nil when point is on the line.
+- Stripper: ensure state/fingerprint/iteration markers and begin_carriage blocks are removed.
+

@@ -1259,7 +1259,21 @@ May include :context-text and :context-target per v1.1."
   ;; Defer heavy preparation to the next tick so UI updates (spinner/state) are visible instantly.
   (let ((srcbuf (current-buffer))
         (prefix current-prefix-arg)
-        (origin-marker (copy-marker (point) t)))
+        (origin-marker
+         (copy-marker
+          (progn
+            ;; Ensure Send always starts on a fresh line *below* the current one.
+            ;; If point is in the middle/end of a non-empty line, insert a newline and
+            ;; move point to the new line so the separator+fingerprint never appear above
+            ;; the user's current line.
+            (when (or (not (bolp))
+                      (save-excursion
+                        (beginning-of-line)
+                        (re-search-forward "[^ \t]" (line-end-position) t)))
+              (end-of-line)
+              (insert "\n"))
+            (point))
+          t)))
     ;; Prepare stream immediately at cursor: reset → begin-iteration → insert marker+separator → preloader.
     (carriage-stream-reset origin-marker)
     (when (fboundp 'carriage-begin-iteration)
@@ -1337,7 +1351,18 @@ May include :context-text and :context-target per v1.1."
          (intent  carriage-mode-intent)
          (suite   carriage-mode-suite)
          (srcbuf  (current-buffer))
-         (origin-marker (copy-marker (point) t))
+         (origin-marker
+          (copy-marker
+           (progn
+             ;; Ensure Send always starts on a fresh line *below* the current one.
+             (when (or (not (bolp))
+                       (save-excursion
+                         (beginning-of-line)
+                         (re-search-forward "[^ \t]" (line-end-position) t)))
+               (end-of-line)
+               (insert "\n"))
+             (point))
+           t))
          (ctx nil)
          (built nil) (sys nil) (pr nil))
     ;; Prepare stream origin and preloader; insert only the fingerprint line (no inline iteration-id line).
@@ -2423,13 +2448,14 @@ Designed for use from `after-load-functions' so commands loaded later
 ;; Keep cursor free during streaming; spinner still moves to the tail.
 (provide 'carriage-mode)
 
-(defgroup carriage-send-ui nil
-  "Send-time UX options (fingerprint/separator)."
+(defgroup carriage-separator nil
+  "Settings related to insertion of visual separator lines on Send."
   :group 'carriage)
 
 (defcustom carriage-send-insert-separator t
   "When non-nil, insert a visual separator line \"-----\" after inserting fingerprint on Send."
-  :type 'boolean :group 'carriage-send-ui)
+  :type 'boolean
+  :group 'carriage-separator)
 
 (defun carriage-insert-send-separator ()
   "Insert a separator line \"-----\" above the reply insertion point when enabled.
@@ -2463,16 +2489,7 @@ Idempotent:
 
 ;; Wire the advice when function is present (defined earlier in this file).
 
-;; Separator insertion after Send
 
-(defgroup carriage-separator nil
-  "Settings related to insertion of visual separator lines on Send."
-  :group 'carriage)
-
-(defcustom carriage-send-insert-separator t
-  "When non-nil, insert a visual separator line \"-----\" after inserting CARRIAGE_FINGERPRINT during Send."
-  :type 'boolean
-  :group 'carriage-separator)
 
 
 ;;; carriage-mode.el ends here

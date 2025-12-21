@@ -20,28 +20,6 @@
 ;; fragments. Central lookup for op implementations.
 ;;
 ;;; Code:
-;; (file body unchanged below)
-;;
-;; Copyright (C) 2025 Carriage contributors
-;; Author: Peter Kosov <11111000000@email.com>
-;; URL: https://gnu-emacs.ru/carriage
-;; Package-Requires: ((emacs "27.1") (cl-lib "0.5"))
-;; Version: 0.1
-;; Keywords: parser, registry
-;;
-;; Specifications:
-;;   spec/code-style-v2.org
-;;   spec/index.org
-;;   spec/errors-v2.org
-;;   spec/compliance-checklist-v2.org
-;;   spec/parser-registry-v2.org
-;;   spec/parser-impl-v2.org
-;;
-;;; Commentary:
-;; Registry mapping (op . version) to parser/dry-run/apply handlers and prompt
-;; fragments. Central lookup for op implementations.
-;;
-;;; Code:
 ;; Specifications:
 ;;   spec/code-style-v2.org
 ;;   spec/index.org

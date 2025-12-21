@@ -57,7 +57,7 @@
   "Installing before-save hook persists normalized CARRIAGE_STATE (sexp)."
   (with-temp-buffer
     (org-mode)
-    ;; Start from an existing state line to avoid dependence on carriage-mode vars.
+    (carriage-mode 1)
     (insert "#+title: Demo\n#+PROPERTY: CARRIAGE_STATE (:CAR_MODE t :CAR_INTENT Ask)\n\n* Note\nBody\n")
     (setq-local carriage-doc-state-save-on-save t)
     (carriage-doc-state-install-save-hook)
@@ -136,7 +136,7 @@
     ;; Move point away: should fold again (display restored).
     (goto-char (point-max))
     (run-hooks 'post-command-hook)
-    (should (stringp (overlay-get carriage-doc-state--overlay 'display))))))
+    (should (stringp (overlay-get carriage-doc-state--overlay 'display)))))
 
 (ert-deftest carriage-doc-state/summary-overlay-updates-after-write ()
   "After carriage-doc-state-write, summary overlay should refresh (best-effort) and not duplicate."

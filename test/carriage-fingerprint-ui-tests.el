@@ -36,6 +36,7 @@
   "Fingerprint line folds to summary, reveals on cursor enter, re-folds on leave."
   (with-temp-buffer
     (org-mode)
+    (setq-local carriage-fingerprint-badge-overlay-minimal nil)
     (insert "#+title: Demo\n"
             "#+CARRIAGE_FINGERPRINT: (:CAR_INTENT Code :CAR_SUITE udiff :CAR_BACKEND gptel :CAR_PROVIDER openai :CAR_MODEL gpt-4o-mini "
             ":CAR_CTX_DOC t :CAR_CTX_GPTEL nil :CAR_CTX_VISIBLE t :CAR_CTX_PROFILE p1)\n"
@@ -68,15 +69,15 @@
         (should (stringp dispm))
         (should (string-match-p "gpt-4o-mini" dispm))
         (should-not (string-match-p "\\budiff\\b" dispm))
-        (should-not (string-match-p "\\bDoc\\b\\|\\bGpt\\b\\|\\bVis\\b\\|\\bPat\\b" dispm)))
+        (let ((case-fold-search nil))
+          (should-not (string-match-p "\\bDoc\\b\\|\\bGpt\\b\\|\\bVis\\b\\|\\bPat\\b" dispm))))
 
       ;; Move point onto the fingerprint line → reveal (display=nil).
       (goto-char pos)
       (run-hooks 'post-command-hook)
       (let* ((ov2 (carriage--fp--first-overlay-at pos)))
-        ;; When revealed, the overlay for this line should have display=nil.
-        (should (overlayp ov2))
-        (should (null (overlay-get ov2 'display))))
+        ;; When revealed, there should be no display overlay at this position.
+        (should (null ov2)))
 
       ;; Move point away → fold back (display restored).
       (goto-char (point-max))

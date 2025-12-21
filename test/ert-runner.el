@@ -2,6 +2,8 @@
 
 (require 'ert)
 
+(setq debug-on-error t)
+
 ;; Ensure lisp/ is on load-path (flake also adds -L lisp).
 (let* ((here (file-name-directory (or load-file-name buffer-file-name)))
        (lisp (expand-file-name "../lisp" here)))

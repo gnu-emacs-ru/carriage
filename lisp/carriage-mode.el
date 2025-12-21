@@ -457,7 +457,7 @@ Consults engine capabilities; safe when registry is not yet loaded."
   (when (require 'carriage-doc-state nil t)
     (ignore-errors
       (let* ((pl (carriage-doc-state-read))
-             (pl2 (plist-put (or pl '()) :CAR_MODE "nil")))
+             (pl2 (plist-put (or pl '()) :CAR_MODE nil)))
         (carriage-doc-state-write pl2))))
   ;; Disable: restore header-line and remove modeline segment (buffer-local)
   (unless (bound-and-true-p noninteractive)

@@ -8,6 +8,7 @@
   (with-temp-buffer
     (org-mode)
     (carriage-mode 1)
+    (setq-local carriage-mode-auto-open-report t)
     (let* ((blk
             (concat
              "#+begin_patch (:version \"1\" :op \"sre\" :file \"x.txt\")\n"

@@ -1065,6 +1065,22 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                                                    :height carriage-mode-icon-height
                                                    :v-adjust carriage-mode-icon-v-adjust
                                                    :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-cyan-face)))))
+                 ;; Additional icons for doc-state badges (scope/profile/injection)
+                 ('scope  (when (fboundp 'all-the-icons-material)
+                            (all-the-icons-material "layers"
+                                                    :height carriage-mode-icon-height
+                                                    :v-adjust carriage-mode-icon-v-adjust
+                                                    :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-yellow-face)))))
+                 ('profile (when (fboundp 'all-the-icons-material)
+                             (all-the-icons-material "account_tree"
+                                                     :height carriage-mode-icon-height
+                                                     :v-adjust carriage-mode-icon-v-adjust
+                                                     :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face)))))
+                 ('inject (when (fboundp 'all-the-icons-material)
+                            (all-the-icons-material "call_split"
+                                                    :height carriage-mode-icon-height
+                                                    :v-adjust carriage-mode-icon-v-adjust
+                                                    :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-cyan-face)))))
                  (_ nil))))
           (when (stringp res)
             (puthash key res cache))
@@ -1403,7 +1419,7 @@ Strategy:
                (when (numberp last-pos)
                  (let* ((ranges (carriage-ui--get-patch-ranges)))
                    (cl-some (lambda (r) (and (consp r)
-                                             (>= (car r) last-pos)))
+                                        (>= (car r) last-pos)))
                             ranges)))))
           (setq carriage-ui--last-iter-cache-tick tick
                 carriage-ui--last-iter-cache-result (and found t)
@@ -2974,9 +2990,9 @@ This must be safe and never signal. Only include keys that affect:
                       (let ((pl raw)
                             (out '()))
                         (dolist (k '(:CAR_INTENT :CAR_SUITE :CAR_MODEL :CAR_BACKEND :CAR_PROVIDER
-                                     :CAR_CTX_DOC :CAR_CTX_GPTEL :CAR_CTX_VISIBLE :CAR_CTX_PATCHED
-                                     :CAR_DOC_CTX_SCOPE :CAR_CTX_PROFILE :CAR_CTX_INJECTION
-                                     :CAR_CTX_MAX_FILES :CAR_CTX_MAX_BYTES))
+                                                 :CAR_CTX_DOC :CAR_CTX_GPTEL :CAR_CTX_VISIBLE :CAR_CTX_PATCHED
+                                                 :CAR_DOC_CTX_SCOPE :CAR_CTX_PROFILE :CAR_CTX_INJECTION
+                                                 :CAR_CTX_MAX_FILES :CAR_CTX_MAX_BYTES))
                           (when (plist-member pl k)
                             (setq out (plist-put out k (plist-get pl k)))))
                         out)

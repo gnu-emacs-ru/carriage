@@ -92,7 +92,7 @@ which-key hints are registered if available."
       (ignore-errors
         (carriage-doc-state-hide (current-buffer))))))
 
-(unless (member #'carriage-global-mode--maybe-auto-enable-doc-state org-mode-hook)
+(with-eval-after-load 'org
   (add-hook 'org-mode-hook #'carriage-global-mode--maybe-auto-enable-doc-state))
 
 (provide 'carriage-global-mode)

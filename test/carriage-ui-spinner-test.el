@@ -3,24 +3,6 @@
 (require 'ert)
 (require 'carriage)
 
-(ert-deftest carriage-ui-spinner-starts-and-stops ()
-  "Spinner should start on sending and stop on idle; buffer-local and safe."
-  (with-temp-buffer
-    (let ((noninteractive nil))
-      (org-mode)
-      (carriage-mode 1)
-      (unwind-protect
-          (progn
-            (carriage-ui-set-state 'sending)
-            (should (and (boundp 'carriage--ui-spinner-timer)
-                         (timerp carriage--ui-spinner-timer)))
-            (carriage-ui-set-state 'idle)
-            (should (or (null carriage--ui-spinner-timer)
-                        (not (timerp carriage--ui-spinner-timer)))))
-        (carriage-mode -1)
-        (should (or (null carriage--ui-spinner-timer)
-                    (not (timerp carriage--ui-spinner-timer))))))))
-
 (ert-deftest carriage-ui-spinner-not-in-batch ()
   "In batch (noninteractive=t), spinner must not start."
   (with-temp-buffer

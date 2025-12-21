@@ -18,6 +18,7 @@
   "before-save hook should persist a single CARRIAGE_STATE line and hide it via overlay."
   (with-temp-buffer
     (org-mode)
+    (carriage-mode 1)
     ;; Start from an existing state line so the hook doesn't depend on carriage-mode vars.
     (insert "#+title: Demo\n"
             "#+PROPERTY: X 1\n"
@@ -40,7 +41,7 @@
     ;; and is in folded mode (overlay 'display is a non-empty string).
     (should (overlayp carriage-doc-state--overlay))
     (should (stringp (overlay-get carriage-doc-state--overlay 'display)))
-    (should (> (length (string-trim (overlay-get carriage-doc-state--overlay 'display))) 0)))))
+    (should (> (length (string-trim (overlay-get carriage-doc-state--overlay 'display))) 0))))
 
 (provide 'carriage-doc-state-save-tests)
 ;;; carriage-doc-state-save-tests.el ends here

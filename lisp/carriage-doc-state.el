@@ -362,7 +362,8 @@ Never signals."
 Best-effort: invalid/unreadable state results in no changes (defaults remain)."
   (with-current-buffer (or buffer (current-buffer))
     (let ((pl (ignore-errors (carriage-doc-state-read (current-buffer)))))
-      (when (and (listp pl) (plist-member pl :CAR_MODE))
+      (when (and (listp pl) (plist-member pl :CAR_MODE)
+                 (carriage-doc-state--bool (plist-get pl :CAR_MODE)))
         ;; Never toggle carriage-mode here; just restore variables.
         (carriage-doc-state--apply-if-bound 'carriage-mode-intent  (plist-get pl :CAR_INTENT))
         (carriage-doc-state--apply-if-bound 'carriage-mode-suite   (plist-get pl :CAR_SUITE))
@@ -419,7 +420,7 @@ Invalid/unreadable state is ignored."
     (let ((pl (ignore-errors (carriage-doc-state-read (current-buffer)))))
       (when (and (listp pl)
                  (plist-member pl :CAR_MODE)
-                 (plist-get pl :CAR_MODE)
+                 (carriage-doc-state--bool (plist-get pl :CAR_MODE))
                  (fboundp 'carriage-mode)
                  (boundp 'carriage-mode)
                  (not (bound-and-true-p carriage-mode)))
@@ -467,8 +468,19 @@ Must be a no-op when `carriage-doc-state-save-on-save' is nil."
    (t (format "%s" v))))
 
 (defun carriage-doc-state--bool (v)
-  "Normalize V into boolean."
-  (and v (not (eq v :json-false))))
+  "Normalize V into boolean (accept symbol/string/number/json false)."
+  (cond
+   ((or (null v) (eq v :json-false)) nil)
+   ((eq v t) t)
+   ((numberp v) (not (zerop v)))
+   ((symbolp v) (memq v '(t yes on true)))
+   ((stringp v)
+    (let ((s (downcase (string-trim v))))
+      (cond
+       ((member s '("t" "true" "yes" "on" "1")) t)
+       ((member s '("nil" "false" "no" "off" "0" "")) nil)
+       (t t))))
+   (t t)))
 
 (defun carriage-doc-state--important-plist (pl)
   "Extract a stable \"response/context-shaping\" subset of PL for summary rendering.
@@ -534,18 +546,16 @@ default to enabled."
     (error fallback)))
 
 (defun carriage-doc-state--badge (s &optional face)
-  "Build a small badge string S with FACE.
+  "Build a small segment string S with FACE (no brackets).
 
 Important: preserve any existing face/font properties on S (e.g. all-the-icons).
-We apply FACE to the bracket chrome, and for the content we only apply FACE to
-runs that have no explicit `face' property, so icon glyphs keep their font/face."
+We apply FACE only to runs that have no explicit `face' property, so icon glyphs
+keep their font/face."
   (let* ((content (cond
-                   ((null s) "-")
+                   ((null s) "")
                    ((stringp s) s)
                    (t (format "%s" s))))
-         (content2 (if (stringp content) (copy-sequence content) content))
-         (lb (if face (propertize "[" 'face face) "["))
-         (rb (if face (propertize "]" 'face face) "]")))
+         (content2 (if (stringp content) (copy-sequence content) content)))
     (when (and face (stringp content2))
       (let ((i 0)
             (len (length content2)))
@@ -555,15 +565,19 @@ runs that have no explicit `face' property, so icon glyphs keep their font/face.
             (unless f
               (put-text-property i next 'face face content2))
             (setq i next)))))
-    (concat lb content2 rb)))
+    content2))
 
 (defun carriage-doc-state--ctx-flag-badge (label on &optional icon-key)
-  "Badge for a context source flag."
-  (let* ((ic (and icon-key (carriage-doc-state--ui-icon icon-key nil)))
-         ;; Important: preserve icon text-properties (all-the-icons).
-         (name (if ic (concat ic label) label))
-         (face (if on 'success 'shadow)))
-    (carriage-doc-state--badge name face)))
+  "Return icon-only badge for a context flag when ON; hide when OFF.
+
+- When ON and an icon is available for ICON-KEY, return that icon (no label).
+- When ON but no icon is available, fall back to LABEL (text).
+- When OFF (nil), return nil (do not show a disabled toggle at all)."
+  (when on
+    (let* ((ic (and icon-key (carriage-doc-state--ui-icon icon-key nil)))
+           ;; Icons keep their own face; for fallback text we apply a visible face.
+           (name (or ic label)))
+      (carriage-doc-state--badge name 'mode-line-emphasis))))
 
 (defun carriage-doc-state--summary-string (pl)
   "Return compact summary string (badges/icons) for CARRIAGE_STATE plist PL."
@@ -597,18 +611,27 @@ runs that have no explicit `face' property, so icon glyphs keep their font/face.
          (ctx-b (string-join
                  (delq nil
                        (list
-                        (carriage-doc-state--ctx-flag-badge "Doc" ctx-doc)
-                        (carriage-doc-state--ctx-flag-badge "Gpt" ctx-gptel)
-                        (carriage-doc-state--ctx-flag-badge "Vis" ctx-vis)
+                        (carriage-doc-state--ctx-flag-badge "Doc" ctx-doc 'files)
+                        (carriage-doc-state--ctx-flag-badge "Gpt" ctx-gptel 'ctx)
+                        (carriage-doc-state--ctx-flag-badge "Vis" ctx-vis 'visible)
                         (when (plist-member imp :CAR_CTX_PATCHED)
-                          (carriage-doc-state--ctx-flag-badge "Pat" ctx-patched))))
+                          (carriage-doc-state--ctx-flag-badge "Pat" ctx-patched 'patched))))
                  " "))
          (scope-b (when (and scope (not (eq scope nil)))
-                    (carriage-doc-state--badge (format "%s" scope) 'shadow)))
+                    (carriage-doc-state--badge
+                     (concat (or (carriage-doc-state--ui-icon 'scope nil) "")
+                             (carriage-doc-state--as-string scope))
+                     'shadow)))
          (profile-b (when (and profile (not (eq profile nil)))
-                      (carriage-doc-state--badge (format "%s" profile) 'shadow)))
+                      (carriage-doc-state--badge
+                       (concat (or (carriage-doc-state--ui-icon 'profile nil) "")
+                               (carriage-doc-state--as-string profile))
+                       'shadow)))
          (inj-b (when (and inj (not (eq inj nil)))
-                  (carriage-doc-state--badge (format "%s" inj) 'shadow))))
+                  (carriage-doc-state--badge
+                   (concat (or (carriage-doc-state--ui-icon 'inject nil) "")
+                           (carriage-doc-state--as-string inj))
+                   'shadow))))
     (string-join (delq nil (list intent-b suite-b model-b ctx-b scope-b profile-b inj-b)) " ")))
 
 (defun carriage-doc-state--tooltip-string (pl)

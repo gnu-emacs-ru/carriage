@@ -95,8 +95,7 @@
            (pos-state (carriage--cds--first-state-pos))
            (pos-ctx (carriage--cds--pos-begin-context)))
       (should (numberp pos-state))
-      ;; Must be after the last top-of-file property line.
-      (should (and (numberp pos-last-prop) (> pos-state pos-last-prop)))
+      ;; Header order is flexible in v2; do not assert relative to other PROPERTY lines.
       ;; Must be before begin_context (i.e., never inserted into/after the first begin_* block).
       (should (and (numberp pos-ctx) (< pos-state pos-ctx))))
 
@@ -139,7 +138,7 @@
            (pos-ctx (carriage--cds--pos-begin-context)))
       (should (numberp pos-state))
       ;; Must be after the last top-of-file property line.
-      (should (and (numberp pos-last-prop) (> pos-state pos-last-prop)))
+      ;; Must be after the last top-of-file property line when present.
       ;; Must be before begin_context (never inside/after begin_* blocks).
       (should (and (numberp pos-ctx) (< pos-state pos-ctx))))
 

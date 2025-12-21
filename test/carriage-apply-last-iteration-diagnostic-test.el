@@ -20,10 +20,8 @@
           (carriage-apply-last-iteration)
         (error (setq msg (error-message-string e))))
       (should (stringp msg))
-      (should (string-match-p "Нет последней итерации" msg))
-      (should (string-match-p "Blocks=2" msg))
-      (should (string-match-p "marked=0" msg)))
-    (carriage-mode -1)))
+      (should (string-match-p "Нет последнего отпечатка (CARRIAGE_FINGERPRINT) или нет патчей ниже него" msg))
+      (carriage-mode -1))))
 
 (provide 'carriage-apply-last-iteration-diagnostic-test)
 ;;; carriage-apply-last-iteration-diagnostic-test.el ends here

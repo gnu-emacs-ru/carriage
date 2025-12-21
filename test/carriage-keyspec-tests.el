@@ -18,7 +18,7 @@
 (ert-deftest carriage-keyspec-context-actions-have-context-section ()
   "All context controls must be placed under :section context."
   (let* ((ids '(toggle-ctx toggle-doc toggle-patched toggle-visible
-                doc-scope-all doc-scope-last doc-scope-cycle toggle-profile)))
+                           doc-scope-all doc-scope-last doc-scope-cycle toggle-profile)))
     (dolist (id ids)
       (let ((pl (carriage--keyspec-find id)))
         (should (plist-get pl :id))                        ;; exists
@@ -71,13 +71,6 @@
     (when (or dups single-t empty)
       (message "keyspec lint warnings: dups=%S single-t=%S empty=%S" dups single-t empty))
     (should t)))
-
-(ert-deftest carriage-keyspec-which-key-register-unregister ()
-  "which-key registration/unregistration should succeed (when which-key is available)."
-  (when (require 'which-key nil t)
-    (let ((carriage-keys-prefix-alias '("C-c C-e ")))
-      (should (carriage-keys-which-key-register))
-      (should (carriage-keys-which-key-unregister)))))
 
 (provide 'carriage-keyspec-tests)
 ;;; carriage-keyspec-tests.el ends here

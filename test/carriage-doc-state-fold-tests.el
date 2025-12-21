@@ -18,6 +18,7 @@
 (ert-deftest carriage-doc-state/fold-state-reveal-hide ()
   (with-temp-buffer
     (org-mode)
+    (setq-local carriage-state-badge-overlay-minimal nil)
     (insert "* H\n")
     (insert "#+PROPERTY: CARRIAGE_STATE (:CAR_INTENT Ask :CAR_SUITE org :CAR_MODEL \"gpt-4.1\" :CAR_CTX_DOC t :CAR_CTX_GPTEL nil :CAR_CTX_VISIBLE nil :CAR_CTX_MAX_FILES 10 :CAR_CTX_MAX_BYTES 12345)\n")
     (goto-char (point-max))
@@ -48,7 +49,8 @@
       (should (stringp disp))
       (should (string-match-p "gpt-4\\.1" disp))
       (should-not (string-match-p "\\borg\\b" disp))
-      (should-not (string-match-p "\\bDoc\\b\\|\\bGpt\\b\\|\\bVis\\b\\|\\bPat\\b" disp)))
+      (let ((case-fold-search nil))
+        (should-not (string-match-p "\\bDoc\\b\\|\\bGpt\\b\\|\\bVis\\b\\|\\bPat\\b" disp))))
 
     ;; Reveal on the line (point inside).
     (goto-char (point-min))

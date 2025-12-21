@@ -24,12 +24,31 @@
     (carriage-doc-state-summary-enable)
 
     ;; Folded away from the line.
-    (let ((ov (carriage-test--ov-at-line-containing "CARRIAGE_STATE")))
+    (let* ((ov (carriage-test--ov-at-line-containing "CARRIAGE_STATE"))
+           (disp (and (overlayp ov) (overlay-get ov 'display)))
+           (he   (and (overlayp ov) (overlay-get ov 'help-echo))))
       (should (overlayp ov))
-      (should (stringp (overlay-get ov 'display)))
-      (should (> (length (string-trim (overlay-get ov 'display))) 0))
-      (should (string-match-p "CARRIAGE_STATE" (overlay-get ov 'help-echo)))
-      (should (string-match-p "MAX_FILES\\|max-files\\|max-files" (overlay-get ov 'help-echo))))
+      (should (stringp disp))
+      (should (> (length (string-trim disp)) 0))
+      ;; Default (non-minimal) should include more than just model: suite + ctx badges.
+      (should (string-match-p "\\borg\\b" disp))
+      (should (string-match-p "\\bDoc\\b\\|\\bGpt\\b\\|\\bVis\\b\\|\\bPat\\b" disp))
+      ;; Tooltip contains budgets.
+      (should (string-match-p "CARRIAGE_STATE" he))
+      (should (string-match-p "MAX_FILES\\|max-files\\|max-files" he)))
+
+    ;; Now enable minimal badge for state: should collapse to model-only.
+    (setq-local carriage-state-badge-overlay-minimal t)
+    (carriage-doc-state-summary-refresh (current-buffer))
+    (goto-char (point-max))
+    (run-hooks 'post-command-hook)
+    (let* ((ov (carriage-test--ov-at-line-containing "CARRIAGE_STATE"))
+           (disp (and (overlayp ov) (overlay-get ov 'display))))
+      (should (overlayp ov))
+      (should (stringp disp))
+      (should (string-match-p "gpt-4\\.1" disp))
+      (should-not (string-match-p "\\borg\\b" disp))
+      (should-not (string-match-p "\\bDoc\\b\\|\\bGpt\\b\\|\\bVis\\b\\|\\bPat\\b" disp)))
 
     ;; Reveal on the line (point inside).
     (goto-char (point-min))

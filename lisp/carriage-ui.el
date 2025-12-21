@@ -1397,7 +1397,7 @@ Strategy:
             (last-pos nil))
         (save-excursion
           (goto-char (point-min))
-          (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b" nil t)
+          (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:" nil t)
             (setq last-pos (line-beginning-position))))
         (let ((found
                (when (numberp last-pos)

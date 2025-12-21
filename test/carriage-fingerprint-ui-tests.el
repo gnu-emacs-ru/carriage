@@ -52,7 +52,23 @@
              (disp (and ov (overlay-get ov 'display))))
         (should (overlayp ov))
         (should (stringp disp))
-        (should (> (length (string-trim disp)) 0)))
+        (should (> (length (string-trim disp)) 0))
+        ;; Default (non-minimal) should include suite + ctx badges (not only model).
+        (should (string-match-p "\\budiff\\b" disp))
+        (should (string-match-p "\\bDoc\\b\\|\\bGpt\\b\\|\\bVis\\b\\|\\bPat\\b" disp)))
+
+      ;; Minimal mode for fingerprint: collapse to model-only.
+      (setq-local carriage-fingerprint-badge-overlay-minimal t)
+      (carriage-doc-state-summary-refresh (current-buffer))
+      (goto-char (point-max))
+      (run-hooks 'post-command-hook)
+      (let* ((ovm (carriage--fp--first-overlay-at pos))
+             (dispm (and ovm (overlay-get ovm 'display))))
+        (should (overlayp ovm))
+        (should (stringp dispm))
+        (should (string-match-p "gpt-4o-mini" dispm))
+        (should-not (string-match-p "\\budiff\\b" dispm))
+        (should-not (string-match-p "\\bDoc\\b\\|\\bGpt\\b\\|\\bVis\\b\\|\\bPat\\b" dispm)))
 
       ;; Move point onto the fingerprint line → reveal (display=nil).
       (goto-char pos)

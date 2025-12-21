@@ -24,6 +24,7 @@
 ;; - UI: folded summary uses overlay 'display (no invisible/before-string); reveal on point.
 ;;
 ;;; Code:
+;; Display-based fold: overlays show badges when cursor is away; reveal original when cursor enters the line.
 
 (require 'cl-lib)
 (require 'subr-x)
@@ -60,6 +61,18 @@ Behavior:
 (defcustom carriage-doc-state-summary-debounce-seconds 0.15
   "Idle debounce (seconds) for refreshing CARRIAGE_STATE summary overlay after edits."
   :type 'number
+  :group 'carriage-doc-state)
+
+(defcustom carriage-state-badge-overlay-minimal nil
+  "When non-nil, render CARRIAGE_STATE fold badge in minimal form (model only).
+When nil (default), render a richer badge (suite/model/context toggles, etc.)."
+  :type 'boolean
+  :group 'carriage-doc-state)
+
+(defcustom carriage-fingerprint-badge-overlay-minimal nil
+  "When non-nil, render CARRIAGE_FINGERPRINT fold badge in minimal form (model only).
+When nil (default), render a richer badge (suite/model/context toggles, etc.)."
+  :type 'boolean
   :group 'carriage-doc-state)
 
 (defvar-local carriage-doc-state--overlay nil
@@ -725,24 +738,36 @@ Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tes
           (carriage-doc-state--fold--ov-set-folded ov))))))
 
 (defun carriage-doc-state--fold--maybe-summary-from-plist (pl kind)
-  "Render summary badges from PL. KIND is a symbol: state|fingerprint."
+  "Render summary badges from PL for KIND ('state or 'fingerprint).
+
+By default, renders a \"rich\" badge (suite/model/context toggles, etc.).
+When minimal mode is enabled for the given KIND, renders only the model badge."
   (let* ((pl2 (if (fboundp 'carriage-doc-state--important-plist)
                   (carriage-doc-state--important-plist pl)
                 pl))
-         ;; Prefer a dedicated UI renderer if it exists; otherwise fallback.
-         (summary
-          (cond
-           ((and (fboundp 'carriage-ui--render-doc-state-summary)
-                 (ignore-errors (require 'carriage-ui nil t)))
-            (or (ignore-errors (carriage-ui--render-doc-state-summary pl2))
-                "Carriage"))
-           ((fboundp 'carriage-doc-state--summary-fallback)
-            (carriage-doc-state--summary-fallback pl2))
-           (t
-            (format "%s" (or (plist-get pl2 :CAR_MODEL)
-                             (plist-get pl2 :CAR_INTENT)
-                             kind))))))
-    (or summary (format "%s" kind))))
+         ;; Global minimal toggle (when present) overrides per-kind settings.
+         (global-min (and (boundp 'carriage-badge-overlay-minimal)
+                          carriage-badge-overlay-minimal))
+         (kind-min
+          (pcase kind
+            ('state (and (boundp 'carriage-state-badge-overlay-minimal)
+                         carriage-state-badge-overlay-minimal))
+            ('fingerprint (and (boundp 'carriage-fingerprint-badge-overlay-minimal)
+                               carriage-fingerprint-badge-overlay-minimal))
+            (_ nil)))
+         (minimal (or global-min kind-min))
+         (backend (carriage-doc-state--as-symbol (plist-get pl2 :CAR_BACKEND)))
+         (provider (carriage-doc-state--as-string (plist-get pl2 :CAR_PROVIDER)))
+         (model (carriage-doc-state--as-string (plist-get pl2 :CAR_MODEL)))
+         (model-ic (carriage-doc-state--ui-icon 'model nil))
+         (model-b (carriage-doc-state--badge
+                   (concat (or model-ic "")
+                           (carriage-doc-state--llm-display-name backend provider model))
+                   'mode-line-emphasis)))
+    (if minimal
+        model-b
+      ;; Rich badge: keep a single source of truth for both state and fingerprint.
+      (carriage-doc-state--summary-string pl2))))
 
 (defun carriage-doc-state--fold--tooltip (raw-line pl kind)
   "Build tooltip text for RAW-LINE + PL."

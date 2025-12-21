@@ -1618,7 +1618,7 @@ May include :context-text and :context-target per v1.1."
                    (let ((last nil)
                          (case-fold-search t))
                      (goto-char (point-min))
-                     (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:\\b" nil t)
+                     (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:" nil t)
                        (setq last (line-beginning-position)))
                      last)))
          (plan (when (numberp fp-pos)

@@ -51,10 +51,6 @@
 ;; Register abort handler provided by async apply pipeline (declared in carriage-mode).
 (declare-function carriage-register-abort-handler "carriage-mode" (fn))
 
-(defcustom carriage-apply-require-wip-branch nil
-  "DEPRECATED (v1.1). Legacy sync-only WIP switch. Async path uses carriage-git-branch-policy.
-When non-nil, ensure and checkout WIP branch before applying a plan (sync apply only)."
-  :type 'boolean :group 'carriage)
 
 (defcustom carriage-allow-apply-on-wip nil
   "When non-nil, allow applying patches while on WIP/ephemeral branches.
@@ -79,6 +75,21 @@ If threads are unavailable or in batch mode, falls back to synchronous execution
 Interactive sessions SHOULD prefer the async path; this setting caps residual sync waits."
   :type 'integer :group 'carriage)
 
+(defcustom carriage-apply-applied-block-policy 'annotate
+  "Policy for post-apply handling of successfully applied #+begin_patch blocks:
+- 'annotate — do not remove the block; annotate its header with :applied t and metadata.
+- 'none     — do nothing (no document edits).
+
+Note: Regardless of policy, pipeline reports remain unchanged (side-effect-only)."
+  :type '(choice (const annotate) (const none))
+  :group 'carriage)
+
+(defcustom carriage-apply-strip-body-on-annotate nil
+  "When non-nil and policy='annotate, clear the body of applied #+begin_patch blocks,
+leaving an empty block with an annotated header."
+  :type 'boolean
+  :group 'carriage)
+
 (defun carriage--report-ok (op &rest kv)
   "Build ok report alist with OP and extra KV plist."
   (append (list :op op :status 'ok) kv))
@@ -95,6 +106,78 @@ Interactive sessions SHOULD prefer the async path; this setting caps residual sy
   "Default maximum number of SRE preview chunks when Customize is not loaded.")
 
 ;;; Plan-level pipeline
+
+(defun carriage--post-apply-handle-applied-blocks (report)
+  "Dispatch post-apply block handling per `carriage-apply-applied-block-policy'."
+  (pcase carriage-apply-applied-block-policy
+    ('annotate (ignore-errors (carriage--annotate-applied-blocks-in-report report)))
+    (_ nil)))
+
+(defun carriage--annotate-applied-blocks-in-report (report)
+  "Best-effort: annotate source begin_patch blocks from REPORT with :applied t and metadata.
+When `carriage-apply-strip-body-on-annotate' is non-nil, clear the body between begin/end.
+Side-effect-only; never alters REPORT (REQ-apply-010)."
+  (let ((items (plist-get report :items))
+        (ts (format-time-string "%Y-%m-%d %H:%M")))
+    (dolist (row items)
+      (when (eq (plist-get row :status) 'ok)
+        (let* ((plan (plist-get row :_plan))
+               (buf (and plan (carriage--plan-get plan :_buffer)))
+               (mb  (and plan (carriage--plan-get plan :_beg-marker)))
+               (me  (and plan (carriage--plan-get plan :_end-marker))))
+          (when (and (bufferp buf) (markerp mb) (markerp me)
+                     (eq (marker-buffer mb) buf)
+                     (eq (marker-buffer me) buf))
+            (with-current-buffer buf
+              (let ((inhibit-read-only t))
+                (save-excursion
+                  (goto-char (marker-position mb))
+                  (let ((line (buffer-substring-no-properties (line-beginning-position)
+                                                              (line-end-position))))
+                    (when (string-match "\\`[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*\\'" line)
+                      (let* ((sexp-str (match-string 1 line))
+                             (plist    (condition-case _e
+                                           (car (read-from-string sexp-str))
+                                         (error nil)))
+                             (plist    (if (listp plist) plist '()))
+                             (plist    (plist-put plist :applied t))
+                             (plist    (plist-put plist :applied_at ts))
+                             (plist    (let ((eng (plist-get row :engine)))
+                                         (if eng (plist-put plist :engine eng) plist)))
+                             (plist    (let ((res (plist-get row :details)))
+                                         (if (and (stringp res) (not (string-empty-p res)))
+                                             (plist-put plist :result res) plist)))
+                             (plist    (let ((m (plist-get row :matches)))
+                                         (if (numberp m) (plist-put plist :matches m) plist)))
+                             (plist    (let ((b (plist-get row :changed-bytes)))
+                                         (if (numberp b) (plist-put plist :bytes b) plist)))
+                             (new-hdr  (concat "#+begin_patch " (prin1-to-string plist))))
+                        ;; Rewrite header line
+                        (delete-region (line-beginning-position) (line-end-position))
+                        (insert new-hdr)
+                        ;; Optionally clear body between begin/end (keep markers stable)
+                        (when carriage-apply-strip-body-on-annotate
+                          (let ((beg (save-excursion (forward-line 1) (point)))
+                                (end (save-excursion
+                                       (goto-char (marker-position me))
+                                       (line-beginning-position))))
+                            (when (< beg end)
+                              (delete-region beg end))))
+                        ;; Immediately enable+refresh patch-fold overlays (hide applied content)
+                        (when (and (boundp 'carriage-mode-hide-applied-patches)
+                                   carriage-mode-hide-applied-patches
+                                   (require 'carriage-patch-fold nil t))
+                          (ignore-errors (carriage-patch-fold-enable (current-buffer)))
+                          (ignore-errors (carriage-patch-fold-refresh)))))))
+                ;; If point is inside the applied block, move it to the next line after it.
+                (let ((pt (point)))
+                  (when (and (numberp pt)
+                             (>= pt (marker-position mb))
+                             (<= pt (marker-position me)))
+                    (goto-char (marker-position me))
+                    (forward-line 1)
+                    (beginning-of-line))))))))))
+  t)
 
 
 (defun carriage--op-rank (op)
@@ -286,10 +369,6 @@ Return report alist:
 (defun carriage-apply-plan (plan repo-root)
   "Apply PLAN (list of plan items) under REPO-ROOT sequentially.
 Stops on first failure. Returns report alist as in carriage-dry-run-plan."
-  ;; Ensure WIP branch if policy enabled (legacy; branch-policy orchestration evolves in async path)
-  (when carriage-apply-require-wip-branch
-    (carriage-git-ensure-repo repo-root)
-    (carriage-git-checkout-wip repo-root))
   (let* ((sorted (carriage--plan-sort plan))
          (items '())
          (ok 0) (fail 0) (skip 0)
@@ -358,8 +437,8 @@ Stops on first failure. Returns report alist as in carriage-dry-run-plan."
               (when (> total 0)
                 (message "Carriage: applied OK (%d items) — created:%d modified:%d deleted:%d renamed:%d — %s"
                          total created modified deleted renamed files-str)))))
-        ;; Replace successfully applied blocks with #+patch_done markers when enabled (sync path; also on partial success)
-        (ignore-errors (carriage--replace-applied-blocks-in-report report))
+        ;; Annotate successfully applied patch blocks (policy='annotate) or skip (policy='none) (sync path; also on partial success)
+        (ignore-errors (carriage--post-apply-handle-applied-blocks report))
         report))))
 
 (defun carriage--make-apply-state (queue repo-root)
@@ -439,78 +518,7 @@ Stops on first failure. Returns report alist as in carriage-dry-run-plan."
             (message "Carriage: applied OK (%d items) — created:%d modified:%d deleted:%d renamed:%d — %s"
                      total created modified deleted renamed files-str)))))))
 
-(defun carriage--replace-applied-blocks-in-report (report)
-  "Replace successfully applied patch blocks in their source buffers with #+patch_done markers.
-Respects per-buffer toggle `carriage-mode-replace-applied-blocks' when available."
-  (condition-case err
-      (let* ((items (or (plist-get report :items) '()))
-             (by-buf (make-hash-table :test 'eq)))
-        ;; Collect replacements grouped by buffer
-        (dolist (row items)
-          (when (eq (plist-get row :status) 'ok)
-            (let* ((plan (plist-get row :_plan))
-                   (buf  (and (listp plan) (carriage--plan-get plan :_buffer)))
-                   (mb   (and (listp plan) (carriage--plan-get plan :_beg-marker)))
-                   (me   (and (listp plan) (carriage--plan-get plan :_end-marker))))
 
-              (when (and (bufferp buf) (markerp mb) (markerp me)
-                         (eq (marker-buffer mb) buf)
-                         (eq (marker-buffer me) buf))
-                (let* ((op (plist-get row :op))
-                       (opstr (if (symbolp op) (symbol-name op) (format "%s" op)))
-                       (file (or (plist-get row :file) (plist-get row :path)))
-                       (from (and plan (carriage--plan-get plan :from)))
-                       (to   (and plan (carriage--plan-get plan :to)))
-                       (matches (plist-get row :matches))
-                       (bytes   (plist-get row :changed-bytes))
-                       (ts (format-time-string "%Y-%m-%d %H:%M"))
-                       (details (or (plist-get row :details) "Applied"))
-                       (plist (list :op opstr
-                                    ;; Prefer from/to for rename, path for patch, file otherwise
-                                    ))
-                       (plist (cond
-                               ((string= opstr "rename")
-                                (append plist (list :from (or from "") :to (or to ""))))
-                               ((string= opstr "patch")
-                                (append plist (list :path (or (plist-get row :path) (or file "")))))
-                               (t
-                                (append plist (list :file (or file ""))))))
-                       (plist (if (and (memq op '(sre aibo)) (numberp matches))
-                                  (append plist (list :matches matches))
-                                plist))
-                       (plist (if (and (numberp bytes) (> bytes 0))
-                                  (append plist (list :bytes bytes))
-                                plist))
-                       (plist (append plist (list :ts ts :details details)))
-                       (line (concat "#+patch_done " (prin1-to-string plist) "\n"))
-                       (beg (marker-position mb))
-                       (end (marker-position me))
-                       (cell (gethash buf by-buf '())))
-                  (puthash buf (cons (list :beg beg :end end :text line) cell) by-buf))))))
-        ;; Apply replacements in each buffer (from bottom to top)
-        (maphash
-         (lambda (buf lst)
-           (with-current-buffer buf
-             ;; Check per-buffer toggle, default to t when not bound.
-             (let* ((enabled (if (boundp 'carriage-mode-replace-applied-blocks)
-                                 carriage-mode-replace-applied-blocks
-                               t)))
-               (when enabled
-                 (let ((inhibit-read-only t))
-                   (dolist (it (sort lst (lambda (a b) (> (plist-get a :beg) (plist-get b :beg)))))
-                     (let ((b (plist-get it :beg))
-                           (e (plist-get it :end))
-                           (txt (plist-get it :text)))
-                       (when (and (numberp b) (numberp e) (<= b e) (<= e (point-max)))
-                         (save-excursion
-                           (delete-region b e)
-                           (goto-char b)
-                           (insert txt))))))))))
-         by-buf)
-        t)
-    (error
-     (carriage-log "replace-applied-blocks error: %s" (error-message-string err))
-     nil)))
 
 (defun carriage--apply-run-callback (callback report)
   "Invoke CALLBACK with REPORT on the main thread, if CALLBACK is callable."
@@ -533,8 +541,8 @@ Respects per-buffer toggle `carriage-mode-replace-applied-blocks' when available
                            (or (plist-get sum :fail) 0)))))))
     (carriage--apply-log-summary report)
     (carriage--apply-announce-success report)
-    ;; Replace successfully applied blocks with #+patch_done markers when enabled
-    (ignore-errors (carriage--replace-applied-blocks-in-report report))
+    ;; Annotate successfully applied patch blocks (policy='annotate) or skip (policy='none)
+    (ignore-errors (carriage--post-apply-handle-applied-blocks report))
     (carriage--apply-run-callback callback report)
     report))
 

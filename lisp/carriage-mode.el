@@ -139,11 +139,7 @@
   :type 'boolean :group 'carriage)
 (make-variable-buffer-local 'carriage-mode-confirm-apply)
 
-(defcustom carriage-mode-replace-applied-blocks t
-  "When non-nil, replace successfully applied #+begin_patch … #+end_patch blocks
-with a compact \"#+patch_done ( … )\" marker that summarizes the operation.
-Applies to patch/sre/aibo and file ops (create/delete/rename)."
-  :type 'boolean :group 'carriage)
+
 
 
 (defcustom carriage-mode-use-icons t
@@ -273,6 +269,21 @@ If nil (default v1 behavior), such cases are considered a failure in dry-run."
   "Allow binary patches in :op \"patch\" blocks.
 Note: v1 forbids binary patches; this option remains nil in v1 and is reserved for future versions."
   :type 'boolean :group 'carriage)
+
+(defcustom carriage-mode-require-patch-description t
+  "When non-nil, prompt fragments (sre/aibo/patch) instruct the model to include
+:description \"Короткое описание\" in each #+begin_patch header. Parsers ignore
+unknown keys, so this does not affect apply pipeline semantics."
+  :type 'boolean
+  :group 'carriage)
+
+(defcustom carriage-mode-hide-applied-patches t
+  "When non-nil, automatically fold applied #+begin_patch blocks (:applied t) in Org buffers.
+Folding is UI-only (uses overlays via carriage-patch-fold); it does not modify buffer text.
+Applied patch contents are still excluded from outgoing LLM payloads independently of this setting.
+When a patch is applied and annotated, hiding takes effect immediately (overlays are refreshed)."
+  :type 'boolean
+  :group 'carriage)
 
 (defcustom carriage-commit-default-message "carriage: apply changes"
   "Default commit message used by Commit commands.
@@ -423,7 +434,12 @@ Consults engine capabilities; safe when registry is not yet loaded."
       (ignore-errors (carriage-show-log)))
     (when (and carriage-mode-auto-open-traffic (fboundp 'carriage-show-traffic))
       (ignore-errors (carriage-show-traffic)))
-    (carriage-log "carriage-mode enabled in %s" (buffer-name))))
+    (carriage-log "carriage-mode enabled in %s" (buffer-name))
+    ;; Fold applied patch blocks if enabled
+    (when (and (boundp 'carriage-mode-hide-applied-patches)
+               carriage-mode-hide-applied-patches
+               (require 'carriage-patch-fold nil t))
+      (ignore-errors (carriage-patch-fold-enable)))))
 
 (defun carriage-mode--enable ()
   "Enable Carriage mode in the current buffer (internal)."
@@ -492,6 +508,8 @@ Consults engine capabilities; safe when registry is not yet loaded."
     (setq carriage--emulation-map-alist nil)
     (setq carriage--mode-emulation-map nil)
     (force-mode-line-update t))
+  (when (featurep 'carriage-patch-fold)
+    (ignore-errors (carriage-patch-fold-disable)))
   (carriage-log "carriage-mode disabled in %s" (buffer-name)))
 
 ;;;###autoload
@@ -1207,7 +1225,26 @@ May include :context-text and :context-target per v1.1."
                   (while (re-search-forward "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
                     (delete-region (line-beginning-position)
                                    (min (point-max) (1+ (line-end-position))))
-                    (goto-char (line-beginning-position))))
+                    (goto-char (line-beginning-position)))
+                  ;; Strip applied patch blocks entirely from payload:
+                  ;; detect #+begin_patch with (:applied t) header and remove up to matching #+end_patch.
+                  (goto-char (point-min))
+                  (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
+                    (let* ((line-beg (line-beginning-position))
+                           (sexp-str (match-string 1))
+                           (plist (condition-case _e
+                                      (car (read-from-string sexp-str))
+                                    (error nil))))
+                      (if (and (listp plist) (plist-get plist :applied))
+                          (let ((save-pt (point)))
+                            ;; Find matching end marker; if missing, delete till buffer end.
+                            (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                                (delete-region line-beg (min (point-max) (1+ (line-end-position))))
+                              (progn
+                                (delete-region line-beg (point-max))
+                                (goto-char (point-max)))))
+                        ;; not applied → continue scanning from next line to avoid infinite loops
+                        (goto-char (min (point-max) (1+ (line-end-position))))))))
                 (buffer-substring-no-properties (point-min) (point-max)))))
            (target (if (boundp 'carriage-mode-context-injection)
                        carriage-mode-context-injection
@@ -2360,7 +2397,7 @@ If no begin_context is present, insert a minimal header and block at point-max."
                     ('create (setq created (1+ created)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
                     ('delete (setq deleted (1+ deleted)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
                     ('rename (setq renamed (1+ renamed)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
-                    ((or 'patch 'sre 'aibo 'replace) (setq modified (1+ modified)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
+                    ((or 'patch 'sre 'aibo) (setq modified (1+ modified)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
                     (_ (push (or (plist-get it :file) (plist-get it :path) "-") files)))))
               (let* ((total (length oks))
                      (files-str (mapconcat #'identity (nreverse (delete-dups (delq nil files))) ", ")))

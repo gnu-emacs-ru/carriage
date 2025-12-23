@@ -84,14 +84,14 @@ or the last block in the buffer if none precedes point."
 (make-variable-buffer-local 'carriage-doc-context-scope)
 
 (defcustom carriage-mode-include-patched-files nil
-  "When non-nil, include files referenced by #+patch_done markers in the current buffer into the document context."
+  "When non-nil, include files referenced by applied begin_patch blocks (:applied t) in the current buffer into the document context."
   :type 'boolean
   :group 'carriage-context)
 (make-variable-buffer-local 'carriage-mode-include-patched-files)
 
 ;;;###autoload
 (defun carriage-toggle-include-patched-files ()
-  "Toggle inclusion of files from #+patch_done markers for this buffer."
+  "Toggle inclusion of files referenced by applied begin_patch blocks (:applied t) for this buffer."
   (interactive)
   (setq-local carriage-mode-include-patched-files (not carriage-mode-include-patched-files))
   ;; Invalidate caches so [Ctx:N] and the modeline reflect changes immediately.
@@ -102,18 +102,30 @@ or the last block in the buffer if none precedes point."
   (force-mode-line-update))
 
 (defun carriage-context--patched-files (buffer)
-  "Return list of file paths extracted from #+patch_done markers in BUFFER."
+  "Return list of file paths extracted from applied patches in BUFFER.
+
+Only considers annotated begin_patch blocks with (:applied t ...):
+- op 'patch → take :path
+- op 'sre/'aibo → take :file"
   (with-current-buffer buffer
     (save-excursion
       (goto-char (point-min))
       (let ((case-fold-search t)
             (acc '()))
-        (while (re-search-forward "^[ \t]*#\\+patch_done\\b.*" nil t)
-          (let* ((line (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
-                 (fp (and (string-match ":file[ \t]+\"\\([^\"]+\\)\"" line)
-                          (match-string 1 line))))
-            (when (and fp (stringp fp) (not (string-empty-p fp)))
-              (push fp acc))))
+        (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
+          (let* ((sexp-str (match-string 1))
+                 (plist (condition-case _e
+                            (car (read-from-string sexp-str))
+                          (error nil)))
+                 (applied (and (listp plist) (plist-get plist :applied)))
+                 (op      (and (listp plist) (plist-get plist :op)))
+                 (opstr   (and op (format "%s" op))))
+            (when applied
+              (let* ((is-patch (and opstr (string= (replace-regexp-in-string "^:" "" opstr) "patch")))
+                     (key (if is-patch :path :file))
+                     (val (and (listp plist) (plist-get plist key))))
+                (when (and (stringp val) (not (string-empty-p val)))
+                  (push val acc))))))
         (nreverse (delete-dups acc))))))
 
 ;; Commands to switch scope (used by UI/keyspec)
@@ -921,38 +933,6 @@ Patched files are treated as 'doc' for source classification."
                                (length files) (length items) (length warnings))
         (carriage-context--count-assemble items warnings stats)))))
 
-;; Patched files integration for count badge
-(defun carriage-context--patchdone-files-in-buffer (&optional buffer)
-  "Return repo-relative paths from #+patch_done markers in BUFFER."
-  (with-current-buffer (or buffer (current-buffer))
-    (save-excursion
-      (goto-char (point-min))
-      (let ((case-fold-search t)
-            (paths nil))
-        (while (re-search-forward "^#\\+patch_done\\s-*(\\s-*:op\\s-+\"aibo\"\\s-+:file\\s-+\"\\([^\"]+\\)\"" nil t)
-          (let ((p (match-string 1)))
-            (when (and p (> (length p) 0))
-              (push p paths))))
-        (nreverse (delete-dups paths))))))
-
-(defun carriage-context--advice-count-include-patched (res)
-  "Include patched files count into RES returned by carriage-context-count."
-  (condition-case _err
-      (if (and (boundp 'carriage-mode-include-patched-files)
-               carriage-mode-include-patched-files)
-          (let* ((files (carriage-context--patchdone-files-in-buffer))
-                 (k (length files)))
-            (cond
-             ((numberp res) (+ res k))
-             ((and (consp res) (plist-member res :count))
-              (plist-put res :count (+ (or (plist-get res :count) 0) k)))
-             (t res)))
-        res)
-    (error res)))
-
-;; Ensure advice is active
-(when (fboundp 'carriage-context-count)
-  (advice-add 'carriage-context-count :filter-return #'carriage-context--advice-count-include-patched))
 
 ;; -----------------------------------------------------------------------------
 ;; Context profile (P1/P3) — defaults, setter and toggle

@@ -181,7 +181,7 @@ Returns a plan item alist: (:version \"1\" :op 'patch :strip N :path REL :diff B
   "Prompt fragment for :op patch (unified diff, single file)."
   (concat
    "PATCH (unified diff, single file):\n"
-   "#+begin_patch (:version \"1\" :op \"patch\" :strip 1)\n"
+   "#+begin_patch (:version \"1\" :op \"patch\" :strip 1 :description \"Короткое описание\")\n"
    "--- a/RELATIVE/PATH\n"
    "+++ b/RELATIVE/PATH\n"
    "@@ -N,M +N,M @@\n"

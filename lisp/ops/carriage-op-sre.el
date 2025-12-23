@@ -55,14 +55,15 @@
   "Return prompt fragment for SRE v1 (begin_from/begin_to)."
   (concat
    "SRE (1..N pairs for one file):\n"
-   "#+begin_patch (:version \"1\" :op \"sre\" :file \"RELATIVE/PATH\")\n"
+   "#+begin_patch (:version \"1\" :op \"sre\" :file \"RELATIVE/PATH\" :description \"Короткое описание\")\n"
    "#+pair (:occur all :expect K :match regex) ; optional, applies to the NEXT pair\n"
    "#+begin_from\nFROM text\n#+end_from\n"
    "#+begin_to\nTO text\n#+end_to\n"
    "#+end_patch\n"
    "- For :occur all, :expect is required.\n"
    "- Empty TO block is allowed (delete matched text).\n"
-"- If a line inside a block is exactly \"#+end_from\" or \"#+end_to\", add one leading space to escape it.\n"))
+"- If a line inside a block is exactly \"#+end_from\" or \"#+end_to\", add one leading space to escape it.\n"
+"- When enabled (carriage-mode-require-patch-description=t), include :description in #+begin_patch header.\n"))
 
 ;;;; Internal helpers (SRE core)
 

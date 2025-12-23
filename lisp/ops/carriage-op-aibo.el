@@ -201,7 +201,7 @@ PAIRS — список пар вида ((:from . STR) (:to . STR) (:opts . PLIST
   "Фрагмент промпта для :op aibo (literal-only)."
   (concat
    "AIBO (literal-only, one file):\n"
-   "#+begin_patch (:version \"1\" :op \"aibo\" :file \"RELATIVE/PATH\")\n"
+   "#+begin_patch (:version \"1\" :op \"aibo\" :file \"RELATIVE/PATH\" :description \"Короткое описание\")\n"
    "#+pair (:occur all :expect K) ; optional, applies to the NEXT pair\n"
    "#+begin_from\nFROM text\n#+end_from\n"
    "#+begin_to\nTO text\n#+end_to\n"

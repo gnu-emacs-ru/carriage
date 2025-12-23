@@ -116,6 +116,7 @@ UI/UX
 - Stability: stable
 - Pack-Priority: P2
 - Accessibility: provide help-echo; avoid color-only distinctions.
+- Applied-patch folding: UI MUST fold #+begin_patch blocks annotated with :applied t using a compact overlay that shows only patch metadata (:description or details); clicking toggles visibility. Folding MUST take effect immediately after annotation/apply. Applied patch contents MUST NOT be sent to LLM payloads.
 
 Prompt Guidance
 - Anchor: PRM

@@ -135,8 +135,8 @@ Algorithms
   - Cancel current engine process or timer task; set :aborted; proceed to finish path responsibly.
 - ALG-apply-006: Success announcement and applied-block replacement
   - When fail=0 and interactive session, emit concise summary message.
-  - Optionally replace successfully applied patch blocks in buffers with #+patch_done markers
-    when per-buffer toggle allows; never affects report contents.
+  - Optionally annotate successfully applied patch blocks by adding :applied t metadata
+    to the #+begin_patch header (and optionally strip body per policy); never affects report contents.
 
 Errors and Diagnostics
 - Anchor: ERR

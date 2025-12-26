@@ -26,6 +26,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'carriage-utils)
+(require 'carriage-git)
 (require 'carriage-llm-registry)
 (require 'carriage-perf nil t)
 (require 'carriage-transient-async nil t)
@@ -1311,13 +1312,19 @@ If `vc-mode' provides a branch name, it is used immediately. Heavy fallbacks
 (defun carriage-ui--branch-name-cached ()
   "Return VCS branch name for the current buffer using a lightweight cache.
 Prefers parsing `vc-mode' when available; falls back to git helper rarely.
-Respects `carriage-ui-branch-cache-ttl'."
+Respects `carriage-ui-branch-cache-ttl'. When outside a Git repo, returns :no-git."
   (let* ((ttl carriage-ui-branch-cache-ttl)
          (now (float-time))
          (valid (or (null ttl)
                     (< (- now (or carriage-ui--branch-cache-time 0)) (or ttl 0)))))
     (if (and carriage-ui--branch-cache-string valid)
         carriage-ui--branch-cache-string
+      ;; Fast path: outside git repo → mark and return :no-git without any processes.
+      (when (not (and (fboundp 'carriage-git--repo-present-p)
+                      (carriage-git--repo-present-p default-directory)))
+        (setq carriage-ui--branch-cache-string :no-git
+              carriage-ui--branch-cache-time now)
+        (cl-return-from carriage-ui--branch-name-cached :no-git))
       (let* ((br
               (or
                ;; Try to parse from vc-mode string to avoid processes
@@ -1331,11 +1338,9 @@ Respects `carriage-ui-branch-cache-ttl'."
                  (ignore-errors
                    (when (fboundp 'vc-git--symbolic-branch)
                      (vc-git--symbolic-branch default-directory))))
-               ;; Fallback to our git helper (single process)
+               ;; Fallback to our git helper (single process, robust to non-repo by returning nil)
                (condition-case _e
-                   (progn
-                     (require 'carriage-git)
-                     (carriage-git-current-branch default-directory))
+                   (carriage-git-current-branch default-directory)
                  (error nil)))))
         (setq carriage-ui--branch-cache-string br
               carriage-ui--branch-cache-time now)
@@ -1914,7 +1919,12 @@ Uses pulse.el when available, otherwise temporary overlays."
   "Build Branch segment."
   (let* ((uicons (carriage-ui--icons-available-p))
          (br (carriage-ui--branch-name-cached))
-         (txt (and (stringp br) (not (string-empty-p br)) (format "[%s]" br))))
+         (txt (cond
+               ((eq br :no-git)
+                (propertize "[no-git]" 'face 'carriage-ui-muted-face 'help-echo "Нет Git-репозитория"))
+               ((and (stringp br) (not (string-empty-p br)))
+                (format "[%s]" br))
+               (t nil))))
     (when txt
       (if (and uicons (fboundp 'all-the-icons-octicon))
           (let ((ic (all-the-icons-octicon "git-branch"

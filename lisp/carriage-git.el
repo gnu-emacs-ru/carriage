@@ -177,13 +177,27 @@ TOKEN keys: :engine 'git, :process, :pid, :timer, :stdout-buf, :stderr-buf, :arg
                     "carriage/tmp")))
     (format "%s/%s-%s" prefix (carriage-git--timestamp) (carriage-git--shortid))))
 
+(defun carriage-git--repo-present-p (&optional dir)
+  "Return non-nil when DIR (or `default-directory') is inside a Git repository.
+Uses locate-dominating-file to avoid spawning external processes."
+  (let* ((d (file-name-as-directory (expand-file-name (or dir default-directory)))))
+    (and (not (file-remote-p d))
+         (locate-dominating-file d ".git"))))
+
 (defun carriage-git-current-branch (root)
-  "Return current branch name for repo at ROOT, or nil on error."
+  "Return current branch name for repo at ROOT, or nil when not a repo or on error.
+
+Robust: checks exit status and filters out 'fatal:' messages."
   (condition-case _
       (let ((default-directory (file-name-as-directory (expand-file-name root))))
-        (string-trim (with-temp-buffer
-                       (call-process "git" nil t nil "rev-parse" "--abbrev-ref" "HEAD")
-                       (buffer-string))))
+        (with-temp-buffer
+          (let ((rc (call-process "git" nil t nil "rev-parse" "--abbrev-ref" "HEAD")))
+            (when (and (integerp rc) (zerop rc))
+              (let* ((s (string-trim (buffer-string))))
+                (if (or (string= s "")
+                        (string-prefix-p "fatal:" (downcase s)))
+                    nil
+                  s))))))
     (error nil)))
 
 (defun carriage-git-switch-branch-async (root branch on-done on-fail)

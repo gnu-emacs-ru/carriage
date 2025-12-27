@@ -90,7 +90,18 @@ which-key hints are registered if available."
       ;; Always try to fold CARRIAGE_STATE into summary when present.
       ;; (Works even if carriage-mode isn't enabled; it is just a visual layer.)
       (ignore-errors
-        (carriage-doc-state-hide (current-buffer))))))
+        (carriage-doc-state-hide (current-buffer)))
+      ;; Minimal, safe anti-race: one deferred ensure so late mode-line rewrites
+      ;; (during/after org-mode-hook) don't hide Carriage.
+      (let ((buf (current-buffer)))
+        (run-at-time
+         0 nil
+         (lambda ()
+           (when (buffer-live-p buf)
+             (with-current-buffer buf
+               (when (and (bound-and-true-p carriage-mode)
+                          (fboundp 'carriage-mode--modeline-ensure-once))
+                 (ignore-errors (carriage-mode--modeline-ensure-once buf)))))))))))
 
 (with-eval-after-load 'org
   (add-hook 'org-mode-hook #'carriage-global-mode--maybe-auto-enable-doc-state))

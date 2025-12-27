@@ -317,6 +317,15 @@ These are provided for compatibility and may be removed in a future release."
 (defvar-local carriage--mode-modeline-construct nil
   "The exact modeline construct object inserted by Carriage for later removal.")
 
+(defvar-local carriage--mode-prev-mode-line-format nil
+  "Saved previous value of `mode-line-format' to restore on mode disable.")
+
+(defvar-local carriage--mode-prev-mode-line-format-was-local nil
+  "Non-nil when `mode-line-format' was buffer-local before enabling `carriage-mode'.")
+
+(defvar-local carriage--mode-prev-mode-line-format-saved nil
+  "Non-nil when previous `mode-line-format' snapshot was captured for this buffer.")
+
 (defvar-local carriage--abort-handler nil
   "Buffer-local abort handler function for the current Carriage activity, or nil.
 
@@ -389,6 +398,62 @@ Consults engine capabilities; safe when registry is not yet loaded."
       (unless (member (symbol-name bsym) backs)
         (carriage-llm-register-backend bsym :models (list carriage-mode-model))))))
 
+(defun carriage-mode--modeline--as-list (fmt)
+  "Normalize mode-line format FMT to a list."
+  (cond
+   ((null fmt) '())
+   ((listp fmt) (copy-sequence fmt))
+   (t (list fmt))))
+
+(defun carriage-mode--modeline--insert-visible (ml construct)
+  "Return ML with CONSTRUCT inserted at a likely-visible position.
+
+Insertion order (first available wins):
+- before `mode-line-end-spaces'
+- before `mode-line-modes'
+- before `mode-line-position'
+- before `mode-line-misc-info'
+Fallback:
+- after `mode-line-front-space' when present
+- otherwise at the beginning."
+  (let* ((anchors '(mode-line-end-spaces
+                    mode-line-modes
+                    mode-line-position
+                    mode-line-misc-info))
+         (pos (cl-loop for a in anchors
+                       for p = (cl-position a ml)
+                       when (numberp p) return p)))
+    (cond
+     ((numberp pos)
+      (append (cl-subseq ml 0 pos)
+              (list construct)
+              (nthcdr pos ml)))
+     (t
+      (let ((front (cl-position 'mode-line-front-space ml)))
+        (if (numberp front)
+            (let ((i (1+ front)))
+              (append (cl-subseq ml 0 i)
+                      (list construct)
+                      (nthcdr i ml)))
+          (cons construct ml)))))))
+
+(defun carriage-mode--modeline-ensure-once (&optional buffer)
+  "Ensure Carriage modeline construct is present in BUFFER's `mode-line-format'.
+
+This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and (bound-and-true-p carriage-mode)
+               (boundp 'carriage-mode-show-mode-line-ui)
+               carriage-mode-show-mode-line-ui)
+      (unless carriage--mode-modeline-construct
+        (setq carriage--mode-modeline-construct '(:eval (carriage-ui--modeline))))
+      (let* ((ml (carriage-mode--modeline--as-list mode-line-format)))
+        (unless (memq carriage--mode-modeline-construct ml)
+          (setq-local mode-line-format
+                      (carriage-mode--modeline--insert-visible
+                       ml carriage--mode-modeline-construct))))
+      (force-mode-line-update t))))
+
 (defun carriage-mode--init-ui ()
   "Install header/modeline and key bindings; open optional panels."
   ;; UI (buffer-local, no global effects); respect batch/noninteractive
@@ -399,23 +464,22 @@ Consults engine capabilities; safe when registry is not yet loaded."
       (add-hook 'post-command-hook #'carriage-ui--headerline-post-command nil t)
       (add-hook 'window-scroll-functions #'carriage-ui--headerline-window-scroll nil t))
     (when carriage-mode-show-mode-line-ui
-      ;; Insert modeline segment as a concrete (:eval …) list; avoid global fallback.
+      ;; Minimal & safe policy:
+      ;; - If mode-line was disabled (mode-line-format=nil), show it for this buffer.
+      ;; - Insert Carriage segment at a likely-visible anchor (never blindly append to tail).
+      ;; - Save original mode-line-format and restore it on disable.
+      (unless carriage--mode-prev-mode-line-format-saved
+        (setq carriage--mode-prev-mode-line-format mode-line-format
+              carriage--mode-prev-mode-line-format-was-local (local-variable-p 'mode-line-format)
+              carriage--mode-prev-mode-line-format-saved t))
+      (when (null mode-line-format)
+        (setq-local mode-line-format (default-value 'mode-line-format)))
       (setq carriage--mode-modeline-construct '(:eval (carriage-ui--modeline)))
-      (let* ((ml (if (listp mode-line-format) (copy-sequence mode-line-format) (list mode-line-format)))
-             (present (memq carriage--mode-modeline-construct ml))
-             (pos (and (not present) (cl-position 'mode-line-end-spaces ml))))
-        (setq-local mode-line-format
-                    (cond
-                     (present ml)
-                     (pos (append (cl-subseq ml 0 pos)
-                                  (list carriage--mode-modeline-construct)
-                                  (nthcdr pos ml)))
-                     (t (append ml (list carriage--mode-modeline-construct))))))
-      ;; No global-mode-string fallback: it caused duplicate widgets.
-      (when (fboundp 'carriage-log)
-        (carriage-log "mode-line: segment inserted (present=%s) pos=%s"
-                      (and (memq carriage--mode-modeline-construct mode-line-format) 'yes)
-                      (or (and (boundp 'pos) pos) -1)))
+      (let* ((ml (carriage-mode--modeline--as-list mode-line-format)))
+        (unless (memq carriage--mode-modeline-construct ml)
+          (setq-local mode-line-format
+                      (carriage-mode--modeline--insert-visible
+                       ml carriage--mode-modeline-construct))))
       (force-mode-line-update)))
   (when (require 'carriage-keyspec nil t)
     (carriage-keys-apply-known-keymaps)
@@ -486,13 +550,20 @@ Consults engine capabilities; safe when registry is not yet loaded."
                (timerp carriage-ui--headerline-idle-timer))
       (cancel-timer carriage-ui--headerline-idle-timer))
     (setq carriage-ui--headerline-idle-timer nil)
-    (when (and carriage--mode-modeline-construct
-               (local-variable-p 'mode-line-format))
-      (setq-local mode-line-format
-                  (delq carriage--mode-modeline-construct mode-line-format)))
+    ;; Remove any legacy fallback we might have inserted earlier.
     (when (local-variable-p 'global-mode-string)
       (setq-local global-mode-string
                   (delq carriage--mode-modeline-construct global-mode-string)))
+
+    ;; Restore mode-line-format exactly to what it was before enabling Carriage.
+    (when carriage--mode-prev-mode-line-format-saved
+      (if carriage--mode-prev-mode-line-format-was-local
+          (setq-local mode-line-format carriage--mode-prev-mode-line-format)
+        (kill-local-variable 'mode-line-format))
+      (setq carriage--mode-prev-mode-line-format nil
+            carriage--mode-prev-mode-line-format-was-local nil
+            carriage--mode-prev-mode-line-format-saved nil))
+
     (setq carriage--mode-modeline-construct nil)
     ;; Clear abort handler and stop spinner if running
     (setq carriage--abort-handler nil)

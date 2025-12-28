@@ -579,6 +579,26 @@ keep their font/face."
            (name (or ic label)))
       (carriage-doc-state--badge name 'mode-line-emphasis))))
 
+(defun carriage-doc-state--icon-gap (&optional pixels)
+  "Return a small fixed-size gap for separating an icon and its label.
+Uses `display' spacing in pixels when available; degrades gracefully in TTY."
+  (propertize " " 'display (list 'space :width (cons 'pixels (or pixels 3)))))
+
+(defun carriage-doc-state--ctx-flag-badge-with-label (label on icon-key)
+  "Return \"icon + label\" badge for a context flag when ON; hide when OFF.
+
+- When ON and an icon is available for ICON-KEY, render: ICON + GAP + LABEL.
+- When ON but no icon is available, fall back to LABEL.
+- When OFF (nil), return nil (do not show disabled toggles at all).
+
+Important: use `concat' (not `format') to preserve icon text properties."
+  (when on
+    (let* ((ic (and icon-key (carriage-doc-state--ui-icon icon-key nil)))
+           (lbl (carriage-doc-state--badge label 'mode-line-emphasis)))
+      (if (and (stringp ic) (> (length ic) 0))
+          (concat ic (carriage-doc-state--icon-gap) lbl)
+        lbl))))
+
 (defun carriage-doc-state--summary-string (pl)
   "Return compact summary string (badges/icons) for CARRIAGE_STATE plist PL."
   (let* ((imp (carriage-doc-state--important-plist pl))
@@ -633,6 +653,56 @@ keep their font/face."
                            (carriage-doc-state--as-string inj))
                    'shadow))))
     (string-join (delq nil (list intent-b suite-b model-b ctx-b scope-b profile-b inj-b)) " ")))
+
+(defun carriage-doc-state--summary-string-fingerprint (pl)
+  "Return compact summary string (badges/icons) for CARRIAGE_FINGERPRINT plist PL.
+
+Differs from `carriage-doc-state--summary-string' by rendering context flags as
+\"icon + gap + label\" so icons are always visible before Doc/Pat (and others)."
+  (let* ((imp (carriage-doc-state--important-plist pl))
+         (intent (plist-get imp :CAR_INTENT))
+         (suite  (plist-get imp :CAR_SUITE))
+         (backend (plist-get imp :CAR_BACKEND))
+         (provider (plist-get imp :CAR_PROVIDER))
+         (model (plist-get imp :CAR_MODEL))
+         (ctx-doc (plist-get imp :CAR_CTX_DOC))
+         (ctx-gptel (plist-get imp :CAR_CTX_GPTEL))
+         (ctx-vis (plist-get imp :CAR_CTX_VISIBLE))
+         (ctx-patched (plist-get imp :CAR_CTX_PATCHED))
+         (scope (plist-get imp :CAR_DOC_CTX_SCOPE))
+         (profile (plist-get imp :CAR_CTX_PROFILE))
+         (intent-ic (pcase intent
+                      ('Ask    (carriage-doc-state--ui-icon 'ask "A"))
+                      ('Code   (carriage-doc-state--ui-icon 'patch "C"))
+                      ('Hybrid (carriage-doc-state--ui-icon 'hybrid "H"))
+                      (_       (carriage-doc-state--ui-icon 'ask "A"))))
+         (suite-ic (carriage-doc-state--ui-icon 'suite nil))
+         (model-ic (carriage-doc-state--ui-icon 'model nil))
+         (intent-b (carriage-doc-state--badge (or intent-ic "-") 'mode-line-emphasis))
+         (suite-b  (carriage-doc-state--badge (concat (or suite-ic "") (carriage-doc-state--as-string (or suite "-"))) 'shadow))
+         (model-b  (carriage-doc-state--badge (concat (or model-ic "")
+                                                      (carriage-doc-state--llm-display-name backend provider model))
+                                              'mode-line-emphasis))
+         (ctx-b (string-join
+                 (delq nil
+                       (list
+                        (carriage-doc-state--ctx-flag-badge-with-label "Doc" ctx-doc 'files)
+                        (carriage-doc-state--ctx-flag-badge-with-label "Gpt" ctx-gptel 'ctx)
+                        (carriage-doc-state--ctx-flag-badge-with-label "Vis" ctx-vis 'visible)
+                        (when (plist-member imp :CAR_CTX_PATCHED)
+                          (carriage-doc-state--ctx-flag-badge-with-label "Pat" ctx-patched 'patched))))
+                 " "))
+         (scope-b (when (and scope (not (eq scope nil)))
+                    (carriage-doc-state--badge
+                     (concat (or (carriage-doc-state--ui-icon 'scope nil) "")
+                             (carriage-doc-state--as-string scope))
+                     'shadow)))
+         (profile-b (when (and profile (not (eq profile nil)))
+                      (carriage-doc-state--badge
+                       (concat (or (carriage-doc-state--ui-icon 'profile nil) "")
+                               (carriage-doc-state--as-string profile))
+                       'shadow))))
+    (string-join (delq nil (list intent-b suite-b model-b ctx-b scope-b profile-b)) " ")))
 
 (defun carriage-doc-state--tooltip-string (pl)
   "Return detailed tooltip text for CARRIAGE_STATE plist PL (includes budgets)."
@@ -789,8 +859,10 @@ When minimal mode is enabled for the given KIND, renders only the model badge."
                    'mode-line-emphasis)))
     (if minimal
         model-b
-      ;; Rich badge: keep a single source of truth for both state and fingerprint.
-      (carriage-doc-state--summary-string pl2))))
+      ;; Rich badges: state keeps icon-only ctx flags; fingerprint renders icon+label for ctx flags.
+      (pcase kind
+        ('fingerprint (carriage-doc-state--summary-string-fingerprint pl2))
+        (_            (carriage-doc-state--summary-string pl2))))))
 
 (defun carriage-doc-state--fold--tooltip (raw-line pl kind)
   "Build tooltip text for RAW-LINE + PL."

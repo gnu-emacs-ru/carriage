@@ -1066,6 +1066,42 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                                                    :height carriage-mode-icon-height
                                                    :v-adjust carriage-mode-icon-v-adjust
                                                    :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-cyan-face)))))
+                 ;; Icons for doc-state/fingerprint summary context flags
+                 ;; (used by carriage-doc-state overlay fold badges).
+                 ('files (when (fboundp 'all-the-icons-material)
+                           (all-the-icons-material "featured_play_list"
+                                                   :height carriage-mode-icon-height
+                                                   :v-adjust (- carriage-mode-icon-v-adjust 0.14)
+                                                   :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face)))))
+                 ('ctx (when (fboundp 'all-the-icons-material)
+                         (all-the-icons-material "toc"
+                                                 :height carriage-mode-icon-height
+                                                 :v-adjust (- carriage-mode-icon-v-adjust 0.12)
+                                                 :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face)))))
+                 ('visible (cond
+                            ((fboundp 'all-the-icons-material)
+                             (all-the-icons-material "visibility"
+                                                     :height carriage-mode-icon-height
+                                                     :v-adjust (- carriage-mode-icon-v-adjust 0.12)
+                                                     :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face))))
+                            ((fboundp 'all-the-icons-octicon)
+                             (all-the-icons-octicon "eye"
+                                                    :height carriage-mode-icon-height
+                                                    :v-adjust carriage-mode-icon-v-adjust
+                                                    :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face))))
+                            (t nil)))
+                 ('patched (cond
+                            ((fboundp 'all-the-icons-material)
+                             (all-the-icons-material "code"
+                                                     :height carriage-mode-icon-height
+                                                     :v-adjust (- carriage-mode-icon-v-adjust 0.1)
+                                                     :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face))))
+                            ((fboundp 'all-the-icons-octicon)
+                             (all-the-icons-octicon "checklist"
+                                                    :height carriage-mode-icon-height
+                                                    :v-adjust carriage-mode-icon-v-adjust
+                                                    :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face))))
+                            (t nil)))
                  ;; Additional icons for doc-state badges (scope/profile/injection)
                  ('scope  (when (fboundp 'all-the-icons-material)
                             (all-the-icons-material "layers"

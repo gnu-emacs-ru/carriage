@@ -519,7 +519,7 @@ Hard requirements (Swarm v1):
                   nil)
                  (t
                   (carriage-hub--dispatch proc method path hdrs rest)
-                  (erase-buffer))))))))))))
+                  (erase-buffer)))))))))))
 
 (defun carriage-hub-start ()
   "Start the Hub server."

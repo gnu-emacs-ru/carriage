@@ -484,7 +484,9 @@ Must be a no-op when `carriage-doc-state-save-on-save' is nil."
 
 (defun carriage-doc-state--important-plist (pl)
   "Extract a stable \"response/context-shaping\" subset of PL for summary rendering.
-Budgets are intentionally NOT included in the summary subset (they go to tooltip)."
+Budgets are intentionally NOT included in the summary subset (they go to tooltip).
+
+:CAR_CTX_INJECTION (system/user) больше не показывается в summary (оверлее)."
   (let* ((intent (carriage-doc-state--as-symbol (plist-get pl :CAR_INTENT)))
          (suite (carriage-doc-state--as-symbol (plist-get pl :CAR_SUITE)))
          (backend (carriage-doc-state--as-symbol (plist-get pl :CAR_BACKEND)))
@@ -495,8 +497,7 @@ Budgets are intentionally NOT included in the summary subset (they go to tooltip
          (ctx-vis (carriage-doc-state--bool (plist-get pl :CAR_CTX_VISIBLE)))
          (ctx-patched (carriage-doc-state--bool (plist-get pl :CAR_CTX_PATCHED)))
          (scope (carriage-doc-state--as-symbol (plist-get pl :CAR_DOC_CTX_SCOPE)))
-         (profile (carriage-doc-state--as-symbol (plist-get pl :CAR_CTX_PROFILE)))
-         (inj (carriage-doc-state--as-symbol (plist-get pl :CAR_CTX_INJECTION))))
+         (profile (carriage-doc-state--as-symbol (plist-get pl :CAR_CTX_PROFILE))))
     (list :CAR_INTENT intent
           :CAR_SUITE suite
           :CAR_BACKEND backend
@@ -507,8 +508,7 @@ Budgets are intentionally NOT included in the summary subset (they go to tooltip
           :CAR_CTX_VISIBLE ctx-vis
           :CAR_CTX_PATCHED ctx-patched
           :CAR_DOC_CTX_SCOPE scope
-          :CAR_CTX_PROFILE profile
-          :CAR_CTX_INJECTION inj)))
+          :CAR_CTX_PROFILE profile)))
 
 (defun carriage-doc-state--llm-display-name (backend provider model)
   "Return a compact model label from BACKEND/PROVIDER/MODEL (best-effort)."

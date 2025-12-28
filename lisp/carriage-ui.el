@@ -3078,9 +3078,5 @@ Fingerprint insertion is handled by send commands (carriage-mode) to avoid dupli
 
 ;;; Integrated guards: single inline-id insertion and free cursor during streaming
 
-
-
-
-
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

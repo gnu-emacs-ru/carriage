@@ -1396,6 +1396,79 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
             rest (substring data (match-end 0)))))
     (cons head rest)))
 
+(defun carriage-web--process-filter--append-chunk (chunk)
+  "Append CHUNK to current process buffer."
+  (goto-char (point-max))
+  (insert chunk)
+  (when (stringp chunk)
+    (carriage-web--log "filter: +%d bytes (buf=%d)" (string-bytes chunk) (buffer-size))))
+
+(defun carriage-web--process-filter--bad-request (proc)
+  "Send 400 and close PROC; assumes current buffer is PROC's buffer."
+  (carriage-web--send-json proc "400 Bad Request"
+                           (list :ok json-false :error "bad request" :code "WEB_E_PAYLOAD"))
+  (carriage-web--graceful-close proc)
+  (erase-buffer)
+  t)
+
+(defun carriage-web--process-filter--payload-too-large (proc)
+  "Send 413 and close PROC; assumes current buffer is PROC's buffer."
+  (carriage-web--send-json proc "413 Payload Too Large"
+                           (list :ok json-false :error "payload too large" :code "WEB_E_PAYLOAD"))
+  (carriage-web--graceful-close proc)
+  (erase-buffer)
+  t)
+
+(defun carriage-web--parse-start-line-robust (start)
+  "Parse START line with small normalization fallbacks.
+Returns (METHOD PATH QUERY-ALIST|nil) or nil."
+  (when (stringp start)
+    (let* ((s (string-trim (string-trim-right start "\r+"))))
+      (or (carriage-web--parse-start-line s)
+          (carriage-web--parse-start-line
+           (replace-regexp-in-string "[ \t]+" " " s))
+          ;; Historical fallback kept for behavioral parity with older code.
+          (let* ((start2 (replace-regexp-in-string "[ \t]+HTTP/1\\.[01]\\'" "" s)))
+            (and (not (string= s start2))
+                 (carriage-web--parse-start-line start2)))))))
+
+(defun carriage-web--headers-content-length (hdrs)
+  "Extract numeric Content-Length from HDRS alist, defaulting to 0."
+  (let ((v (assoc-default "content-length" hdrs)))
+    (if v (string-to-number v) 0)))
+
+(defun carriage-web--process-filter--maybe-dispatch (proc)
+  "Try to parse and dispatch a full HTTP request from current buffer.
+Returns non-nil if handled (dispatched or replied with an error).
+Returns nil when more data is needed."
+  (let* ((data (buffer-substring-no-properties (point-min) (point-max)))
+         (pair (carriage-web--split-headers-and-body data))
+         (head (car pair))
+         (rest (cdr pair)))
+    (when head
+      (let* ((lines (split-string head "\r?\n"))
+             (start (string-trim (string-trim-right (car lines) "\r+")))
+             (hdr-lines (cdr lines))
+             (triple (carriage-web--parse-start-line-robust start)))
+        (if (null triple)
+            (carriage-web--process-filter--bad-request proc)
+          (pcase-let* ((`(,method ,path ,q) triple)
+                       (hdrs (carriage-web--parse-headers hdr-lines))
+                       (content-length (carriage-web--headers-content-length hdrs))
+                       (body rest))
+            ;; Reject oversized bodies early based on Content-Length to avoid buffering spikes.
+            (if (and (integerp carriage-web-max-request-bytes)
+                     (> content-length carriage-web-max-request-bytes))
+                (carriage-web--process-filter--payload-too-large proc)
+              ;; Ensure full body before dispatch (if Content-Length > body)
+              (if (> content-length (string-bytes body))
+                  ;; Wait for more data
+                  nil
+                (carriage-web--dispatch-request
+                 proc (list :method method :path path :query q :headers hdrs :body body))
+                (erase-buffer)
+                t))))))))
+
 (defun carriage-web--process-filter (proc chunk)
   (condition-case err
       (with-current-buffer (carriage-web--ensure-client-buffer proc)
@@ -1429,24 +1502,40 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
                                    (content-length (let ((v (assoc-default "content-length" hdrs)))
                                                      (if v (string-to-number v) 0)))
                                    (body rest))
-                        (if (> content-length (string-bytes body))
-                            nil
-                          (carriage-web--dispatch-request
-                           proc (list :method method :path path :query q :headers hdrs :body body))
-                          (erase-buffer)))))
+                        ;; Reject oversized bodies early based on Content-Length to avoid buffering spikes.
+                        (if (and (integerp carriage-web-max-request-bytes)
+                                 (> content-length carriage-web-max-request-bytes))
+                            (progn
+                              (carriage-web--send-json proc "413 Payload Too Large"
+                                                       (list :ok json-false :error "payload too large" :code "WEB_E_PAYLOAD"))
+                              (carriage-web--graceful-close proc)
+                              (erase-buffer))
+                          (if (> content-length (string-bytes body))
+                              nil
+                            (carriage-web--dispatch-request
+                             proc (list :method method :path path :query q :headers hdrs :body body))
+                            (erase-buffer))))))
                 (pcase-let* ((`(,method ,path ,q) triple)
                              (hdrs (carriage-web--parse-headers hdr-lines))
                              (content-length (let ((v (assoc-default "content-length" hdrs)))
                                                (if v (string-to-number v) 0)))
                              (body rest))
-                  ;; Ensure full body before dispatch (if Content-Length > body)
-                  (if (> content-length (string-bytes body))
-                      ;; Wait for more data
-                      nil
-                    ;; Dispatch
-                    (carriage-web--dispatch-request
-                     proc (list :method method :path path :query q :headers hdrs :body body))
-                    (erase-buffer))))))))
+                  ;; Reject oversized bodies early based on Content-Length to avoid buffering spikes.
+                  (if (and (integerp carriage-web-max-request-bytes)
+                           (> content-length carriage-web-max-request-bytes))
+                      (progn
+                        (carriage-web--send-json proc "413 Payload Too Large"
+                                                 (list :ok json-false :error "payload too large" :code "WEB_E_PAYLOAD"))
+                        (carriage-web--graceful-close proc)
+                        (erase-buffer))
+                    ;; Ensure full body before dispatch (if Content-Length > body)
+                    (if (> content-length (string-bytes body))
+                        ;; Wait for more data
+                        nil
+                      ;; Dispatch
+                      (carriage-web--dispatch-request
+                       proc (list :method method :path path :query q :headers hdrs :body body))
+                      (erase-buffer))))))))
     (error
      ;; Robust server: never die on unexpected parse/dispatch errors.
      (carriage-web--log "filter error: %S" err)

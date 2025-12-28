@@ -624,10 +624,19 @@ Important: use `concat' (not `format') to preserve icon text properties."
          ;; IMPORTANT: do not use `format' with icon strings, it drops text properties
          ;; (all-the-icons font/face). Use `concat' to preserve icon properties.
          (intent-b (carriage-doc-state--badge (or intent-ic "-") 'mode-line-emphasis))
-         (suite-b  (carriage-doc-state--badge (concat (or suite-ic "") (carriage-doc-state--as-string (or suite "-"))) 'shadow))
-         (model-b  (carriage-doc-state--badge (concat (or model-ic "")
-                                                      (carriage-doc-state--llm-display-name backend provider model))
-                                              'mode-line-emphasis))
+         (suite-b  (carriage-doc-state--badge
+                    (let ((txt (carriage-doc-state--as-string (or suite "-"))))
+                      (if (and (stringp suite-ic) (> (length suite-ic) 0))
+                          (concat suite-ic (carriage-doc-state--icon-gap) txt)
+                        txt))
+                    'shadow))
+         (model-b  (carriage-doc-state--badge
+                   (let* ((ic (or model-ic ""))
+                          (gap (if (and (stringp ic) (> (length ic) 0))
+                                   (carriage-doc-state--icon-gap)
+                                 "")))
+                     (concat ic gap (carriage-doc-state--llm-display-name backend provider model)))
+                   'mode-line-emphasis))
          (ctx-b (string-join
                  (delq nil
                        (list
@@ -639,18 +648,27 @@ Important: use `concat' (not `format') to preserve icon text properties."
                  " "))
          (scope-b (when (and scope (not (eq scope nil)))
                     (carriage-doc-state--badge
-                     (concat (or (carriage-doc-state--ui-icon 'scope nil) "")
-                             (carriage-doc-state--as-string scope))
+                     (let* ((ic (or (carriage-doc-state--ui-icon 'scope nil) ""))
+                            (gap (if (and (stringp ic) (> (length ic) 0))
+                                     (carriage-doc-state--icon-gap)
+                                   "")))
+                       (concat ic gap (carriage-doc-state--as-string scope)))
                      'shadow)))
          (profile-b (when (and profile (not (eq profile nil)))
                       (carriage-doc-state--badge
-                       (concat (or (carriage-doc-state--ui-icon 'profile nil) "")
-                               (carriage-doc-state--as-string profile))
+                       (let* ((ic (or (carriage-doc-state--ui-icon 'profile nil) ""))
+                              (gap (if (and (stringp ic) (> (length ic) 0))
+                                       (carriage-doc-state--icon-gap)
+                                     "")))
+                         (concat ic gap (carriage-doc-state--as-string profile)))
                        'shadow)))
          (inj-b (when (and inj (not (eq inj nil)))
                   (carriage-doc-state--badge
-                   (concat (or (carriage-doc-state--ui-icon 'inject nil) "")
-                           (carriage-doc-state--as-string inj))
+                   (let* ((ic (or (carriage-doc-state--ui-icon 'inject nil) ""))
+                          (gap (if (and (stringp ic) (> (length ic) 0))
+                                   (carriage-doc-state--icon-gap)
+                                 "")))
+                     (concat ic gap (carriage-doc-state--as-string inj)))
                    'shadow))))
     (string-join (delq nil (list intent-b suite-b model-b ctx-b scope-b profile-b inj-b)) " ")))
 
@@ -679,10 +697,20 @@ Differs from `carriage-doc-state--summary-string' by rendering context flags as
          (suite-ic (carriage-doc-state--ui-icon 'suite nil))
          (model-ic (carriage-doc-state--ui-icon 'model nil))
          (intent-b (carriage-doc-state--badge (or intent-ic "-") 'mode-line-emphasis))
-         (suite-b  (carriage-doc-state--badge (concat (or suite-ic "") (carriage-doc-state--as-string (or suite "-"))) 'shadow))
-         (model-b  (carriage-doc-state--badge (concat (or model-ic "")
-                                                      (carriage-doc-state--llm-display-name backend provider model))
-                                              'mode-line-emphasis))
+         (suite-b  (carriage-doc-state--badge
+                    (let* ((ic (or suite-ic ""))
+                           (gap (if (and (stringp ic) (> (length ic) 0))
+                                    (carriage-doc-state--icon-gap)
+                                  "")))
+                      (concat ic gap (carriage-doc-state--as-string (or suite "-"))))
+                    'shadow))
+         (model-b  (carriage-doc-state--badge
+                   (let* ((ic (or model-ic ""))
+                          (gap (if (and (stringp ic) (> (length ic) 0))
+                                   (carriage-doc-state--icon-gap)
+                                 "")))
+                     (concat ic gap (carriage-doc-state--llm-display-name backend provider model)))
+                   'mode-line-emphasis))
          (ctx-b (string-join
                  (delq nil
                        (list
@@ -694,13 +722,19 @@ Differs from `carriage-doc-state--summary-string' by rendering context flags as
                  " "))
          (scope-b (when (and scope (not (eq scope nil)))
                     (carriage-doc-state--badge
-                     (concat (or (carriage-doc-state--ui-icon 'scope nil) "")
-                             (carriage-doc-state--as-string scope))
+                     (let* ((ic (or (carriage-doc-state--ui-icon 'scope nil) ""))
+                            (gap (if (and (stringp ic) (> (length ic) 0))
+                                     (carriage-doc-state--icon-gap)
+                                   "")))
+                       (concat ic gap (carriage-doc-state--as-string scope)))
                      'shadow)))
          (profile-b (when (and profile (not (eq profile nil)))
                       (carriage-doc-state--badge
-                       (concat (or (carriage-doc-state--ui-icon 'profile nil) "")
-                               (carriage-doc-state--as-string profile))
+                       (let* ((ic (or (carriage-doc-state--ui-icon 'profile nil) ""))
+                              (gap (if (and (stringp ic) (> (length ic) 0))
+                                       (carriage-doc-state--icon-gap)
+                                     "")))
+                         (concat ic gap (carriage-doc-state--as-string profile)))
                        'shadow))))
     (string-join (delq nil (list intent-b suite-b model-b ctx-b scope-b profile-b)) " ")))
 

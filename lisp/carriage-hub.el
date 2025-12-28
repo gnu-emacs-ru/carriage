@@ -73,6 +73,8 @@ This corresponds to Swarm FREEZE proxy-read-timeout-sec (spec/swarm-v1.org#INV).
 (defvar carriage-hub--server nil)
 (defvar carriage-hub--probe-timer nil)
 (defvar carriage-hub--proxy-active 0)
+(defvar carriage-hub--probe-cursor 0
+  "Round-robin cursor for bounded liveness probing.")
 
 (defun carriage-hub--http-date ()
   (format-time-string "%a, %d %b %Y %T GMT" (current-time) t))

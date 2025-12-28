@@ -196,6 +196,80 @@ valid until explicitly invalidated."
   :type '(choice (const :tag "No caching" 0) number (const :tag "Unlimited" nil))
   :group 'carriage-web)
 
+;; Daemon-only background cache refresh (handlers remain cache-only).
+(defvar carriage-web--daemon-sessions-timer nil
+  "Timer that refreshes `carriage-web--sessions-cache' in daemon mode.")
+
+(defun carriage-web--buffer-session-snapshot-fast (buffer)
+  "Build a lightweight snapshot plist for BUFFER (daemon refresh path).
+Must be safe and predictable; avoid heavyweight computations."
+  (with-current-buffer buffer
+    (let* ((id (ignore-errors (carriage-web--buffer-id buffer))))
+      (when (and (stringp id) (> (length id) 0))
+        (let* ((title (or (and buffer-file-name (file-name-nondirectory buffer-file-name))
+                          (buffer-name buffer)))
+               (root  (or (and (fboundp 'carriage-project-root)
+                               (ignore-errors (carriage-project-root)))
+                          default-directory))
+               (project (ignore-errors
+                          (file-name-nondirectory (directory-file-name (or root default-directory)))))
+               (mode  (format "%s" major-mode))
+               (intent (cond
+                        ((and (boundp 'carriage-mode-intent) carriage-mode-intent)
+                         (format "%s" carriage-mode-intent))
+                        (t "Ask")))
+               (suite  (cond
+                        ((and (boundp 'carriage-mode-suite) carriage-mode-suite)
+                         (format "%s" carriage-mode-suite))
+                        (t "udiff")))
+               (engine (carriage-web--buffer-engine-string buffer))
+               (branch nil)
+               (patches-count (ignore-errors (carriage-web--count-patches-in-buffer buffer)))
+               (state (carriage-web--buffer-ui-state buffer)))
+          (list :id id
+                :title title
+                :project project
+                :mode mode
+                :intent intent
+                :suite suite
+                :engine engine
+                :branch branch
+                :ctx (list :count 0)
+                :patches (list :count (or patches-count 0))
+                :state state))))))
+
+(defun carriage-web-daemon-refresh-sessions-cache ()
+  "Refresh daemon sessions cache by scanning buffers (timer-driven; not in handlers)."
+  (when carriage-web-daemon-p
+    (let* ((now (float-time))
+           (snaps
+            (cl-loop for b in (buffer-list)
+                     when (and (buffer-live-p b)
+                               (with-current-buffer b
+                                 ;; Prefer org buffers; agent seeds an org buffer by default.
+                                 (derived-mode-p 'org-mode)))
+                     for s = (ignore-errors (carriage-web--buffer-session-snapshot-fast b))
+                     when s collect s)))
+      (setq carriage-web--sessions-cache (cl-remove-if-not #'identity snaps)
+            carriage-web--sessions-cache-time now))))
+
+(defun carriage-web-daemon-register-buffer-session (&optional buffer)
+  "Ensure daemon sessions cache contains a snapshot for BUFFER (default current)."
+  (when carriage-web-daemon-p
+    (let* ((buf (or buffer (current-buffer)))
+           (snap (and (buffer-live-p buf)
+                      (ignore-errors (carriage-web--buffer-session-snapshot-fast buf)))))
+      (when snap
+        (setq carriage-web--sessions-cache (list snap)
+              carriage-web--sessions-cache-time (float-time))))))
+
+(defun carriage-web-daemon-ensure-sessions-timer ()
+  "Ensure daemon background refresh timer exists (idempotent)."
+  (when carriage-web-daemon-p
+    (unless (timerp carriage-web--daemon-sessions-timer)
+      (setq carriage-web--daemon-sessions-timer
+            (run-at-time 0.5 2.0 (lambda () (ignore-errors (carriage-web-daemon-refresh-sessions-cache))))))))
+
 ;; Simple logger
 (defun carriage-web--log (fmt &rest args)
   (when carriage-web-debug

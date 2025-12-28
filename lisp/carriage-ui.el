@@ -1137,9 +1137,15 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
   (let ((px (or pixels 3)))
     (propertize " " 'display (list 'space :width (cons 'pixels px)))))
 
+(defun carriage-ui--icon-gap (&optional pixels)
+  "Return a small fixed-size gap between an icon and its label.
+
+Uses `display' spacing in pixels when available; degrades gracefully in TTY."
+  (propertize " " 'display (list 'space :width (cons 'pixels (or pixels 4)))))
+
 (defun carriage-ui--hl-build-seg (label icon)
   "Build a segment from LABEL and optional ICON, preserving icon face."
-  (if icon (concat icon " " label) label))
+  (if icon (concat icon (carriage-ui--icon-gap) label) label))
 
 (defun carriage-ui--hl-mute-tail (s)
   "Apply muted face to text after the icon separator.
@@ -1836,7 +1842,7 @@ Uses pulse.el when available, otherwise temporary overlays."
                     (carriage-ui--icon 'suite)))
          (_ (require 'carriage-i18n nil t))
          (label (if icon
-                    (format "%s [%s]" icon suite-str)
+                    (concat icon (carriage-ui--icon-gap) "[" suite-str "]")
                   (let ((name (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
                                   (carriage-i18n :suite) "Suite")))
                     (format "%s: [%s]" name suite-str))))
@@ -1877,7 +1883,7 @@ Uses pulse.el when available, otherwise temporary overlays."
                                       (format "Модель: %s (клик — выбрать)"
                                               (or full-id "-")))))
     (if ic
-        (concat ic " " btn)
+        (concat ic (carriage-ui--icon-gap) btn)
       btn)))
 
 (defun carriage-ui--ml-seg-engine ()
@@ -1910,7 +1916,7 @@ Uses pulse.el when available, otherwise temporary overlays."
                  (carriage-i18n :engine-tooltip))
                 (t "Select apply engine")))
          (label (if icon
-                    (format "%s [%s]" icon engine-str)
+                    (concat icon (carriage-ui--icon-gap) "[" engine-str "]")
                   (let ((name (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
                                   (carriage-i18n :engine-label)
                                 "Engine")))
@@ -1967,7 +1973,7 @@ Uses pulse.el when available, otherwise temporary overlays."
                                            :height carriage-mode-icon-height
                                            :v-adjust carriage-mode-icon-v-adjust
                                            :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-cyan-face)))))
-            (concat ic " " txt))
+            (concat ic (carriage-ui--icon-gap) txt))
         txt))))
 
 (defun carriage-ui--ml-seg-patch ()

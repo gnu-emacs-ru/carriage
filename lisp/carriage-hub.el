@@ -203,19 +203,29 @@ Returns non-nil on 200 OK from /api/health, nil otherwise."
           (error nil))))))
 
 (defun carriage-hub--probe-tick ()
-  "Probe a bounded number of agents and update registry liveness."
+  "Probe a bounded number of agents and update registry liveness.
+
+Uses a round-robin cursor (`carriage-hub--probe-cursor') so all agents get
+probed over time, bounded by `carriage-hub-probe-max-per-interval'."
   (let* ((entries (carriage-swarm-registry-read))
-         (n 0)
-         (maxn (max 1 (or carriage-hub-probe-max-per-interval 12))))
-    (dolist (e entries)
-      (when (< n maxn)
-        (let ((id (alist-get 'id e)))
-          (when (stringp id)
-            (setq n (1+ n))
-            (let ((alive (and (carriage-swarm-registry-agent-alive-p id)
-                              (carriage-hub--agent-health-probe id))))
-              (ignore-errors
-                (carriage-swarm-registry-set-liveness id alive (float-time))))))))))
+         (len (length entries))
+         (maxn (max 1 (or carriage-hub-probe-max-per-interval 12)))
+         (start (if (> len 0) (mod (or carriage-hub--probe-cursor 0) len) 0))
+         (n 0))
+    (when (= len 0)
+      (setq carriage-hub--probe-cursor 0))
+    (while (and (> len 0) (< n (min maxn len)))
+      (let* ((idx (mod (+ start n) len))
+             (e (nth idx entries))
+             (id (alist-get 'id e)))
+        (when (stringp id)
+          (let ((alive (and (carriage-swarm-registry-agent-alive-p id)
+                            (carriage-hub--agent-health-probe id))))
+            (ignore-errors
+              (carriage-swarm-registry-set-liveness id alive (float-time))))))
+      (setq n (1+ n)))
+    (when (> len 0)
+      (setq carriage-hub--probe-cursor (mod (+ start n) len)))))
 
 (defun carriage-hub--html-root ()
   (concat
@@ -497,10 +507,19 @@ Hard requirements (Swarm v1):
             (pcase-let ((`(,method ,path) tr))
               (let ((clen (let ((v (assoc-default "content-length" hdrs)))
                             (if v (string-to-number v) 0))))
-                (if (> clen (string-bytes rest))
-                    nil
+                (cond
+                 ;; Early reject oversized bodies based on Content-Length (avoid buffering spikes).
+                 ((and (integerp carriage-hub-max-request-bytes)
+                       (> clen carriage-hub-max-request-bytes))
+                  (carriage-hub--send-json proc "413 Payload Too Large"
+                                           (list :ok :false :error "payload too large" :code "WEB_E_PAYLOAD"))
+                  (erase-buffer))
+                 ;; Wait for more bytes when body not complete yet.
+                 ((> clen (string-bytes rest))
+                  nil)
+                 (t
                   (carriage-hub--dispatch proc method path hdrs rest)
-                  (erase-buffer))))))))))
+                  (erase-buffer))))))))))))
 
 (defun carriage-hub-start ()
   "Start the Hub server."

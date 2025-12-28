@@ -86,6 +86,35 @@
             (should (string-match-p "WEB_E_AUTH" body))))
       (ignore-errors (carriage-web-stop)))))
 
+(ert-deftest carriage-agent-web--early-reject-oversize-content-length ()
+  "Agent rejects oversized requests based on Content-Length before buffering the body."
+  (require 'carriage-web)
+  (let* ((carriage-web-daemon-p t)
+         (carriage-web-bind "127.0.0.1")
+         (carriage-web-port 0)
+         (carriage-web-auth-token "tok")
+         (carriage-web-max-request-bytes 10)
+         (srv nil))
+    (unwind-protect
+        (progn
+          (setq srv (carriage-web-start))
+          (let* ((port (process-contact srv :service))
+                 (resp (cdr (carriage-agent-test--http
+                             port
+                             (concat
+                              "POST /api/cmd HTTP/1.1\r\n"
+                              "Host: 127.0.0.1\r\n"
+                              "Content-Type: application/json\r\n"
+                              "Content-Length: 999\r\n"
+                              "Connection: close\r\n"
+                              "X-Auth: tok\r\n"
+                              "\r\n"))))
+                 (pair (carriage-agent-test--split-head-body resp))
+                 (body (cdr pair)))
+            (should (string-match-p "413 Payload Too Large" resp))
+            (should (string-match-p "WEB_E_PAYLOAD" body))))
+      (ignore-errors (carriage-web-stop)))))
+
 (ert-deftest carriage-agent-web--sse-cap-enforced ()
   (require 'carriage-web)
   (let* ((carriage-web-daemon-p t)

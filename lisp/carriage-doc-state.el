@@ -582,7 +582,7 @@ keep their font/face."
 (defun carriage-doc-state--icon-gap (&optional pixels)
   "Return a small fixed-size gap for separating an icon and its label.
 Uses `display' spacing in pixels when available; degrades gracefully in TTY."
-  (propertize " " 'display (list 'space :width (cons 'pixels (or pixels 3)))))
+  (propertize " " 'display (list 'space :width (cons 'pixels (or pixels 4)))))
 
 (defun carriage-doc-state--ctx-flag-badge-with-label (label on icon-key)
   "Return \"icon + label\" badge for a context flag when ON; hide when OFF.

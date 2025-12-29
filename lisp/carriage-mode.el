@@ -37,6 +37,7 @@
 (require 'carriage-suite)
 (require 'carriage-sre-core)
 (require 'carriage-doc-state nil t)
+(require 'carriage-reasoning-fold nil t)
 ;; Autoload stub ensures calling carriage-global-mode works even if file isn't loaded yet.
 (require 'carriage-global-mode)
 
@@ -194,6 +195,14 @@
 - 'ignore — do not insert reasoning into the source buffer (still logged)."
   :type '(choice (const block) (const ignore))
   :group 'carriage)
+
+(defcustom carriage-mode-hide-reasoning-blocks t
+  "When non-nil, fold all #+begin_reasoning…#+end_reasoning blocks in Org buffers.
+Folding is UI-only (overlays via `carriage-reasoning-fold') and never modifies text.
+Also folds newly streamed reasoning as early as possible and keeps it folded when completed."
+  :type 'boolean
+  :group 'carriage)
+(make-variable-buffer-local 'carriage-mode-hide-reasoning-blocks)
 
 ;; v1.1 — Context toggles and limits
 (defcustom carriage-mode-include-gptel-context nil
@@ -498,12 +507,21 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
       (ignore-errors (carriage-show-log)))
     (when (and carriage-mode-auto-open-traffic (fboundp 'carriage-show-traffic))
       (ignore-errors (carriage-show-traffic)))
-    (carriage-log "carriage-mode enabled in %s" (buffer-name))
-    ;; Fold applied patch blocks if enabled
-    (when (and (boundp 'carriage-mode-hide-applied-patches)
-               carriage-mode-hide-applied-patches
-               (require 'carriage-patch-fold nil t))
-      (ignore-errors (carriage-patch-fold-enable)))))
+    (carriage-log "carriage-mode enabled in %s" (buffer-name)))
+
+  ;; Folding UI must not depend on keyspec being present/loaded.
+  ;; Fold applied patch blocks if enabled
+  (when (and (boundp 'carriage-mode-hide-applied-patches)
+             carriage-mode-hide-applied-patches
+             (require 'carriage-patch-fold nil t))
+    (ignore-errors (carriage-patch-fold-enable)))
+
+  ;; Fold all reasoning blocks on mode enable (and keep newly streamed ones folded).
+  (when (and (boundp 'carriage-mode-hide-reasoning-blocks)
+             carriage-mode-hide-reasoning-blocks
+             (require 'carriage-reasoning-fold nil t))
+    (ignore-errors (carriage-reasoning-fold-enable))
+    (ignore-errors (carriage-reasoning-fold-hide-all (current-buffer)))))
 
 (defun carriage-mode--enable ()
   "Enable Carriage mode in the current buffer (internal)."
@@ -581,6 +599,8 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
     (force-mode-line-update t))
   (when (featurep 'carriage-patch-fold)
     (ignore-errors (carriage-patch-fold-disable)))
+  (when (featurep 'carriage-reasoning-fold)
+    (ignore-errors (carriage-reasoning-fold-disable)))
   (carriage-log "carriage-mode disabled in %s" (buffer-name)))
 
 ;;;###autoload
@@ -887,7 +907,15 @@ without auto-closing; the end marker is inserted later at tail."
                         (and (markerp carriage--reasoning-tail-marker)
                              (marker-position carriage--reasoning-tail-marker))
                         (and (markerp carriage--stream-end-marker)
-                             (marker-position carriage--stream-end-marker))))))))
+                             (marker-position carriage--stream-end-marker))))
+        ;; Fold as early as possible so users see a compact placeholder by default.
+        ;; Best-effort: do not signal, and do not force-hide when point is inside.
+        (ignore-errors
+          (when (and (boundp 'carriage-mode-hide-reasoning-blocks)
+                     carriage-mode-hide-reasoning-blocks
+                     (require 'carriage-reasoning-fold nil t))
+            (carriage-reasoning-fold-refresh-now (current-buffer))
+            (carriage-reasoning-fold-hide-all (current-buffer))))))))
 
 (defun carriage--reasoning-tail-pos ()
   "Return tail position for inserting #+end_reasoning, or nil."
@@ -977,6 +1005,14 @@ without auto-closing; the end marker is inserted later at tail."
         (when (and (eq skipped 'none) (numberp tailpos))
           (setq end-pos (carriage--reasoning-insert-end-at tailpos))))
       (carriage--reasoning-log-end skipped end-pos beg-pos prev-line))
+    ;; Fold immediately when reasoning is completed (as soon as end marker is received).
+    ;; Respect point: do not force-hide the block containing point.
+    (ignore-errors
+      (when (and (boundp 'carriage-mode-hide-reasoning-blocks)
+                 carriage-mode-hide-reasoning-blocks
+                 (require 'carriage-reasoning-fold nil t))
+        (carriage-reasoning-fold-refresh-now (current-buffer))
+        (carriage-reasoning-fold-hide-all (current-buffer))))
     (setq carriage--reasoning-open nil)
     t))
 
@@ -1045,8 +1081,13 @@ TYPE is either 'text (default) or 'reasoning.
   (when (fboundp 'carriage--preloader-stop)
     (carriage--preloader-stop))
   ;; Fold reasoning now (after the whole response), using recorded begin marker if available.
+  ;; If overlay-based reasoning folding is enabled, it is responsible for folding and we avoid
+  ;; mixing org-fold invisibility with our overlays.
   (when (and (not errorp)
-             (markerp carriage--reasoning-beg-marker))
+             (markerp carriage--reasoning-beg-marker)
+             (not (and (featurep 'carriage-reasoning-fold)
+                       (boundp 'carriage-reasoning-fold--enabled)
+                       (bound-and-true-p carriage-reasoning-fold--enabled))))
     (condition-case _e
         (progn
           (require 'org)

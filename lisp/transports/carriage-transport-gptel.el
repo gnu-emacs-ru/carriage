@@ -255,13 +255,12 @@ Returns cons (UPDATED-SUMMARY . REMAINDER-TEXT-AFTER-HEAD)."
     (carriage-transport-complete t buffer)))
 
 (defun carriage--gptel--cb--ensure-reasoning (gptel-buffer state)
-  "Ensure UI reasoning state on first event. Return updated STATE."
-  (if (plist-get state :first-event)
-      (progn
-        (with-current-buffer gptel-buffer
-          (carriage-ui-set-state 'reasoning))
-        (plist-put state :first-event nil))
-    state))
+  "Ensure UI enters reasoning phase on the first reasoning event. Return updated STATE."
+  (if (plist-get state :reasoning-started)
+      state
+    (with-current-buffer gptel-buffer
+      (carriage-ui-set-state 'reasoning))
+    (plist-put state :reasoning-started t)))
 
 (defun carriage--gptel--cb--ensure-streaming (gptel-buffer state)
   "Ensure streaming state on first event. Return updated STATE."

@@ -28,7 +28,6 @@
            (root (or (and (fboundp 'carriage-project-root) (carriage-project-root))
                      default-directory))
            ;; Construct delta: create a real, repo-relative good path to ensure acceptance
-           (good "tmp-good.el")
            (bad-abs "/etc/passwd")
            (bad-tramp "/ssh:localhost:/etc/hosts"))
       ;; Ensure good file exists under root so normalizer accepts it
@@ -61,7 +60,7 @@
               (should (or (member good lines)
                           (and (listp lines2) (member good lines2))))
               (should-not (member bad-abs (or lines lines2)))
-              (should-not (member bad-tramp (or lines lines2)))))))))) 
+              (should-not (member bad-tramp (or lines lines2))))))))))
 
 (provide 'carriage-ui-assist-delta-normalization-tests)
 ;;; carriage-ui-assist-delta-normalization-tests.el ends here

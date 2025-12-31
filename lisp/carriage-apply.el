@@ -168,15 +168,15 @@ Side-effect-only; never alters REPORT (REQ-apply-010)."
                                    carriage-mode-hide-applied-patches
                                    (require 'carriage-patch-fold nil t))
                           (ignore-errors (carriage-patch-fold-enable (current-buffer)))
-                          (ignore-errors (carriage-patch-fold-refresh)))))))
-                ;; If point is inside the applied block, move it to the next line after it.
-                (let ((pt (point)))
-                  (when (and (numberp pt)
-                             (>= pt (marker-position mb))
-                             (<= pt (marker-position me)))
-                    (goto-char (marker-position me))
-                    (forward-line 1)
-                    (beginning-of-line))))))))))
+                          (ignore-errors (carriage-patch-fold-refresh-now (current-buffer)))))))))
+              ;; If point is inside the applied block, move it to the next line after it.
+              (let ((pt (point)))
+                (when (and (numberp pt)
+                           (>= pt (marker-position mb))
+                           (<= pt (marker-position me)))
+                  (goto-char (marker-position me))
+                  (forward-line 1)
+                  (beginning-of-line)))))))))
   t)
 
 

@@ -3,7 +3,8 @@
 ;; Hide contents of applied #+begin_patch ... #+end_patch blocks (header has :applied t)
 ;; Show a compact one-line placeholder:
 ;;   ✓ <file> — <description|result>
-;; Auto-reveal original text when cursor enters the block; auto-hide when cursor leaves.
+;; No auto-reveal by cursor: applied patches stay folded by default.
+;; User toggles visibility only via TAB on the placeholder.
 ;;
 ;; Integration:
 ;; - Enabled automatically when carriage-mode is active and
@@ -27,6 +28,7 @@
   "Symbol used in buffer-invisibility-spec for folded patch overlays."
   :type 'symbol :group 'carriage-patch-fold)
 
+
 (defvar-local carriage-patch-fold--overlays nil
   "List of overlays currently managed by carriage-patch-fold in this buffer.")
 
@@ -35,6 +37,128 @@
 
 (defvar-local carriage-patch-fold--saved-ignore-invis nil
   "Saved value of `line-move-ignore-invisible' to restore on disable.")
+
+(defvar-local carriage-patch-fold--hover-active nil
+  "When non-nil, hover-mode is active for an applied patch block.
+Plist keys:
+  :beg begin position (beginning of #+begin_patch line)
+  :end end position (end of #+end_patch line)
+  :pl  parsed header plist used to restore the placeholder overlay.")
+
+(defvar-local carriage-patch-fold--hover-inhibit nil
+  "Internal guard to avoid re-entrancy in hover post-command handler.")
+
+(defun carriage-patch-fold--overlay-at (pos)
+  "Return the managed applied-patch overlay covering POS, or nil."
+  (let ((hit nil))
+    (dolist (ov carriage-patch-fold--overlays)
+      (when (and (overlayp ov)
+                 (numberp (overlay-start ov))
+                 (numberp (overlay-end ov))
+                 (>= pos (overlay-start ov))
+                 (<= pos (overlay-end ov)))
+        (setq hit ov)))
+    hit))
+
+(defun carriage-patch-fold--org-hide-at (beg)
+  "Hide the Org block at BEG using org-fold/org-hide (best-effort)."
+  (when (and (numberp beg) (derived-mode-p 'org-mode))
+    (ignore-errors
+      (require 'org)
+      (save-excursion
+        (goto-char beg)
+        (cond
+         ((fboundp 'org-fold-hide-drawer-or-block)
+          (org-fold-hide-drawer-or-block t))
+         ((fboundp 'org-hide-block-toggle)
+          (org-hide-block-toggle t))
+         ((featurep 'org-fold)
+          (let ((body-beg (progn (forward-line 1) (point)))
+                (body-end (save-excursion
+                            (when (re-search-forward "^[ \t]*#\\+end_patch\\b" nil t)
+                              (forward-line -1))
+                            (line-end-position))))
+            (when (< body-beg body-end)
+              (org-fold-region body-beg body-end t))))
+         (t nil))))))
+
+(defun carriage-patch-fold--org-show-at (beg)
+  "Show the Org block at BEG (undo folding) best-effort."
+  (when (and (numberp beg) (derived-mode-p 'org-mode))
+    (ignore-errors
+      (require 'org)
+      (save-excursion
+        (goto-char beg)
+        (cond
+         ((fboundp 'org-fold-show-drawer-or-block)
+          (org-fold-show-drawer-or-block))
+         ((featurep 'org-fold)
+          (let ((body-beg (progn (forward-line 1) (point)))
+                (body-end (save-excursion
+                            (when (re-search-forward "^[ \t]*#\\+end_patch\\b" nil t)
+                              (forward-line -1))
+                            (line-end-position))))
+            (when (< body-beg body-end)
+              (org-fold-region body-beg body-end nil))))
+         ((fboundp 'org-hide-block-toggle)
+          (org-hide-block-toggle nil))
+         (t nil))))))
+
+(defun carriage-patch-fold--hover-enter (ov)
+  "Enter hover-mode for applied patch overlay OV: remove placeholder and use org-fold."
+  (when (overlayp ov)
+    (let* ((beg (overlay-start ov))
+           (pl  (overlay-get ov 'carriage-patch-plist))
+           (rg  (and (numberp beg) (carriage-patch-fold--block-bounds-at beg)))
+           (end (and (consp rg) (cdr rg))))
+      (setq carriage-patch-fold--overlays (delq ov carriage-patch-fold--overlays))
+      (ignore-errors (delete-overlay ov))
+      (carriage-patch-fold--org-hide-at beg)
+      (setq carriage-patch-fold--hover-active (list :beg beg :end (or end beg) :pl pl)))))
+
+(defun carriage-patch-fold--hover-exit ()
+  "Exit hover-mode if active: restore placeholder overlay immediately.
+
+We intentionally keep Org folding in place (no org-show here), so that:
+- applied blocks are org-folded by default (even under the placeholder), and
+- when placeholder overlay is removed on hover, the block remains folded."
+  (when (and (listp carriage-patch-fold--hover-active)
+             (numberp (plist-get carriage-patch-fold--hover-active :beg)))
+    (let* ((beg (plist-get carriage-patch-fold--hover-active :beg))
+           (pl  (plist-get carriage-patch-fold--hover-active :pl))
+           (rg  (and (numberp beg) (carriage-patch-fold--block-bounds-at beg)))
+           (end (and (consp rg) (cdr rg))))
+      (when (and (numberp beg) (numberp end) (< beg end) (listp pl))
+        (carriage-patch-fold--make beg end pl)))
+    (setq carriage-patch-fold--hover-active nil)))
+
+(defun carriage-patch-fold--post-command ()
+  "Hover behavior: when point enters a placeholder overlay, replace it with org-folded block;
+when point leaves that block, restore placeholder overlay immediately."
+  (when (and (derived-mode-p 'org-mode)
+             (not carriage-patch-fold--hover-inhibit))
+    (let ((carriage-patch-fold--hover-inhibit t)
+          (pos (point)))
+      (condition-case _e
+          (let* ((active carriage-patch-fold--hover-active)
+                 (abeg (and (listp active) (plist-get active :beg)))
+                 (aend (and (listp active) (plist-get active :end))))
+            (cond
+             ;; Active hover block and point left it → exit
+             ((and (numberp abeg) (numberp aend)
+                   (or (< pos abeg) (> pos aend)))
+              (carriage-patch-fold--hover-exit)
+              ;; After exit, maybe immediately enter another overlay
+              (let ((ov2 (carriage-patch-fold--overlay-at pos)))
+                (when (overlayp ov2)
+                  (carriage-patch-fold--hover-enter ov2))))
+             ;; No active hover block → entering overlay activates hover
+             ((null active)
+              (let ((ov (carriage-patch-fold--overlay-at pos)))
+                (when (overlayp ov)
+                  (carriage-patch-fold--hover-enter ov)))))
+            nil)
+        (error nil)))))
 
 (defun carriage-patch-fold--parse-header-plist (line)
   "Return plist parsed from begin_patch LINE or nil."
@@ -83,16 +207,14 @@
          (desc (or (plist-get pl :description)
                    (plist-get pl :result)
                    "Applied"))
-         (txt (format "%s %s — %s  (mouse-1: toggle)" tick path desc))
+         (txt (format "%s %s — %s  (TAB: toggle)" tick path desc))
          (s (propertize txt 'face 'carriage-patch-fold-placeholder-face)))
     (let ((map (make-sparse-keymap)))
-      (define-key map [mouse-1]
-        (lambda () (interactive)
-          (carriage-patch-fold-toggle-at (point))))
+      (define-key map (kbd "TAB") #'carriage-patch-fold-toggle-at)
+      (define-key map [tab] #'carriage-patch-fold-toggle-at)
       (add-text-properties 0 (length s)
                            (list 'local-map map
-                                 'mouse-face 'mode-line-highlight
-                                 'help-echo "Toggle visibility")
+                                 'help-echo "Toggle visibility (TAB)")
                            s))
     s))
 
@@ -145,25 +267,18 @@
   "After-change hook to coalesce refresh."
   (carriage-patch-fold--schedule-refresh 0.1))
 
-(defun carriage-patch-fold--cursor-ensure-visibility ()
-  "Reveal when point enters an overlay; hide when it leaves."
-  (let ((pos (point)))
-    (dolist (ov carriage-patch-fold--overlays)
-      (when (overlayp ov)
-        (let ((b (overlay-start ov))
-              (e (overlay-end ov)))
-          (when (and (numberp b) (numberp e))
-            (if (and (>= pos b) (<= pos e))
-                (progn
-                  (overlay-put ov 'before-string nil)
-                  (overlay-put ov 'invisible nil)
-                  (overlay-put ov 'carriage-patch-revealed t))
-              (overlay-put ov 'before-string (carriage-patch-fold--placeholder
-                                              (overlay-get ov 'carriage-patch-plist)))
-              (overlay-put ov 'invisible carriage-patch-fold-invisible-symbol)
-              (overlay-put ov 'carriage-patch-revealed nil))))))))
 
 ;;; Public API
+
+;;;###autoload
+(defun carriage-patch-fold-refresh-now (&optional buffer)
+  "Public: refresh applied patch overlays now in BUFFER (or current)."
+  (with-current-buffer (or buffer (current-buffer))
+    (carriage-patch-fold--refresh-now)))
+
+(defun carriage-patch-fold-refresh (&optional buffer)
+  "Backward-compatible alias for `carriage-patch-fold-refresh-now'."
+  (carriage-patch-fold-refresh-now buffer))
 
 (defun carriage-patch-fold-toggle-at (pos)
   "Toggle fold state of an overlay covering POS."
@@ -190,10 +305,10 @@
   "Enable folding of applied patch blocks in BUFFER (or current)."
   (with-current-buffer (or buffer (current-buffer))
     (setq carriage-patch-fold--saved-ignore-invis line-move-ignore-invisible)
-    ;; Let point move into invisible text so our reveal logic can trigger.
+    ;; Let point move into invisible text so user can land on the placeholder and press TAB.
     (setq-local line-move-ignore-invisible nil)
+    (add-hook 'post-command-hook #'carriage-patch-fold--post-command nil t)
     (add-hook 'after-change-functions #'carriage-patch-fold--after-change nil t)
-    (add-hook 'post-command-hook #'carriage-patch-fold--cursor-ensure-visibility nil t)
     (carriage-patch-fold--refresh-now)
     t))
 
@@ -202,7 +317,6 @@
   "Disable folding of applied patch blocks in BUFFER (or current)."
   (with-current-buffer (or buffer (current-buffer))
     (remove-hook 'after-change-functions #'carriage-patch-fold--after-change t)
-    (remove-hook 'post-command-hook #'carriage-patch-fold--cursor-ensure-visibility t)
     (when (timerp carriage-patch-fold--refresh-timer)
       (cancel-timer carriage-patch-fold--refresh-timer))
     (setq carriage-patch-fold--refresh-timer nil)

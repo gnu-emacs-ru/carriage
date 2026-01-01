@@ -827,6 +827,16 @@ Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tes
 (defvar-local carriage-doc-state--fold-refresh-timer nil)
 (defvar-local carriage-doc-state--fold-enabled nil)
 
+(defvar-local carriage-doc-state--fold--last-scan-tick nil
+  "Last `buffer-chars-modified-tick' value when fold overlays were fully rescanned.")
+
+(defvar-local carriage-doc-state--fold--last-scan-had-lines :unknown
+  "Whether the last full rescan found any state/fingerprint lines.
+Values:
+- t        — at least one line was found
+- nil      — no lines were found
+- :unknown — never scanned (or state was reset).")
+
 (defun carriage-doc-state--fold--line-range-at-point ()
   "Return (BEG . END) for current logical line, excluding trailing newline."
   (save-excursion
@@ -988,53 +998,78 @@ Supported canonical format (no backwards compatibility): `#+CARRIAGE_FINGERPRINT
   ov)
 
 (defun carriage-doc-state--fold--refresh-overlays ()
-  "Rescan buffer and rebuild fold overlays, then apply fold/reveal for point."
-  (when carriage-doc-state--fold-enabled
-    ;; State line (single).
-    (let ((st (carriage-doc-state--fold--scan-state-line)))
-      (if (not st)
-          (when (overlayp carriage-doc-state--fold-state-ov)
-            (delete-overlay carriage-doc-state--fold-state-ov)
-            (setq carriage-doc-state--fold-state-ov nil))
-        (let* ((pl (plist-get st :pl))
-               (raw (plist-get st :raw))
-               (summary (carriage-doc-state--fold--maybe-summary-from-plist pl 'state))
-               (tooltip (carriage-doc-state--fold--tooltip raw pl 'CARRIAGE_STATE)))
-          (setq carriage-doc-state--fold-state-ov
-                (carriage-doc-state--fold--ov-upsert
-                 carriage-doc-state--fold-state-ov
-                 (plist-get st :beg) (plist-get st :end)
-                 summary tooltip)))))
+  "Rescan buffer and rebuild fold overlays, then apply fold/reveal for point.
 
-    ;; Fingerprints (many).
-    (let* ((fps (carriage-doc-state--fold--scan-fingerprint-lines))
-           (wanted (length fps))
-           (existing (cl-remove-if-not #'overlayp carriage-doc-state--fold-fp-ovs)))
-      ;; Trim extra overlays.
-      (when (> (length existing) wanted)
-        (dolist (ov (nthcdr wanted existing))
-          (when (overlayp ov) (delete-overlay ov)))
-        (setq existing (cl-subseq existing 0 wanted)))
-      ;; Extend overlays list.
-      (while (< (length existing) wanted)
-        (push nil existing))
-      (setq existing (nreverse existing))
+Perf:
+- Full rescan is performed only when the buffer text changed since the last scan
+  (`buffer-chars-modified-tick') or when overlays are missing.
+- On window/point moves (e.g. windmove) with no buffer edits, we only run
+  `carriage-doc-state--fold--apply-for-point' (O(1))."
+  (cl-block nil
+    (when carriage-doc-state--fold-enabled
+      (let* ((tick (buffer-chars-modified-tick))
+             (have-state-ov (overlayp carriage-doc-state--fold-state-ov))
+             (have-fp-ovs (cl-some #'overlayp carriage-doc-state--fold-fp-ovs))
+             (have-any-ov (or have-state-ov have-fp-ovs))
+             (same-tick (and (numberp carriage-doc-state--fold--last-scan-tick)
+                             (= tick carriage-doc-state--fold--last-scan-tick))))
+        (when (and same-tick have-any-ov)
+          ;; No buffer edits since last scan; only update fold/reveal for point.
+          (carriage-doc-state--fold--apply-for-point)
+          (cl-return-from nil t))
 
-      ;; Upsert/move each overlay.
-      (setq carriage-doc-state--fold-fp-ovs
-            (cl-loop for fp in fps
-                     for ov in existing
-                     collect
-                     (let* ((pl (plist-get fp :pl))
-                            (raw (plist-get fp :raw))
-                            (summary (carriage-doc-state--fold--maybe-summary-from-plist pl 'fingerprint))
-                            (tooltip (carriage-doc-state--fold--tooltip raw pl 'CARRIAGE_FINGERPRINT)))
-                       (carriage-doc-state--fold--ov-upsert
-                        ov (plist-get fp :beg) (plist-get fp :end)
-                        summary tooltip))))))
+        (let* ((st  (carriage-doc-state--fold--scan-state-line))
+               (fps (carriage-doc-state--fold--scan-fingerprint-lines)))
 
-  ;; Critical: restore folded/revealed according to current point after refresh.
-  (carriage-doc-state--fold--apply-for-point))
+          ;; State line (single).
+          (if (not st)
+              (when (overlayp carriage-doc-state--fold-state-ov)
+                (delete-overlay carriage-doc-state--fold-state-ov)
+                (setq carriage-doc-state--fold-state-ov nil))
+            (let* ((pl (plist-get st :pl))
+                   (raw (plist-get st :raw))
+                   (summary (carriage-doc-state--fold--maybe-summary-from-plist pl 'state))
+                   (tooltip (carriage-doc-state--fold--tooltip raw pl 'CARRIAGE_STATE)))
+              (setq carriage-doc-state--fold-state-ov
+                    (carriage-doc-state--fold--ov-upsert
+                     carriage-doc-state--fold-state-ov
+                     (plist-get st :beg) (plist-get st :end)
+                     summary tooltip))))
+
+          ;; Fingerprints (many).
+          (let* ((wanted (length fps))
+                 (existing (cl-remove-if-not #'overlayp carriage-doc-state--fold-fp-ovs)))
+            ;; Trim extra overlays.
+            (when (> (length existing) wanted)
+              (dolist (ov (nthcdr wanted existing))
+                (when (overlayp ov) (delete-overlay ov)))
+              (setq existing (cl-subseq existing 0 wanted)))
+            ;; Extend overlays list.
+            (while (< (length existing) wanted)
+              (push nil existing))
+            (setq existing (nreverse existing))
+
+            ;; Upsert/move each overlay.
+            (setq carriage-doc-state--fold-fp-ovs
+                  (cl-loop for fp in fps
+                           for ov in existing
+                           collect
+                           (let* ((pl (plist-get fp :pl))
+                                  (raw (plist-get fp :raw))
+                                  (summary (carriage-doc-state--fold--maybe-summary-from-plist pl 'fingerprint))
+                                  (tooltip (carriage-doc-state--fold--tooltip raw pl 'CARRIAGE_FINGERPRINT)))
+                             (carriage-doc-state--fold--ov-upsert
+                              ov (plist-get fp :beg) (plist-get fp :end)
+                              summary tooltip)))))
+
+          ;; Record scan outcome for fast-path early return.
+          (setq carriage-doc-state--fold--last-scan-tick tick)
+          (setq carriage-doc-state--fold--last-scan-had-lines
+                (if (or st (and (listp fps) (> (length fps) 0))) t nil)))))
+
+    ;; Critical: restore folded/revealed according to current point after refresh.
+    (carriage-doc-state--fold--apply-for-point)
+    t))
 
 (defun carriage-doc-state--fold--schedule-refresh (&rest _)
   (when (and carriage-doc-state--fold-enabled

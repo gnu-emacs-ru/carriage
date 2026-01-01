@@ -271,6 +271,17 @@ Useful when input feels frozen (e.g., during rapid cursor movement)."
         (when (timerp carriage-ui--ctx-refresh-timer)
           (cancel-timer carriage-ui--ctx-refresh-timer))
         (setq carriage-ui--ctx-refresh-timer nil)
+        ;; Context badge refresh timer (final impl; buffer-local).
+        ;; If a timer was cancelled elsewhere but pending flag wasn't cleared, the badge can
+        ;; get stuck at [Ctx:?] forever. Reset both timer and pending state here.
+        (when (boundp 'carriage-ui--ctx-badge-refresh-timer)
+          (when (timerp carriage-ui--ctx-badge-refresh-timer)
+            (cancel-timer carriage-ui--ctx-badge-refresh-timer))
+          (setq carriage-ui--ctx-badge-refresh-timer nil))
+        (when (boundp 'carriage-ui--ctx-badge-pending)
+          (setq carriage-ui--ctx-badge-pending nil))
+        (when (boundp 'carriage-ui--ctx-badge-last-time)
+          (setq carriage-ui--ctx-badge-last-time 0.0))
         ;; Patch-count refresh timer (buffer-local)
         (when (timerp carriage-ui--patch-refresh-timer)
           (cancel-timer carriage-ui--patch-refresh-timer))
@@ -1126,6 +1137,8 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                                                            :v-adjust carriage-mode-icon-v-adjust
                                                            :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-muted-face)))))
                  ('scope-last (when (fboundp 'all-the-icons-material)
+                                ;; NOTE: avoid glyphs that embed dots/digits (e.g. filter_1/looks_one).
+                                ;; Use a clean arrow for "last/nearest" scope marker.
                                 (all-the-icons-material "filter_1"
                                                         :height carriage-mode-icon-height
                                                         :v-adjust carriage-mode-icon-v-adjust
@@ -4580,8 +4593,8 @@ Runs only in worker timer (never from redisplay)."
                  (unwind-protect
                      (let* ((sig (carriage-ui--ctx--badge-signature))
                             (badge (condition-case e
-                                        (carriage-ui--ctx--compute-badge)
-                                      (error (cons "[Ctx:!]" (format "Ctx compute error: %s" (error-message-string e)))))))
+                                       (carriage-ui--ctx--compute-badge)
+                                     (error (cons "[Ctx:!]" (format "Ctx compute error: %s" (error-message-string e)))))))
                        (carriage-ui--ctx--apply-badge badge sig))
                    (setq carriage-ui--ctx-badge-refresh-timer nil
                          carriage-ui--ctx-badge-pending nil)))))))))
@@ -4766,7 +4779,8 @@ Returns a normalized cons cell; never signals (errors are reported as Ctx:!)."
                               (badge (carriage-ui--ctx--compute-badge)))
                          (carriage-ui--ctx--apply-badge badge sig))
                      (setq carriage-ui--ctx-badge-pending nil
-                           carriage-ui--ctx-badge-refresh-timer nil))))))))))
+                           carriage-ui--ctx-badge-refresh-timer nil)))))
+             buf)))))
 
 (defun carriage-ui--ctx-invalidate (&rest _)
   "Invalidate context badge cache and schedule recomputation ASAP."
@@ -4779,21 +4793,47 @@ Returns a normalized cons cell; never signals (errors are reported as Ctx:!)."
   t)
 
 (defun carriage-ui--context-badge ()
-  "Return cached (LABEL . TOOLTIP) and schedule recompute at most once per interval."
+  "Return cached (LABEL . TOOLTIP) and schedule recompute at most once per interval.
+
+Important: if there is no cached value yet, schedule recompute regardless of AGE,
+otherwise the modeline may get stuck at [Ctx:?] when `carriage-ui--ctx-badge-last-time'
+was updated without actually computing the badge."
   (let* ((now (float-time))
          (interval (max 0.1 (or carriage-ui-context-badge-refresh-interval 1.0)))
-         (age (- now (or carriage-ui--ctx-badge-last-time 0.0))))
+         (age (- now (or carriage-ui--ctx-badge-last-time 0.0)))
+         (cache carriage-ui--ctx-badge-cache)
+         (have (consp cache))
+         (lbl (and have (car cache)))
+         ;; Watchdog: если pending=true, но таймер "пропал" ИЛИ мы слишком долго
+         ;; остаёмся в placeholder, то сбрасываем pending и пересоздаём таймер.
+         ;; Это лечит ситуацию "Ctx:? вычисляется" навсегда.
+         (stuck (and carriage-ui--ctx-badge-pending
+                     (or (not (timerp carriage-ui--ctx-badge-refresh-timer))
+                         (>= age (max 0.3 (* 2 interval))))
+                     (or (not have)
+                         (and (stringp lbl) (string= lbl "[Ctx:?]"))))))
+    (when stuck
+      (when (timerp carriage-ui--ctx-badge-refresh-timer)
+        (ignore-errors (cancel-timer carriage-ui--ctx-badge-refresh-timer)))
+      (setq carriage-ui--ctx-badge-refresh-timer nil
+            carriage-ui--ctx-badge-pending nil))
+
     ;; Normalize legacy string cache once
-    (when (and (stringp carriage-ui--ctx-badge-cache))
+    (when (stringp carriage-ui--ctx-badge-cache)
       (setq carriage-ui--ctx-badge-cache
             (carriage-ui--ctx--normalize-badge carriage-ui--ctx-badge-cache)))
-    ;; schedule recompute if needed
-    (when (and (not carriage-ui--ctx-badge-pending)
-               (>= age interval))
-      (carriage-ui--ctx--schedule-refresh 0.01))
-    (if (consp carriage-ui--ctx-badge-cache)
-        carriage-ui--ctx-badge-cache
-      (cons "[Ctx:?]" "Контекст: вычисляется… (обновится автоматически)"))))
+
+    (let ((have2 (consp carriage-ui--ctx-badge-cache)))
+      ;; Schedule recompute when:
+      ;; - no cached badge yet (first fill), OR
+      ;; - the throttle interval elapsed (keep scope=last reasonably fresh).
+      (when (and (not carriage-ui--ctx-badge-pending)
+                 (or (not have2) (>= age interval)))
+        (carriage-ui--ctx--schedule-refresh 0.01))
+
+      (if have2
+          carriage-ui--ctx-badge-cache
+        (cons "[Ctx:?]" "Контекст: вычисляется… (обновится автоматически)")))))
 
 (defun carriage-ui--ml-seg-context ()
   "Build Context badge segment (click to refresh).
@@ -4861,6 +4901,77 @@ Uses cached value only; never computes in redisplay."
           (and (boundp 'carriage-apply-engine) carriage-apply-engine)
           (and (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)
           branch-t
+          (and (boundp 'carriage-mode-include-gptel-context)
+               carriage-mode-include-gptel-context)
+          (and (boundp 'carriage-mode-include-doc-context)
+               carriage-mode-include-doc-context)
+          (and (boundp 'carriage-mode-include-visible-context)
+               carriage-mode-include-visible-context)
+          (and (boundp 'carriage-mode-include-patched-files)
+               carriage-mode-include-patched-files)
+          (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+          (and (boundp 'carriage-ui-context-badge-refresh-interval)
+               carriage-ui-context-badge-refresh-interval))))
+
+;; Final non-blocking overrides (single source of truth, O(1) in redisplay)
+;; - Patch-count in modeline: strictly from cache (no regex scans, no buffer walks).
+;; - Cache-key for modeline must NOT call any function that can scan buffers or load features.
+;; - Keep context badge throttling out of redisplay; read only its version stamp here.
+
+(defun carriage-ui--patch-count ()
+  "Return strictly O(1) cached number of #+begin_patch blocks for modeline use."
+  (or (and (numberp carriage-ui--patch-count-cache)
+           carriage-ui--patch-count-cache)
+      0))
+
+(defun carriage-ui--ml-seg-patch ()
+  "Build Patch counter segment (O(1), never scans buffer on redisplay)."
+  (let ((n (carriage-ui--patch-count)))
+    (when (and (numberp n) (> n 0))
+      (propertize (format "[P:%d]" n)
+                  'help-echo "Количество #+begin_patch блоков (кэш, без пересканов)"))))
+
+(defun carriage-ui--ml-cache-key ()
+  "Compute modeline cache key (strict O(1), no scans/IO in redisplay).
+Includes only cheap, cached values. Never calls functions that may scan buffers."
+  (let* ((uicons (and (fboundp 'carriage-ui--icons-available-p)
+                      (carriage-ui--icons-available-p)))
+         (blocks (if (and (boundp 'carriage-ui-modeline-blocks)
+                          (listp carriage-ui-modeline-blocks)
+                          carriage-ui-modeline-blocks)
+                     carriage-ui-modeline-blocks
+                   (and (boundp 'carriage-ui--modeline-default-blocks)
+                        carriage-ui--modeline-default-blocks)))
+         (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
+         ;; Version stamp of context badge; worker bumps it when value changes.
+         (ctx-ver (and (memq 'context blocks)
+                       (boundp 'carriage-ui--ctx-badge-version)
+                       carriage-ui--ctx-badge-version))
+         ;; Patch-count strictly from cache (never scan here).
+         (patch-count (and (memq 'patch blocks)
+                           (not (memq state '(sending streaming dispatch waiting reasoning)))
+                           (numberp (and (boundp 'carriage-ui--patch-count-cache)
+                                         carriage-ui--patch-count-cache))
+                           carriage-ui--patch-count-cache))
+         ;; Spinner char is already cheap (pure UI); keep it as is.
+         (spin   (and (boundp 'carriage-ui-enable-spinner) carriage-ui-enable-spinner
+                      (memq state '(sending streaming dispatch waiting reasoning))
+                      (fboundp 'carriage-ui--spinner-char)
+                      (carriage-ui--spinner-char)))
+         ;; Abort handler presence affects modeline (O(1)).
+         (abortp (and (boundp 'carriage--abort-handler) carriage--abort-handler)))
+    (list uicons
+          state spin
+          ctx-ver
+          patch-count abortp blocks
+          ;; Cheap identity fields (do not force loads/scans)
+          (and (boundp 'carriage-mode-intent)  carriage-mode-intent)
+          (and (boundp 'carriage-mode-suite)   carriage-mode-suite)
+          (and (boundp 'carriage-mode-model)   carriage-mode-model)
+          (and (boundp 'carriage-mode-backend) carriage-mode-backend)
+          (and (boundp 'carriage-mode-provider) carriage-mode-provider)
+          (and (boundp 'carriage-apply-engine) carriage-apply-engine)
+          (and (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)
           (and (boundp 'carriage-mode-include-gptel-context)
                carriage-mode-include-gptel-context)
           (and (boundp 'carriage-mode-include-doc-context)

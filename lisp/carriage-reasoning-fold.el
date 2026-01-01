@@ -45,8 +45,7 @@
 (defvar-local carriage-reasoning-fold--refresh-timer nil
   "Idle timer used to coalesce rescans after edits.")
 
-(defvar-local carriage-reasoning-fold--saved-ignore-invis nil
-  "Saved value of `line-move-ignore-invisible' to restore on disable.")
+
 
 (defvar-local carriage-reasoning-fold--hover-active nil
   "When non-nil, hover-mode is active for a reasoning block.
@@ -225,6 +224,8 @@ OPENP indicates an unfinished (still streaming) block."
       (define-key map [tab] #'carriage-reasoning-fold-toggle-at)
       (add-text-properties 0 (length s)
                            (list 'local-map map
+                                 'keymap map
+                                 'mouse-face 'highlight
                                  'help-echo "Toggle reasoning visibility (TAB)")
                            s))
     s))

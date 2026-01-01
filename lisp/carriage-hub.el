@@ -14,6 +14,7 @@
 (require 'cl-lib)
 (require 'json)
 (require 'subr-x)
+(require 'url-util)
 
 (require 'carriage-swarm-registry)
 
@@ -286,6 +287,167 @@ probed over time, bounded by `carriage-hub-probe-max-per-interval'."
            (last_seen . ,(or (alist-get 'last_seen_ts e) :null)))))
      entries)))
 
+(defun carriage-hub--proxy--send-error (client status error code)
+  (carriage-hub--send-json client status (list :ok :false :error error :code code)))
+
+(defun carriage-hub--proxy--overloaded-p ()
+  (and (integerp carriage-hub-max-proxy-active)
+       (>= carriage-hub--proxy-active carriage-hub-max-proxy-active)))
+
+(defun carriage-hub--proxy--body-too-large-p (body)
+  (and (integerp carriage-hub-max-request-bytes)
+       (> (string-bytes (or body "")) carriage-hub-max-request-bytes)))
+
+(defun carriage-hub--proxy--agent-conn (id)
+  "Return plist (:port N :tok STRING) or nil."
+  (let* ((port (carriage-hub--agent-port id))
+         (tok (carriage-hub--agent-token id)))
+    (when (and (integerp port) (> port 0) (stringp tok) (> (length tok) 0))
+      (list :port port :tok tok))))
+
+(defun carriage-hub--proxy--is-sse-p (path)
+  (string-prefix-p "/stream" path))
+
+(defun carriage-hub--proxy--build-request (method path headers body port tok is-sse)
+  (let* ((len (string-bytes (encode-coding-string (or body "") 'utf-8 t)))
+         (host (format "127.0.0.1:%d" port))
+         (ctype (or (assoc-default "content-type" headers)
+                    (and (string= method "POST") "application/json; charset=utf-8")))
+         (extra
+          (mapconcat
+           (lambda (kv)
+             (let ((k (car kv)) (v (cdr kv)))
+               (cond
+                ((member k '("host" "connection" "content-length" "x-auth")) "")
+                (t (format "%s: %s\r\n" k v)))))
+           headers
+           "")))
+    (concat
+     (format "%s %s HTTP/1.1\r\n" method path)
+     (format "Host: %s\r\n" host)
+     (format "Connection: %s\r\n" (if is-sse "keep-alive" "close"))
+     (when is-sse "Accept: text/event-stream\r\n")
+     (format "X-Auth: %s\r\n" tok)
+     (if ctype (format "Content-Type: %s\r\n" ctype) "")
+     (format "Content-Length: %d\r\n" len)
+     extra
+     "\r\n"
+     (encode-coding-string (or body "") 'utf-8 t))))
+
+(defun carriage-hub--proxy--connect-and-stream (client port req is-sse connect-timeout read-timeout)
+  "Connect to upstream PORT and stream response bytes to CLIENT.
+REQ is a full HTTP request string already containing injected X-Auth."
+  (cl-incf carriage-hub--proxy-active)
+  (let* ((up nil)
+         (cl-proc client)
+         (connect-timer nil)
+         (read-timer nil)
+         (sentinel-installed nil)
+         (decremented nil)
+         (first-byte-seen nil))
+    (cl-labels
+        ((dec-active ()
+           (unless decremented
+             (setq decremented t)
+             (when (and (integerp carriage-hub--proxy-active)
+                        (> carriage-hub--proxy-active 0))
+               (cl-decf carriage-hub--proxy-active))))
+         (cleanup-timers ()
+           (when (timerp connect-timer) (cancel-timer connect-timer))
+           (setq connect-timer nil)
+           (when (timerp read-timer) (cancel-timer read-timer))
+           (setq read-timer nil))
+         (kill-upstream ()
+           (when (processp up)
+             (ignore-errors (delete-process up))))
+         (close-downstream ()
+           (when (process-live-p cl-proc)
+             (ignore-errors (process-send-eof cl-proc))))
+         (arm-connect-timeout ()
+           (setq connect-timer
+                 (run-at-time
+                  connect-timeout nil
+                  (lambda ()
+                    (unless first-byte-seen
+                      (kill-upstream)
+                      (ignore-errors
+                        (carriage-hub--send-json cl-proc "504 Gateway Timeout"
+                                                 (list :ok :false :error "upstream timeout" :code "WEB_E_NOT_FOUND"))))))))
+         (arm-read-timeout ()
+           (when (and (not is-sse)
+                      (numberp read-timeout)
+                      (> read-timeout 0))
+             (when (timerp read-timer)
+               (cancel-timer read-timer))
+             (setq read-timer
+                   (run-at-time
+                    read-timeout nil
+                    (lambda ()
+                      (kill-upstream)
+                      (close-downstream)))))))
+      (unwind-protect
+          (condition-case _e
+              (progn
+                (setq up (make-network-process
+                          :name "carriage-hub-proxy-up"
+                          :buffer nil
+                          :host "127.0.0.1"
+                          :service port
+                          :noquery t
+                          :family 'ipv4
+                          :coding 'binary))
+                (process-put cl-proc :hub-upstream up)
+
+                ;; If absolutely no bytes arrive quickly, fail deterministically with an envelope.
+                (arm-connect-timeout)
+
+                (set-process-filter
+                 up
+                 (lambda (_p chunk)
+                   (setq first-byte-seen t)
+                   ;; First byte cancels connect timeout.
+                   (when (timerp connect-timer)
+                     (cancel-timer connect-timer)
+                     (setq connect-timer nil))
+                   ;; For non-SSE: enforce bounded upstream read timeout as "no-bytes" watchdog.
+                   (arm-read-timeout)
+                   (if (process-live-p cl-proc)
+                       ;; SSE: forward raw bytes; no rebuffer/parse/repackage. If downstream is slow
+                       ;; enough to overflow process output buffer, process-send-string errors → we disconnect.
+                       (condition-case _send
+                           (process-send-string cl-proc chunk)
+                         (error
+                          (kill-upstream)
+                          (close-downstream)))
+                     (kill-upstream))))
+
+                (set-process-sentinel
+                 up
+                 (lambda (p _e)
+                   (cleanup-timers)
+                   (dec-active)
+                   (close-downstream)
+                   (ignore-errors (delete-process p))))
+                (setq sentinel-installed t)
+
+                (process-send-string up req)
+                (process-send-eof up)
+                t)
+            (error
+             ;; Fail fast with bounded cleanup (avoid active slot leaks).
+             (cleanup-timers)
+             (unless sentinel-installed
+               (dec-active))
+             (kill-upstream)
+             (close-downstream)
+             (carriage-hub--send-json client "502 Bad Gateway"
+                                      (list :ok :false :error "proxy failure" :code "WEB_E_NOT_FOUND"))
+             t))
+        (unless sentinel-installed
+          (cleanup-timers)
+          (dec-active)
+          (kill-upstream))))))
+
 (defun carriage-hub--proxy (client id method path headers body)
   "Proxy a request to an Agent, injecting X-Auth from registry token file.
 PATH is the agent-side path (e.g. /api/health, /stream).
@@ -295,159 +457,29 @@ Hard requirements (Swarm v1):
 - bounded upstream read timeout for non-SSE
 - hard cap on concurrent upstream connections
 - no token leakage to browser (Hub injects X-Auth; browser never sees tokens)"
-  ;; Hard cap (must apply before any agent lookup so overload is deterministic).
-  (when (and (integerp carriage-hub-max-proxy-active)
-             (>= carriage-hub--proxy-active carriage-hub-max-proxy-active))
-    (carriage-hub--send-json client "503 Service Unavailable"
-                             (list :ok :false :error "proxy overloaded" :code "WEB_E_CAP"))
-    (cl-return-from carriage-hub--proxy t))
-
-  ;; Payload cap (Hub must reject large bodies early).
-  (when (and (integerp carriage-hub-max-request-bytes)
-             (> (string-bytes (or body "")) carriage-hub-max-request-bytes))
-    (carriage-hub--send-json client "400 Bad Request"
-                             (list :ok :false :error "payload too large" :code "WEB_E_PAYLOAD"))
-    (cl-return-from carriage-hub--proxy t))
-
-  (let* ((port (carriage-hub--agent-port id))
-         (tok (carriage-hub--agent-token id)))
-    (unless (and (integerp port) (> port 0) (stringp tok) (> (length tok) 0))
-      (carriage-hub--send-json client "502 Bad Gateway"
-                               (list :ok :false :error "agent not available" :code "WEB_E_NOT_FOUND"))
+  (cl-block carriage-hub--proxy
+    ;; Hard cap (must apply before any agent lookup so overload is deterministic).
+    (when (carriage-hub--proxy--overloaded-p)
+      (carriage-hub--proxy--send-error client "503 Service Unavailable" "proxy overloaded" "WEB_E_CAP")
       (cl-return-from carriage-hub--proxy t))
 
-    (cl-incf carriage-hub--proxy-active)
-    (let* ((is-sse (string-prefix-p "/stream" path))
-           (up nil)
-           (cl-proc client)
-           (connect-timeout (max 0.05 (or carriage-hub-proxy-connect-timeout-sec 0.5)))
-           (read-timeout (max 0.10 (or carriage-hub-proxy-read-timeout-sec 2.0)))
-           (connect-timer nil)
-           (read-timer nil)
-           (sentinel-installed nil)
-           (decremented nil)
-           (first-byte-seen nil)
-           (req
-            (let* ((len (string-bytes (encode-coding-string (or body "") 'utf-8 t)))
-                   (host (format "127.0.0.1:%d" port))
-                   (ctype (or (assoc-default "content-type" headers)
-                              (and (string= method "POST") "application/json; charset=utf-8")))
-                   (extra
-                    (mapconcat
-                     (lambda (kv)
-                       (let ((k (car kv)) (v (cdr kv)))
-                         (cond
-                          ((member k '("host" "connection" "content-length" "x-auth")) "")
-                          (t (format "%s: %s\r\n" k v)))))
-                     headers
-                     "")))
-              (concat
-               (format "%s %s HTTP/1.1\r\n" method path)
-               (format "Host: %s\r\n" host)
-               (format "Connection: %s\r\n" (if is-sse "keep-alive" "close"))
-               (when is-sse "Accept: text/event-stream\r\n")
-               (format "X-Auth: %s\r\n" tok)
-               (if ctype (format "Content-Type: %s\r\n" ctype) "")
-               (format "Content-Length: %d\r\n" len)
-               extra
-               "\r\n"
-               (encode-coding-string (or body "") 'utf-8 t)))))
-      (cl-labels
-          ((dec-active ()
-             (unless decremented
-               (setq decremented t)
-               (when (and (integerp carriage-hub--proxy-active)
-                          (> carriage-hub--proxy-active 0))
-                 (cl-decf carriage-hub--proxy-active))))
-           (cleanup-timers ()
-             (when (timerp connect-timer) (cancel-timer connect-timer))
-             (setq connect-timer nil)
-             (when (timerp read-timer) (cancel-timer read-timer))
-             (setq read-timer nil))
-           (kill-upstream ()
-             (when (processp up)
-               (ignore-errors (delete-process up))))
-           (close-downstream ()
-             (when (process-live-p cl-proc)
-               (ignore-errors (process-send-eof cl-proc)))))
-        (unwind-protect
-            (condition-case _e
-                (progn
-                  (setq up (make-network-process
-                            :name "carriage-hub-proxy-up"
-                            :buffer nil
-                            :host "127.0.0.1"
-                            :service port
-                            :noquery t
-                            :family 'ipv4
-                            :coding 'binary))
-                  (process-put cl-proc :hub-upstream up)
+    ;; Payload cap (Hub must reject large bodies early).
+    (when (carriage-hub--proxy--body-too-large-p body)
+      (carriage-hub--proxy--send-error client "400 Bad Request" "payload too large" "WEB_E_PAYLOAD")
+      (cl-return-from carriage-hub--proxy t))
 
-                  ;; Connect timeout: if absolutely no bytes arrive quickly, kill upstream and close downstream.
-                  (setq connect-timer
-                        (run-at-time
-                         connect-timeout nil
-                         (lambda ()
-                           (unless first-byte-seen
-                             (kill-upstream)
-                             (close-downstream)))))
+    (let* ((conn (carriage-hub--proxy--agent-conn id)))
+      (unless conn
+        (carriage-hub--proxy--send-error client "502 Bad Gateway" "agent not available" "WEB_E_NOT_FOUND")
+        (cl-return-from carriage-hub--proxy t))
 
-                  (set-process-filter
-                   up
-                   (lambda (_p chunk)
-                     (setq first-byte-seen t)
-                     ;; First byte cancels connect timeout.
-                     (when (timerp connect-timer)
-                       (cancel-timer connect-timer)
-                       (setq connect-timer nil))
-                     ;; For non-SSE: enforce bounded upstream read timeout as "no-bytes" watchdog.
-                     (when (and (not is-sse)
-                                (numberp read-timeout)
-                                (> read-timeout 0))
-                       (when (timerp read-timer)
-                         (cancel-timer read-timer))
-                       (setq read-timer
-                             (run-at-time
-                              read-timeout nil
-                              (lambda ()
-                                (kill-upstream)
-                                (close-downstream)))))
-                     (if (process-live-p cl-proc)
-                         ;; SSE: forward raw bytes; no rebuffer/parse/repackage. If downstream is slow
-                         ;; enough to overflow process output buffer, process-send-string errors → we disconnect.
-                         (condition-case _send
-                             (process-send-string cl-proc chunk)
-                           (error
-                            (kill-upstream)
-                            (close-downstream)))
-                       (kill-upstream))))
-
-                  (set-process-sentinel
-                   up
-                   (lambda (p _e)
-                     (cleanup-timers)
-                     (dec-active)
-                     (close-downstream)
-                     (ignore-errors (delete-process p))))
-                  (setq sentinel-installed t)
-
-                  (process-send-string up req)
-                  (process-send-eof up)
-                  t)
-              (error
-               ;; Fail fast with bounded cleanup (avoid active slot leaks).
-               (cleanup-timers)
-               (unless sentinel-installed
-                 (dec-active))
-               (kill-upstream)
-               (close-downstream)
-               (carriage-hub--send-json client "502 Bad Gateway"
-                                        (list :ok :false :error "proxy failure" :code "WEB_E_NOT_FOUND"))
-               t))
-          (unless sentinel-installed
-            (cleanup-timers)
-            (dec-active)
-            (kill-upstream)))))))
+      (let* ((port (plist-get conn :port))
+             (tok (plist-get conn :tok))
+             (is-sse (carriage-hub--proxy--is-sse-p path))
+             (connect-timeout (max 0.05 (or carriage-hub-proxy-connect-timeout-sec 0.5)))
+             (read-timeout (max 0.10 (or carriage-hub-proxy-read-timeout-sec 2.0)))
+             (req (carriage-hub--proxy--build-request method path headers body port tok is-sse)))
+        (carriage-hub--proxy--connect-and-stream client port req is-sse connect-timeout read-timeout)))))
 
 (defun carriage-hub--dispatch (proc method path headers body)
   (cond

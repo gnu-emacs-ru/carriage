@@ -49,6 +49,7 @@ Operational Invariants
 - INV-ops-005: Hub SHOULD own liveness probing and registry last_seen/alive updates; main Emacs MUST NOT run periodic probes.
   - Probing schedule and budgets MUST be bounded by Swarm FREEZE names: probe-interval-sec, probe-timeout-sec, probe-max-per-interval.
 - INV-ops-006: Operational limits (caps/timeouts) MUST reference Swarm FREEZE names (spec/swarm-v1.org#INV), the single source of truth for numeric limits.
+- INV-ops-007: Legacy webd/web-supervisor/push modules and operational paths MUST NOT exist in Swarm baseline; only Agent/Hub/Registry are allowed.
   - Specs/docs MUST NOT restate numeric limit values outside spec/swarm-v1.org#INV (exceptions: protocol vocabulary such as HTTP status codes, standard media types, and header names; plus file permission bits such as 0600).
   - Implementations MAY repeat numeric values when required by runtime constraints, but MUST remain consistent with Swarm FREEZE and SHOULD centralize them in code.
 

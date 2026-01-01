@@ -70,6 +70,12 @@ When nil, resolved from XDG_RUNTIME_DIR or /tmp fallback."
   "Return absolute per-agent runtime dir for ID (ensure it exists)."
   (unless (and (stringp id) (not (string-empty-p id)))
     (error "carriage-swarm-registry: invalid id"))
+  ;; Security: agent IDs are path components. Refuse absolute paths, traversal, and separators.
+  (when (or (file-name-absolute-p id)
+            (string-match-p "\\.\\." id)
+            (string-match-p "/" id)
+            (string-match-p "\\\\" id))
+    (error "carriage-swarm-registry: unsafe id"))
   (carriage-swarm-registry--ensure-dir
    (expand-file-name id (carriage-swarm-registry-agents-dir))))
 

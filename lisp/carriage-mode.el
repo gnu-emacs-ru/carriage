@@ -534,7 +534,9 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
                  (ignore-errors (require 'carriage-op-sre nil t))
                  (ignore-errors (require 'carriage-op-aibo nil t))
                  (ignore-errors (require 'carriage-op-patch nil t))
-                 (ignore-errors (require 'carriage-op-file nil t))))
+                 (ignore-errors (require 'carriage-op-file nil t))
+                 ;; Fix modeline Ctx:?/Ctx:0 flicker: fast, throttled badge computation (≤1Hz).
+                 (ignore-errors (require 'carriage-ui-ctx-fast nil t))))
   ;; Restore state from document, persist snapshot, then fold the block; install save hook.
   (when (require 'carriage-doc-state nil t)
     (ignore-errors (carriage-doc-state-restore))
@@ -855,6 +857,9 @@ Does not modify buffer text; only clears markers/state so the next chunk opens a
   (setq carriage--iteration-inline-marker-inserted nil)
   (setq carriage--fingerprint-inline-inserted nil)
   (setq carriage--separator-inserted nil)
+  ;; O(1) modeline support: reset last-iteration detection state.
+  (setq carriage--last-iteration-has-patches nil)
+  (setq carriage--stream-detect-tail "")
   (carriage--undo-group-start)
   t)
 
@@ -1034,6 +1039,16 @@ TYPE is either 'text (default) or 'reasoning.
   and append to the reasoning tail marker so that main text remains outside the block."
   (let ((s (or string "")))
     (carriage--undo-group-start)
+    ;; O(1) modeline support: detect begin_patch even when token is split across chunks.
+    (when (and (not carriage--last-iteration-has-patches)
+               (stringp s))
+      (let* ((probe (concat (or carriage--stream-detect-tail "") s)))
+        (when (string-match-p "#\\+begin_patch\\b" probe)
+          (setq carriage--last-iteration-has-patches t))
+        (setq carriage--stream-detect-tail
+              (if (> (length probe) 80)
+                  (substring probe (- (length probe) 80))
+                probe))))
     (pcase type
       ((or 'reasoning :reasoning)
        (when (eq carriage-mode-include-reasoning 'block)
@@ -1210,6 +1225,16 @@ never be included in outgoing LLM prompts (transports must filter it)."
   "Non-nil when an inline CARRIAGE_FINGERPRINT line has been inserted for the current stream.")
 (defvar-local carriage--separator-inserted nil
   "Non-nil when a visual separator '-----' was already inserted for the current stream.")
+
+;; O(1) modeline support: last-iteration presence (avoid regexp scans in redisplay).
+(defvar-local carriage--last-iteration-has-patches nil
+  "Non-nil when the current \"last iteration\" region contains at least one begin_patch block.
+
+This flag is maintained by streaming insertion and by accept/insert helpers.
+UI must treat it as best-effort (user may manually edit/delete blocks).")
+
+(defvar-local carriage--stream-detect-tail ""
+  "Small tail buffer used to detect begin_patch tokens split across stream chunks.")
 
 (defun carriage--fingerprint-plist ()
   "Return a sanitized fingerprint plist for the current buffer.
@@ -2188,6 +2213,10 @@ Return cons (BEG . END) of inserted region."
           (carriage-log "accept: inserted region %d..%d (%d chars)"
                         ins-beg ins-end (- ins-end ins-beg))
           (carriage-mark-last-iteration ins-beg ins-end)
+          ;; O(1) modeline support: this acceptance inserted patch blocks.
+          (when (and (stringp blocks)
+                     (string-match-p "#\\+begin_patch\\b" blocks))
+            (setq-local carriage--last-iteration-has-patches t))
           (cons ins-beg ins-end))))))
 
 (defun carriage--dry-run-last-iteration (root)

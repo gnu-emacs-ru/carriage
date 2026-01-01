@@ -47,6 +47,39 @@
   "GPTel transport adapter for Carriage."
   :group 'carriage)
 
+(defcustom carriage-transport-gptel-disable-gptel-log t
+  "When non-nil, suppress GPTel internal logging (`gptel--log') for performance.
+
+Profiling shows GPTel may spend significant CPU in json-pretty-print inside logging.
+Carriage already provides structured request/response logging via *carriage-traffic*."
+  :type 'boolean
+  :group 'carriage-transport-gptel)
+
+(defun carriage--gptel--log@perf (orig-fn &rest args)
+  "Around-advice for `gptel--log' to disable expensive logging when configured."
+  (if carriage-transport-gptel-disable-gptel-log
+      nil
+    (apply orig-fn args)))
+
+(defun carriage-transport-gptel--ensure-perf-log-advice ()
+  "Ensure GPTel logging is wrapped to avoid expensive JSON pretty-printing.
+
+This must be resilient to gptel version/load order differences.
+
+Known entry points across versions:
+- `gptel--log' (internal, often triggers json-pretty-print)
+- `gptel-log'  (public wrapper in some versions)"
+  (dolist (fn '(gptel--log gptel-log))
+    (when (fboundp fn)
+      (unless (advice-member-p #'carriage--gptel--log@perf fn)
+        (advice-add fn :around #'carriage--gptel--log@perf))))
+  t)
+
+;; Install immediately if possible (gptel may already be loaded), and also after load.
+(ignore-errors (carriage-transport-gptel--ensure-perf-log-advice))
+(with-eval-after-load 'gptel
+  (ignore-errors (carriage-transport-gptel--ensure-perf-log-advice)))
+
 (defun carriage--gptel--normalize-model (model)
   "Return a symbol for GPTel's `gptel-model' from MODEL string/symbol.
 

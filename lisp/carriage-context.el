@@ -862,6 +862,7 @@ Patched files are treated as 'doc' for source classification."
      (let* ((rel (plist-get f :rel))
             (tru (plist-get f :true))
             (content (plist-get f :content))
+            (incl (plist-get f :included))
             (reason (plist-get f :reason))
             (docp (and tru (gethash tru doc-map)))
             (gptp (and tru (gethash tru gpt-map)))
@@ -876,7 +877,7 @@ Patched files are treated as 'doc' for source classification."
        (list :path rel
              :true tru
              :source src
-             :included (stringp content)
+             :included (or incl (stringp content))
              :reason reason)))
    files))
 
@@ -890,8 +891,224 @@ Patched files are treated as 'doc' for source classification."
          (count (length items)))
     (list :count count :items items :sources srcs :warnings warnings :stats stats)))
 
+(defun carriage-context--count-fast-init (buf root inc-gpt inc-doc inc-vis inc-patched)
+  "Return initial state plist for fast context count (no file reads).
+
+Additionally maintains per-source membership maps (hash tables):
+- :doc-map — files originating from doc-context (including patched files)
+- :gpt-map — files originating from gptel context
+- :vis-map — files originating from visible file-visiting buffers
+
+These maps are built during the fast pass, avoiding a second normalization/scan."
+  (let* ((lims (carriage-context--limits buf))
+         (seen (make-hash-table :test 'equal)))
+    (list :root (or root (carriage-context--project-root))
+          :include-gptel inc-gpt
+          :include-doc inc-doc
+          :include-visible inc-vis
+          :include-patched inc-patched
+          :max-files (plist-get lims :max-files)
+          :max-bytes (plist-get lims :max-bytes)
+          :seen seen
+          :doc-map (make-hash-table :test 'equal)
+          :gpt-map (make-hash-table :test 'equal)
+          :vis-map (make-hash-table :test 'equal)
+          :files '()
+          :warnings '()
+          :total-bytes 0
+          :included 0
+          :skipped 0)))
+
+(defun carriage-context--count-fast-under-file-limit-p (state)
+  "Return non-nil if we can still consider more files given STATE limits."
+  (< (+ (plist-get state :included)
+        (plist-get state :skipped))
+     (plist-get state :max-files)))
+
+(defun carriage-context--count-fast-push-warning (msg state)
+  "Push warning MSG into STATE."
+  (plist-put state :warnings (cons msg (plist-get state :warnings))))
+
+(defun carriage-context--count-fast-push-file (entry state)
+  "Push file ENTRY plist into STATE."
+  (plist-put state :files (cons entry (plist-get state :files))))
+
+(defun carriage-context--count-fast-mark-seen (true state)
+  "Mark TRUE as seen in STATE. Return non-nil if it was not seen before."
+  (let ((seen (plist-get state :seen)))
+    (unless (gethash true seen)
+      (puthash true t seen)
+      t)))
+
+(defun carriage-context--count-fast--mark-source (source true state)
+  "Mark TRUE as belonging to SOURCE in STATE source maps.
+SOURCE is one of: 'doc 'gptel 'visible. Patched files must be passed as 'doc."
+  (when (and (stringp true) (not (string-empty-p true)))
+    (pcase source
+      ('doc
+       (let ((m (plist-get state :doc-map)))
+         (when (hash-table-p m) (puthash true t m))))
+      ('gptel
+       (let ((m (plist-get state :gpt-map)))
+         (when (hash-table-p m) (puthash true t m))))
+      ('visible
+       (let ((m (plist-get state :vis-map)))
+         (when (hash-table-p m) (puthash true t m))))
+      (_ nil)))
+  state)
+
+(defun carriage-context--count-fast-process-path (p state source)
+  "Process candidate path P and update STATE (no file reads; size-based budgeting).
+SOURCE is used only for source classification maps."
+  (let* ((root (plist-get state :root))
+         (max-bytes (plist-get state :max-bytes))
+         (norm (carriage-context--normalize-candidate p root)))
+    (if (not (plist-get norm :ok))
+        (progn
+          (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+          (setq state (carriage-context--count-fast-push-warning
+                       (format "skip %s: %s" p (plist-get norm :reason))
+                       state))
+          state)
+      (let* ((rel (plist-get norm :rel))
+             (true (plist-get norm :true)))
+        (if (not (carriage-context--count-fast-mark-seen true state))
+            state
+          ;; Source classification must apply even when the file is omitted by limits,
+          ;; so we mark it immediately after dedupe.
+          (setq state (carriage-context--count-fast--mark-source source true state))
+          (let* ((attrs (ignore-errors (file-attributes true)))
+                 (sb (and attrs (nth 7 attrs)))
+                 (total (plist-get state :total-bytes)))
+            (cond
+             ;; Missing/unstat'able file.
+             ((null attrs)
+              (setq state (carriage-context--count-fast-push-file
+                           (list :rel rel :true true :included nil :reason 'missing)
+                           state))
+              (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+              state)
+             ;; Size limit (pre-check only; no reads).
+             ((and (numberp sb) (> (+ total sb) max-bytes))
+              (setq state (carriage-context--count-fast-push-warning
+                           (format "limit reached, include path only: %s" rel)
+                           state))
+              (setq state (carriage-context--count-fast-push-file
+                           (list :rel rel :true true :included nil :reason 'size-limit)
+                           state))
+              (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+              state)
+             ;; Include (planned).
+             (t
+              (when (numberp sb)
+                (setq state (plist-put state :total-bytes (+ total sb))))
+              (setq state (carriage-context--count-fast-push-file
+                           (list :rel rel :true true :included t)
+                           state))
+              (setq state (plist-put state :included (1+ (plist-get state :included))))
+              state))))))))
+
+(defun carriage-context--count-fast-process-visible-buffer (buf state)
+  "Process a visible non-file buffer BUF into STATE (size-based budgeting, no file reads)."
+  (with-current-buffer buf
+    (let* ((nm (buffer-name buf))
+           (rel (format "visible:/%s" nm))
+           (max-bytes (plist-get state :max-bytes))
+           (total (plist-get state :total-bytes))
+           ;; Approximation: buffer-size is chars, not bytes. It's good enough for UI budgeting.
+           (sz (buffer-size)))
+      (if (> (+ total sz) max-bytes)
+          (progn
+            (setq state (carriage-context--count-fast-push-warning
+                         (format "limit reached, include path only: %s" rel) state))
+            (setq state (carriage-context--count-fast-push-file
+                         (list :rel rel :true nil :included nil :reason 'size-limit)
+                         state))
+            (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+            state)
+        (setq state (carriage-context--count-fast-push-file
+                     (list :rel rel :true nil :included t)
+                     state))
+        (setq state (plist-put state :total-bytes (+ total sz)))
+        (setq state (plist-put state :included (1+ (plist-get state :included))))
+        state))))
+
+(defun carriage-context--count-fast-finalize (state)
+  "Finalize fast count STATE into plist: (:files :warnings :stats)."
+  (let ((files (nreverse (plist-get state :files)))
+        (warnings (nreverse (plist-get state :warnings)))
+        (included (plist-get state :included))
+        (skipped (plist-get state :skipped))
+        (total-bytes (plist-get state :total-bytes)))
+    (list :files files
+          :warnings warnings
+          :stats (list :total-bytes total-bytes :included included :skipped skipped))))
+
+(defun carriage-context--count-fast-exec (buf root inc-gpt inc-doc inc-vis inc-patched)
+  "Compute a fast count-compatible result for BUF/ROOT/toggles without reading file contents."
+  (let* ((state (carriage-context--count-fast-init buf root inc-gpt inc-doc inc-vis inc-patched))
+         (max-files (plist-get state :max-files))
+         (max-bytes (plist-get state :max-bytes))
+         (_ (carriage-context--dbg "count-fast: root=%s include{gpt=%s,doc=%s,vis=%s,patched=%s} limits{files=%s,bytes=%s}"
+                                   (plist-get state :root) inc-gpt inc-doc inc-vis inc-patched max-files max-bytes)))
+    ;; 1a) Patched files (treated as doc precedence)
+    (when (and inc-patched (carriage-context--count-fast-under-file-limit-p state))
+      (let ((pat (ignore-errors (carriage-context--patched-files buf))))
+        (dolist (p pat)
+          (when (carriage-context--count-fast-under-file-limit-p state)
+            (setq state (carriage-context--count-fast-process-path p state))))))
+    ;; 1b) Doc paths
+    (when (and inc-doc (carriage-context--count-fast-under-file-limit-p state))
+      (let ((doc (ignore-errors (carriage-context--doc-paths buf))))
+        (dolist (p doc)
+          (when (carriage-context--count-fast-under-file-limit-p state)
+            (setq state (carriage-context--count-fast-process-path p state))))))
+    ;; 2) Visible buffers
+    (when (and inc-vis (carriage-context--count-fast-under-file-limit-p state))
+      (let ((seen (make-hash-table :test 'eq))
+            (ignored-modes (and (boundp 'carriage-visible-ignore-modes) carriage-visible-ignore-modes))
+            (ignored-names (and (boundp 'carriage-visible-ignore-buffer-regexps) carriage-visible-ignore-buffer-regexps)))
+        (walk-windows
+         (lambda (w)
+           (let ((b (window-buffer w)))
+             (unless (gethash b seen)
+               (puthash b t seen)
+               (with-current-buffer b
+                 (let* ((nm (buffer-name b))
+                        (mm major-mode)
+                        (skip
+                         (or (and (boundp 'carriage-visible-exclude-current-buffer)
+                                  carriage-visible-exclude-current-buffer
+                                  (eq b buf))
+                             (minibufferp b)
+                             (eq mm 'exwm-mode)
+                             (and (listp ignored-modes) (memq mm ignored-modes))
+                             (and (listp ignored-names)
+                                  (seq-some (lambda (rx) (and (stringp rx) (string-match-p rx nm)))
+                                            ignored-names)))))
+                   (unless skip
+                     (cond
+                      ((and (stringp buffer-file-name) (not (file-remote-p buffer-file-name)))
+                       (when (carriage-context--count-fast-under-file-limit-p state)
+                         (setq state (carriage-context--count-fast-process-path buffer-file-name state))))
+                      (t
+                       (when (carriage-context--count-fast-under-file-limit-p state)
+                         (setq state (carriage-context--count-fast-process-visible-buffer b state))))))))))))
+        nil (selected-frame)))
+    ;; 3) GPTel context last
+    (when (and inc-gpt (carriage-context--count-fast-under-file-limit-p state))
+      (let ((gpt (ignore-errors (carriage-context--maybe-gptel-files))))
+        (dolist (p gpt)
+          (when (carriage-context--count-fast-under-file-limit-p state)
+            (setq state (carriage-context--count-fast-process-path p state))))))
+    (carriage-context--count-fast-finalize state)))
+
 (defun carriage-context-count (&optional buffer _point)
   "Вернуть plist со счётчиком элементов контекста для BUFFER.
+
+ВНИМАНИЕ (perf):
+- Эта функция должна быть дешёвой и безопасной для использования из UI/redisplay.
+- Она НЕ читает содержимое файлов; бюджетирование делается по file-attributes (size) и по buffer-size для visible buffers.
 
 Формат результата:
   (:count N
@@ -911,29 +1128,18 @@ Patched files are treated as 'doc' for source classification."
           (carriage-context--dbg "count: all sources OFF → 0")
           (carriage-context--count-empty-result))
       (let* ((true-data (carriage-context--count-gather-trues buf root inc-gpt inc-doc inc-vis inc-patched))
-             (doc-trues (plist-get true-data :doc-trues))
-             (gpt-trues (plist-get true-data :gpt-trues))
-             (vis-trues (plist-get true-data :vis-trues))
              (doc-map (plist-get true-data :doc-map))
              (gpt-map (plist-get true-data :gpt-map))
              (vis-map (plist-get true-data :vis-map))
-             (col (carriage-context-collect buf root))
-             (files (or (plist-get col :files) '()))
-             (warnings (or (plist-get col :warnings) '()))
-             (stats (or (plist-get col :stats) '()))
-             (_ (carriage-context--dbg "count: collect: files=%s included=%s skipped=%s total-bytes=%s warnings=%s"
-                                       (length files)
-                                       (or (plist-get stats :included) 0)
-                                       (or (plist-get stats :skipped) 0)
-                                       (or (plist-get stats :total-bytes) 0)
-                                       (length warnings)))
+             (fast (carriage-context--count-fast-exec buf root inc-gpt inc-doc inc-vis inc-patched))
+             (files (or (plist-get fast :files) '()))
+             (warnings (or (plist-get fast :warnings) '()))
+             (stats (or (plist-get fast :stats) '()))
              (items (carriage-context--count-build-items files doc-map gpt-map vis-map)))
-        (carriage-context--dbg "count: doc=%s gpt=%s vis=%s files=%s items=%s warns=%s"
-                               (length doc-trues) (length gpt-trues) (length vis-trues)
-                               (length files) (length items) (length warnings))
+        (carriage-context--dbg "count-fast: files=%s items=%s warnings=%s bytes=%s"
+                               (length files) (length items) (length warnings)
+                               (or (plist-get stats :total-bytes) 0))
         (carriage-context--count-assemble items warnings stats)))))
-
-
 ;; -----------------------------------------------------------------------------
 ;; Context profile (P1/P3) — defaults, setter and toggle
 

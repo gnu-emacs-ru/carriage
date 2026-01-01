@@ -271,6 +271,10 @@ Useful when input feels frozen (e.g., during rapid cursor movement)."
         (when (timerp carriage-ui--ctx-refresh-timer)
           (cancel-timer carriage-ui--ctx-refresh-timer))
         (setq carriage-ui--ctx-refresh-timer nil)
+        ;; Patch-count refresh timer (buffer-local)
+        (when (timerp carriage-ui--patch-refresh-timer)
+          (cancel-timer carriage-ui--patch-refresh-timer))
+        (setq carriage-ui--patch-refresh-timer nil)
         ;; Spinner timer (buffer-local)
         (when (timerp carriage--ui-spinner-timer)
           (cancel-timer carriage--ui-spinner-timer))
@@ -1307,6 +1311,63 @@ Optimized with caching to reduce allocations on redisplay."
 (defvar-local carriage-ui--patch-count-cache-time 0
   "Timestamp (float seconds) of the last patch count recomputation.")
 
+(defcustom carriage-ui-patch-count-refresh-interval 0.4
+  "Minimum seconds between patch-count recomputations in a buffer.
+
+Patch counting requires scanning the buffer for #+begin_patch blocks.
+To keep redisplay fast, scanning is done asynchronously and throttled."
+  :type 'number
+  :group 'carriage-ui)
+
+(defvar-local carriage-ui--patch-refresh-timer nil
+  "Timer object for a scheduled patch-count refresh (buffer-local).")
+
+(defvar-local carriage-ui--patch-last-refresh-time 0.0
+  "Timestamp (float seconds) of the last completed patch-count refresh in this buffer.")
+
+(defun carriage-ui--patch-refresh-now (&optional buffer)
+  "Recompute patch ranges/count for BUFFER (or current buffer) and refresh modeline.
+Never call this from redisplay/modeline."
+  (with-current-buffer (or buffer (current-buffer))
+    (when (derived-mode-p 'org-mode)
+      ;; This recomputes ranges at most once per tick and also updates count cache.
+      (ignore-errors (carriage-ui--get-patch-ranges))
+      (setq carriage-ui--patch-last-refresh-time (float-time))
+      (setq carriage-ui--patch-count-cache-time carriage-ui--patch-last-refresh-time)
+      (when (fboundp 'carriage-ui--invalidate-ml-cache)
+        (carriage-ui--invalidate-ml-cache))
+      (force-mode-line-update t))
+    t))
+
+(defun carriage-ui--patch-schedule-refresh (&optional delay)
+  "Schedule a throttled patch-count refresh for the current buffer."
+  (when (timerp carriage-ui--patch-refresh-timer)
+    (ignore-errors (cancel-timer carriage-ui--patch-refresh-timer)))
+  (let* ((buf (current-buffer))
+         (now (float-time))
+         (interval (max 0.05 (or carriage-ui-patch-count-refresh-interval 0.4)))
+         (age (- now (or carriage-ui--patch-last-refresh-time 0.0)))
+         (d (cond
+             ((numberp delay) delay)
+             ((>= age interval) 0.05)
+             (t (max 0.05 (- interval age))))))
+    (setq carriage-ui--patch-refresh-timer
+          (run-at-time
+           (max 0.01 (float d)) nil
+           (lambda (b)
+             (when (buffer-live-p b)
+               (with-current-buffer b
+                 (setq carriage-ui--patch-refresh-timer nil)
+                 (ignore-errors (carriage-ui--patch-refresh-now b)))))
+           buf)))
+  t)
+
+(defun carriage-ui--patch-after-change (_beg _end _len)
+  "After-change hook: coalesce patch-count refresh requests."
+  ;; Only meaningful in Org buffers; keep the hook cheap.
+  (when (derived-mode-p 'org-mode)
+    (carriage-ui--patch-schedule-refresh)))
+
 (defvar-local carriage-ui--patch-ranges nil
   "Cached list of (BEG . END) ranges for #+begin_patch…#+end_patch blocks in the current buffer.")
 (defvar-local carriage-ui--patch-ranges-tick nil
@@ -1791,10 +1852,12 @@ Uses pulse.el when available, otherwise temporary overlays."
                    carriage-ui--modeline-default-blocks))
          (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
          (ctx-ver (and (memq 'context blocks) (or carriage-ui--ctx-badge-version 0)))
-         ;; Avoid counting patches during active phases to prevent churn on edits/stream
+         ;; Avoid scanning buffers during redisplay: patch count must come from cache,
+         ;; maintained asynchronously by `carriage-ui--patch-refresh-now'.
          (patch-count (and (memq 'patch blocks)
                            (not (memq state '(sending streaming dispatch waiting reasoning)))
-                           (carriage-ui--patch-count)))
+                           (numberp carriage-ui--patch-count-cache)
+                           carriage-ui--patch-count-cache))
          (has-last (and (memq 'all blocks)
                         (carriage-ui--last-iteration-present-p)))
          (spin   (and carriage-ui-enable-spinner
@@ -2010,8 +2073,12 @@ Never signal from redisplay/modeline."
         txt))))
 
 (defun carriage-ui--ml-seg-patch ()
-  "Build Patch counter segment."
-  (let ((patch-count (carriage-ui--patch-count)))
+  "Build Patch counter segment.
+
+Performance:
+- Must not scan the buffer from redisplay/modeline.
+- Uses `carriage-ui--patch-count-cache' which is maintained asynchronously."
+  (let ((patch-count (or carriage-ui--patch-count-cache 0)))
     (when (and (numberp patch-count) (> patch-count 0))
       (propertize (format "[P:%d]" patch-count)
                   'help-echo "Количество #+begin_patch блоков в буфере"))))

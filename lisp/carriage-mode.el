@@ -489,7 +489,14 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
           (setq-local mode-line-format
                       (carriage-mode--modeline--insert-visible
                        ml carriage--mode-modeline-construct))))
-      (force-mode-line-update)))
+      (force-mode-line-update))
+    ;; Patch-count is expensive to compute by scanning; keep it off the redisplay path.
+    ;; Maintain the cache asynchronously on edits.
+    (when (and (derived-mode-p 'org-mode)
+               (fboundp 'carriage-ui--patch-after-change))
+      (add-hook 'after-change-functions #'carriage-ui--patch-after-change nil t)
+      (when (fboundp 'carriage-ui--patch-schedule-refresh)
+        (ignore-errors (carriage-ui--patch-schedule-refresh 0.05)))))
   (when (require 'carriage-keyspec nil t)
     (carriage-keys-apply-known-keymaps)
     (let ((prefixes (carriage-keys-prefixes)))

@@ -1570,39 +1570,20 @@ Avoid rescheduling when a timer is already pending."
   t)
 
 (defun carriage-ui--headerline-post-command ()
-  "Post-command hook: mark outline as dirty on heading changes and refresh on idle.
-We only detect cheap changes (level/title). Full outline path is recomputed on idle."
+  "Post-command hook: keep header-line responsive without doing Org work per keystroke.
+
+Performance invariant:
+- Must be O(1) for every command (including self-insert).
+- Must NOT call `org-back-to-heading', `org-get-heading' etc.
+
+We simply mark outline as dirty and schedule an idle refresh; the heavy outline
+path computation happens in `carriage-ui--headerline-idle-refresh-run'."
   (when (and carriage-mode-headerline-show-outline
              (derived-mode-p 'org-mode)
              (get-buffer-window (current-buffer) t))
-    (let* ((win (get-buffer-window (current-buffer) t))
-           (w (ignore-errors (and (window-live-p win) (window-total-width win))))
-           (wide (or (null w) (>= w 40)))
-           ;; Cheap change detector: level + title only
-           (info (and wide
-                      (ignore-errors
-                        (save-excursion
-                          (org-back-to-heading t)
-                          (cons (org-outline-level)
-                                (org-get-heading 'no-tags 'no-todo 'no-priority 'no-comment))))))
-           (lvl (and info (car info)))
-           (ttl (and info (cdr info))))
-      (let ((updated nil))
-        ;; Initialize lazily when first needed: defer full path recomputation to idle
-        (when (and wide (null carriage-ui--last-outline-path-str))
-          (setq carriage-ui--outline-dirty t)
-          (setq updated t))
-        ;; Mark dirty only when heading context changes; recompute on idle
-        (when (and wide
-                   (or (not (equal lvl carriage-ui--last-outline-level))
-                       (not (equal ttl carriage-ui--last-outline-title))))
-          (setq carriage-ui--last-outline-level lvl)
-          (setq carriage-ui--last-outline-title ttl)
-          (setq carriage-ui--outline-dirty t)
-          (setq updated t))
-        (when updated
-          (carriage-ui--headerline-queue-refresh))))))
-
+    ;; Always mark dirty; the idle worker will compute the actual outline path.
+    (setq carriage-ui--outline-dirty t)
+    (carriage-ui--headerline-queue-refresh)))
 (defun carriage-ui--headerline-window-scroll (_win _start)
   "Refresh header-line on window scroll for instant visual updates."
   (carriage-ui--headerline-queue-refresh))
@@ -1908,7 +1889,7 @@ Uses pulse.el when available, otherwise temporary overlays."
                     (boundp 'carriage-mode-use-suite-icon)
                     carriage-mode-use-suite-icon
                     (carriage-ui--icon 'suite)))
-         (_ (require 'carriage-i18n nil t))
+         (_ nil)
          (label (if icon
                     (concat icon (carriage-ui--icon-gap) "[" suite-str "]")
                   (let ((name (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
@@ -3897,8 +3878,8 @@ Redisplay-safe: never scans buffers and never reads files."
       (if (numberp v) v 0))))
 
 (defun carriage-ui--ml-seg-patch ()
-  "Build Patch counter segment (O(1), never scans buffer on redisplay)."
-  (let ((n (carriage-ui--patch-count)))
+  "Build Patch counter segment (O(1), reads only from cache)."
+  (let ((n (and (numberp carriage-ui--patch-count-cache) carriage-ui--patch-count-cache)))
     (when (and (numberp n) (> n 0))
       (propertize (format "[P:%d]" n)
                   'help-echo "Количество #+begin_patch блоков в буфере"))))
@@ -4092,19 +4073,11 @@ Never compute synchronously from redisplay/modeline."
 ;; If cache is missing/stale, schedule a debounced refresh and return 0.
 
 (defun carriage-ui--patch-count ()
-  "Return cached number of #+begin_patch blocks (O(1), redisplay-safe).
-Never calls `carriage-ui--get-patch-ranges'."
-  (if (not (derived-mode-p 'org-mode))
-      0
-    (let ((v carriage-ui--patch-count-cache))
-      (cond
-       ((numberp v) v)
-       (t
-        ;; If cache not initialized yet, ask the existing debounced worker to refresh.
-        (when (and (fboundp 'carriage-ui--patch-schedule-refresh)
-                   (not (timerp carriage-ui--patch-refresh-timer)))
-          (ignore-errors (carriage-ui--patch-schedule-refresh 0.05)))
-        0)))))
+  "Return strictly O(1) value of last known patch count for modeline use."
+  (or (and (derived-mode-p 'org-mode)
+           (numberp carriage-ui--patch-count-cache)
+           carriage-ui--patch-count-cache)
+      0))
 
 (defun carriage-ui--ml-seg-patch ()
   "Build Patch counter segment (O(1), never scans buffer on redisplay)."
@@ -4114,11 +4087,7 @@ Never calls `carriage-ui--get-patch-ranges'."
                   'help-echo "Количество #+begin_patch блоков в буфере"))))
 
 (defun carriage-ui--ml-cache-key ()
-  "Compute cache key for the modeline string based on current UI environment.
-
-Perf invariants:
-- MUST NOT scan buffers or read files.
-- MUST NOT call `carriage-ui--patch-count' / `carriage-ui--get-patch-ranges'."
+  "Compute modeline cache key (strictly O(1), patch-count only from cache)."
   (let* ((uicons (carriage-ui--icons-available-p))
          (blocks (if (and (listp carriage-ui-modeline-blocks)
                           carriage-ui-modeline-blocks)
@@ -4126,7 +4095,7 @@ Perf invariants:
                    carriage-ui--modeline-default-blocks))
          (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
          (ctx-ver (and (memq 'context blocks) (or carriage-ui--ctx-badge-version 0)))
-         ;; Patch count: read cache only (never compute).
+         ;; !! Patch count: use strictly cached value, never triggers scan.
          (patch-count (and (memq 'patch blocks)
                            (not (memq state '(sending streaming dispatch waiting reasoning)))
                            (numberp carriage-ui--patch-count-cache)
@@ -4159,7 +4128,748 @@ Perf invariants:
           (and (boundp 'carriage-mode-include-patched-files)
                carriage-mode-include-patched-files)
           (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
-          ;; include refresh interval so changing it invalidates cached modeline string
+          (and (boundp 'carriage-ui-context-badge-refresh-interval)
+               carriage-ui-context-badge-refresh-interval))))
+;; -------------------------------------------------------------------
+;; FINAL OVERRIDES (SINGLE SOURCE OF TRUTH)
+;;
+;; Goals:
+;; - Ctx in modeline reflects the *next request* context (doc/gptel/visible/patched + limits),
+;;   and updates no more often than `carriage-ui-context-badge-refresh-interval'.
+;; - All redisplay/modeline code is O(1): no buffer scans, no IO, no expensive Org ops.
+;; - Patch counter is O(1) in modeline (reads only the cache maintained by debounced workers).
+
+(defcustom carriage-ui-context-badge-refresh-interval 1.0
+  "Minimum seconds between context badge recomputations for a buffer."
+  :type 'number
+  :group 'carriage-ui)
+
+(defvar-local carriage-ui--ctx-badge-cache (cons "[Ctx:?]" "Контекст: вычисление…"))
+(defvar-local carriage-ui--ctx-badge-cache-sig nil)
+(defvar-local carriage-ui--ctx-badge-last-time 0.0)
+(defvar-local carriage-ui--ctx-badge-refresh-timer nil)
+(defvar-local carriage-ui--ctx-badge-pending nil)
+(defvar-local carriage-ui--ctx-badge-version 0)
+
+(defun carriage-ui--ctx--badge-signature ()
+  "Signature for ctx badge cache validity (does not include point).
+Point-dependence is handled by the time throttle."
+  (list
+   :algo 4
+   :mode major-mode
+   :inc-doc (if (boundp 'carriage-mode-include-doc-context) carriage-mode-include-doc-context t)
+   :inc-gpt (if (boundp 'carriage-mode-include-gptel-context) carriage-mode-include-gptel-context t)
+   :inc-vis (and (boundp 'carriage-mode-include-visible-context) carriage-mode-include-visible-context)
+   :inc-patched (and (boundp 'carriage-mode-include-patched-files) carriage-mode-include-patched-files)
+   :scope (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+   :profile (and (boundp 'carriage-doc-context-profile) carriage-doc-context-profile)
+   :ctx-max-files (and (boundp 'carriage-mode-context-max-files) carriage-mode-context-max-files)
+   :ctx-max-bytes (and (boundp 'carriage-mode-context-max-total-bytes) carriage-mode-context-max-total-bytes)))
+
+(defun carriage-ui--ctx--normalize-badge (badge)
+  "Normalize BADGE into (LABEL . TOOLTIP) cons cell; never signal."
+  (condition-case _e
+      (cond
+       ((consp badge)
+        (cons (if (stringp (car badge)) (car badge) (format "%s" (car badge)))
+              (if (stringp (cdr badge)) (cdr badge) (format "%s" (cdr badge)))))
+       ((and (listp badge) (plist-member badge :label))
+        (let ((lbl (plist-get badge :label))
+              (tip (or (plist-get badge :tooltip) (plist-get badge :help) "")))
+          (cons (if (stringp lbl) lbl (format "%s" lbl))
+                (if (stringp tip) tip (format "%s" tip)))))
+       ((stringp badge)
+        (cons badge (or (get-text-property 0 'help-echo badge) "")))
+       (t
+        (cons "[Ctx:?]" "Контекст: вычисление…")))
+    (error (cons "[Ctx:!]" "Контекст: ошибка нормализации"))))
+
+(defun carriage-ui--ctx--compute-badge ()
+  "Compute context badge via `carriage-context-count` (fast, no file contents).
+Runs only from timer/worker (never on redisplay)."
+  (let* ((inc-doc (if (boundp 'carriage-mode-include-doc-context) carriage-mode-include-doc-context t))
+         (inc-gpt (if (boundp 'carriage-mode-include-gptel-context) carriage-mode-include-gptel-context t))
+         (inc-vis (and (boundp 'carriage-mode-include-visible-context) carriage-mode-include-visible-context))
+         (inc-pat (and (boundp 'carriage-mode-include-patched-files) carriage-mode-include-patched-files))
+         (off (not (or inc-doc inc-gpt inc-vis inc-pat))))
+    (if off
+        (cons "[Ctx:-]" "Контекст выключен (doc=off, gptel=off, vis=off, patched=off)")
+      (require 'carriage-context nil t)
+      (let* ((res (and (fboundp 'carriage-context-count)
+                       (ignore-errors (carriage-context-count (current-buffer) (point)))))
+             (cnt  (or (and (listp res) (plist-get res :count)) 0))
+             (items (or (and (listp res) (plist-get res :items)) '()))
+             (warns (or (and (listp res) (plist-get res :warnings)) '()))
+             (stats (or (and (listp res) (plist-get res :stats)) '()))
+             (limit (or (and (boundp 'carriage-ui-context-tooltip-max-items)
+                             carriage-ui-context-tooltip-max-items)
+                        50))
+             (n (length items))
+             (shown (if (and (integerp limit) (> limit 0))
+                        (cl-subseq items 0 (min n limit))
+                      items))
+             (more (max 0 (- n (length shown))))
+             (head (format "Контекст: файлов=%d — doc=%s gptel=%s vis=%s patched=%s scope=%s profile=%s — лимиты: files=%s bytes=%s — бюджет: included=%s skipped=%s bytes=%s"
+                           cnt
+                           (if inc-doc "on" "off")
+                           (if inc-gpt "on" "off")
+                           (if inc-vis "on" "off")
+                           (if inc-pat "on" "off")
+                           (let ((sc (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)))
+                             (if (eq sc 'last) "last" "all"))
+                           (let ((pr (and (boundp 'carriage-doc-context-profile) carriage-doc-context-profile)))
+                             (if (eq pr 'p3) "P3" "P1"))
+                           (or (and (boundp 'carriage-mode-context-max-files) carriage-mode-context-max-files) "-")
+                           (or (and (boundp 'carriage-mode-context-max-total-bytes) carriage-mode-context-max-total-bytes) "-")
+                           (or (plist-get stats :included) 0)
+                           (or (plist-get stats :skipped) 0)
+                           (or (plist-get stats :total-bytes) 0)))
+             (warn-lines (when warns
+                           (cons "Предупреждения:"
+                                 (mapcar (lambda (w) (concat " - " w)) warns))))
+             (item-lines (cons "Элементы:"
+                               (append (mapcar #'carriage-ui--context-item->line shown)
+                                       (when (> more 0) (list (format "… (+%d more)" more))))))
+             (tip (mapconcat #'identity
+                             (delq nil (list head
+                                             (and warn-lines (mapconcat #'identity warn-lines "\n"))
+                                             (and item-lines (mapconcat #'identity item-lines "\n"))))
+                             "\n")))
+        (cons (format "[Ctx:%d]" cnt) tip)))))
+
+(defun carriage-ui--ctx--apply-badge (badge sig)
+  "Install computed BADGE with signature SIG into cache.
+Only bumps versions and forces modeline update when the value actually changed."
+  (let* ((new (carriage-ui--ctx--normalize-badge badge))
+         (old carriage-ui--ctx-badge-cache)
+         (changed (not (equal new old))))
+    (setq carriage-ui--ctx-badge-cache new
+          carriage-ui--ctx-badge-cache-sig sig
+          carriage-ui--ctx-badge-last-time (float-time))
+    (when changed
+      (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+      (when (fboundp 'carriage-ui--invalidate-ml-cache)
+        (carriage-ui--invalidate-ml-cache))
+      (force-mode-line-update))
+    new))
+
+(defun carriage-ui--ctx--schedule-refresh (&optional delay)
+  "Schedule ctx recomputation with coalescing; uses run-at-time (not idle-only)."
+  (when (timerp carriage-ui--ctx-badge-refresh-timer)
+    (ignore-errors (cancel-timer carriage-ui--ctx-badge-refresh-timer)))
+  (let* ((buf (current-buffer))
+         (d (max 0.01 (float (or delay 0.05)))))
+    (setq carriage-ui--ctx-badge-pending t)
+    (setq carriage-ui--ctx-badge-refresh-timer
+          (run-at-time
+           d nil
+           (lambda (b)
+             (when (buffer-live-p b)
+               (with-current-buffer b
+                 (unwind-protect
+                     (let* ((sig (carriage-ui--ctx--badge-signature))
+                            (badge (condition-case e
+                                       (carriage-ui--ctx--compute-badge)
+                                     (error
+                                      (cons "[Ctx:!]" (format "Ctx compute error: %s"
+                                                              (error-message-string e)))))))
+                       (carriage-ui--ctx--apply-badge badge sig))
+                   (setq carriage-ui--ctx-badge-refresh-timer nil
+                         carriage-ui--ctx-badge-pending nil)))))
+           buf)))
+  t)
+
+(defun carriage-ui--ctx-invalidate (&rest _)
+  "Invalidate ctx cache and schedule recompute ASAP (still throttled by the getter)."
+  (setq carriage-ui--ctx-badge-cache-sig nil
+        carriage-ui--ctx-badge-last-time 0.0)
+  (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (carriage-ui--invalidate-ml-cache))
+  (carriage-ui--ctx--schedule-refresh 0.02)
+  (force-mode-line-update)
+  t)
+
+(defun carriage-ui--context-badge ()
+  "Return cached (LABEL . TOOLTIP) and schedule recompute at most once per interval.
+Redisplay-safe: never scans buffers and never reads file contents."
+  (let* ((sig (carriage-ui--ctx--badge-signature))
+         (now (float-time))
+         (interval (max 0.1 (or carriage-ui-context-badge-refresh-interval 1.0)))
+         (last (or carriage-ui--ctx-badge-last-time 0.0))
+         (age (- now last))
+         (sig-stale (not (equal sig carriage-ui--ctx-badge-cache-sig)))
+         (have (consp carriage-ui--ctx-badge-cache)))
+    ;; Normalize any legacy string cache once.
+    (when (and (not have) (stringp carriage-ui--ctx-badge-cache))
+      (setq carriage-ui--ctx-badge-cache (carriage-ui--ctx--normalize-badge carriage-ui--ctx-badge-cache))
+      (setq have (consp carriage-ui--ctx-badge-cache)))
+    ;; Schedule recompute when needed, but never more often than interval.
+    (when (and (not carriage-ui--ctx-badge-pending)
+               (or (not have) sig-stale (>= age interval)))
+      (carriage-ui--ctx--schedule-refresh (if have 0.05 0.01)))
+    (if (consp carriage-ui--ctx-badge-cache)
+        carriage-ui--ctx-badge-cache
+      (cons "[Ctx:?]" "Контекст: вычисление… (обновится автоматически)"))))
+
+(defun carriage-ui-refresh-context-badge ()
+  "Force refresh of the [Ctx:N] badge (async, nonblocking) and update modeline."
+  (interactive)
+  (carriage-ui--ctx-invalidate))
+
+(defun carriage-ui--compute-context-badge (_inc-doc _inc-gpt _inc-vis _inc-patched)
+  "Compatibility shim: return cached (LABEL . TOOLTIP) and schedule refresh if stale."
+  (carriage-ui--context-badge))
+
+(defun carriage-ui--ml-seg-context ()
+  "Build Context badge segment (click to refresh). Never signals."
+  (let* ((ctx (condition-case _e
+                  (carriage-ui--context-badge)
+                (error (cons "[Ctx:!]" "Контекст: ошибка (см. *Messages*)"))))
+         (ctx2 (carriage-ui--ctx--normalize-badge ctx))
+         (lbl (car ctx2))
+         (hint (cdr ctx2)))
+    (when (stringp lbl)
+      (carriage-ui--ml-button lbl #'carriage-ui--ctx-invalidate
+                              (or hint "Обновить контекст (mouse-1)")))))
+
+;; --- Patch-count: strict O(1) on redisplay/modeline.
+(defun carriage-ui--patch-count ()
+  "Return strictly O(1) cached number of #+begin_patch blocks."
+  (or (and (derived-mode-p 'org-mode)
+           (numberp carriage-ui--patch-count-cache)
+           carriage-ui--patch-count-cache)
+      0))
+
+(defun carriage-ui--ml-seg-patch ()
+  "Build Patch counter segment (O(1), never scans buffer on redisplay)."
+  (let ((n (carriage-ui--patch-count)))
+    (when (and (numberp n) (> n 0))
+      (propertize (format "[P:%d]" n)
+                  'help-echo "Количество #+begin_patch блоков в буфере"))))
+
+(defun carriage-ui--ml-cache-key ()
+  "Compute modeline cache key (strictly O(1), no scans / IO)."
+  (let* ((uicons (carriage-ui--icons-available-p))
+         (blocks (if (and (listp carriage-ui-modeline-blocks)
+                          carriage-ui-modeline-blocks)
+                     carriage-ui-modeline-blocks
+                   carriage-ui--modeline-default-blocks))
+         (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
+         (ctx-ver (and (memq 'context blocks) (or carriage-ui--ctx-badge-version 0)))
+         (patch-count (and (memq 'patch blocks)
+                           (not (memq state '(sending streaming dispatch waiting reasoning)))
+                           (numberp carriage-ui--patch-count-cache)
+                           carriage-ui--patch-count-cache))
+         (has-last (and (memq 'all blocks)
+                        (carriage-ui--last-iteration-present-p)))
+         (spin   (and carriage-ui-enable-spinner
+                      (memq state '(sending streaming dispatch waiting reasoning))
+                      (carriage-ui--spinner-char)))
+         (branch-t (and (memq 'branch blocks) carriage-ui--branch-cache-time))
+         (abortp (and (boundp 'carriage--abort-handler) carriage--abort-handler)))
+    (list uicons
+          state spin
+          ctx-ver
+          patch-count has-last abortp blocks
+          (and (boundp 'carriage-mode-intent)  carriage-mode-intent)
+          (and (boundp 'carriage-mode-suite)   carriage-mode-suite)
+          (and (boundp 'carriage-mode-model)   carriage-mode-model)
+          (and (boundp 'carriage-mode-backend) carriage-mode-backend)
+          (and (boundp 'carriage-mode-provider) carriage-mode-provider)
+          (and (boundp 'carriage-apply-engine) carriage-apply-engine)
+          (and (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)
+          branch-t
+          (and (boundp 'carriage-mode-include-gptel-context)
+               carriage-mode-include-gptel-context)
+          (and (boundp 'carriage-mode-include-doc-context)
+               carriage-mode-include-doc-context)
+          (and (boundp 'carriage-mode-include-visible-context)
+               carriage-mode-include-visible-context)
+          (and (boundp 'carriage-mode-include-patched-files)
+               carriage-mode-include-patched-files)
+          (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+          (and (boundp 'carriage-ui-context-badge-refresh-interval)
+               carriage-ui-context-badge-refresh-interval))))
+
+;;; -------------------------------------------------------------------
+;;; Final non-blocking overrides (single source of truth)
+;;; - Modeline/header-line must be O(1): no scans, no IO, no require.
+;;; - Ctx refresh: run-at-time (not idle), throttle ≤ carriage-ui-context-badge-refresh-interval.
+;;; - Patch-count in modeline: strictly from cache (no regex scans in redisplay).
+
+;; -------------------------
+;; O(1) patch-count in redisplay
+
+(defun carriage-ui--patch-count ()
+  "Return strictly O(1) cached number of #+begin_patch blocks for modeline use."
+  (or (and (derived-mode-p 'org-mode)
+           (numberp carriage-ui--patch-count-cache)
+           carriage-ui--patch-count-cache)
+      0))
+
+(defun carriage-ui--ml-seg-patch ()
+  "Build Patch counter segment from cached value only (no scans)."
+  (let ((n (carriage-ui--patch-count)))
+    (when (and (numberp n) (> n 0))
+      (propertize (format "[P:%d]" n)
+                  'help-echo "Количество #+begin_patch блоков (кэш, без пересканов)"))))
+
+(defun carriage-ui--ml-cache-key ()
+  "Compute modeline cache key (strict O(1), no scans/IO in redisplay)."
+  (let* ((uicons (carriage-ui--icons-available-p))
+         (blocks (if (and (listp carriage-ui-modeline-blocks)
+                          carriage-ui-modeline-blocks)
+                     carriage-ui-modeline-blocks
+                   carriage-ui--modeline-default-blocks))
+         (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
+         ;; Ctx: use version stamp only; worker bumps version on real change.
+         (ctx-ver (and (memq 'context blocks) (or carriage-ui--ctx-badge-version 0)))
+         ;; Patch count: use cached number only (never compute from redisplay).
+         (patch-count (and (memq 'patch blocks)
+                           (not (memq state '(sending streaming dispatch waiting reasoning)))
+                           (numberp carriage-ui--patch-count-cache)
+                           carriage-ui--patch-count-cache))
+         (has-last (and (memq 'all blocks)
+                        (carriage-ui--last-iteration-present-p)))
+         (spin (and carriage-ui-enable-spinner
+                    (memq state '(sending streaming dispatch waiting reasoning))
+                    (carriage-ui--spinner-char)))
+         (branch-t (and (memq 'branch blocks) carriage-ui--branch-cache-time))
+         (abortp (and (boundp 'carriage--abort-handler) carriage--abort-handler)))
+    (list uicons
+          state spin
+          ctx-ver
+          patch-count has-last abortp blocks
+          (and (boundp 'carriage-mode-intent)  carriage-mode-intent)
+          (and (boundp 'carriage-mode-suite)   carriage-mode-suite)
+          (and (boundp 'carriage-mode-model)   carriage-mode-model)
+          (and (boundp 'carriage-mode-backend) carriage-mode-backend)
+          (and (boundp 'carriage-mode-provider) carriage-mode-provider)
+          (and (boundp 'carriage-apply-engine) carriage-apply-engine)
+          (and (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)
+          branch-t
+          (and (boundp 'carriage-mode-include-gptel-context)
+               carriage-mode-include-gptel-context)
+          (and (boundp 'carriage-mode-include-doc-context)
+               carriage-mode-include-doc-context)
+          (and (boundp 'carriage-mode-include-visible-context)
+               carriage-mode-include-visible-context)
+          (and (boundp 'carriage-mode-include-patched-files)
+               carriage-mode-include-patched-files)
+          (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+          (and (boundp 'carriage-ui-context-badge-refresh-interval)
+               carriage-ui-context-badge-refresh-interval))))
+
+;; -------------------------
+;; Non-blocking Ctx badge (single worker; ≤ 1Hz; run-at-time, not idle)
+
+;; Guard local vars (redeclare safely).
+(defvar-local carriage-ui--ctx-badge-cache (cons "[Ctx:?]" "Контекст: вычисляется…"))
+(defvar-local carriage-ui--ctx-badge-cache-sig nil)
+(defvar-local carriage-ui--ctx-badge-last-time 0.0)
+(defvar-local carriage-ui--ctx-badge-refresh-timer nil)
+(defvar-local carriage-ui--ctx-badge-pending nil)
+(defvar-local carriage-ui--ctx-badge-version 0)
+
+;; Helper: normalize any legacy/string/plist forms into (LABEL . TOOLTIP)
+(defun carriage-ui--ctx--normalize-badge (badge)
+  (condition-case _
+      (cond
+       ((consp badge)
+        (cons (if (stringp (car badge)) (car badge) (format "%s" (car badge)))
+              (if (stringp (cdr badge)) (cdr badge) (format "%s" (cdr badge)))))
+       ((and (listp badge) (plist-member badge :label))
+        (let ((lbl (plist-get badge :label))
+              (tip (or (plist-get badge :tooltip) (plist-get badge :help) "")))
+          (cons (if (stringp lbl) lbl (format "%s" lbl))
+                (if (stringp tip) tip (format "%s" tip)))))
+       ((stringp badge)
+        (cons badge (or (get-text-property 0 'help-echo badge) "")))
+       (t
+        (cons "[Ctx:?]" "Контекст: вычисляется…")))
+    (error (cons "[Ctx:!]" "Контекст: ошибка нормализации"))))
+
+(defun carriage-ui--ctx--apply-badge (badge sig)
+  "Install computed BADGE (cons) with SIG into cache; bump version only on real change."
+  (let* ((new (carriage-ui--ctx--normalize-badge badge))
+         (old carriage-ui--ctx-badge-cache)
+         (changed (not (equal new old))))
+    (setq carriage-ui--ctx-badge-cache new
+          carriage-ui--ctx-badge-cache-sig sig
+          carriage-ui--ctx-badge-last-time (float-time))
+    (when changed
+      (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+      (when (fboundp 'carriage-ui--invalidate-ml-cache)
+        (carriage-ui--invalidate-ml-cache))
+      (force-mode-line-update))
+    new))
+
+(defun carriage-ui--ctx--badge-signature ()
+  "Return signature for ctx badge cache validity (no point/tick; only toggles/scope/limits)."
+  (list
+   :algo 'final
+   :mode major-mode
+   :inc-doc (and (boundp 'carriage-mode-include-doc-context) carriage-mode-include-doc-context)
+   :inc-gpt (and (boundp 'carriage-mode-include-gptel-context) carriage-mode-include-gptel-context)
+   :inc-vis (and (boundp 'carriage-mode-include-visible-context) carriage-mode-include-visible-context)
+   :inc-patched (and (boundp 'carriage-mode-include-patched-files) carriage-mode-include-patched-files)
+   :scope (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+   :profile (and (boundp 'carriage-doc-context-profile) carriage-doc-context-profile)
+   :ctx-max-files (and (boundp 'carriage-mode-context-max-files) carriage-mode-context-max-files)
+   :ctx-max-bytes (and (boundp 'carriage-mode-context-max-total-bytes) carriage-mode-context-max-total-bytes)))
+
+(defun carriage-ui--ctx--compute-badge ()
+  "Compute (LABEL . TOOLTIP) via carriage-context-count (fast; no file contents).
+Runs only in worker timer (never from redisplay)."
+  (require 'carriage-context nil t)
+  (let* ((res (and (fboundp 'carriage-context-count)
+                   (ignore-errors (carriage-context-count (current-buffer) (point)))))
+         (cnt (or (and (listp res) (plist-get res :count)) 0))
+         (items (or (and (listp res) (plist-get res :items)) '()))
+         (warns (or (and (listp res) (plist-get res :warnings)) '()))
+         (limit (or (and (boundp 'carriage-ui-context-tooltip-max-items)
+                         carriage-ui-context-tooltip-max-items)
+                    50))
+         (n (length items))
+         (shown (if (and (integerp limit) (> limit 0))
+                    (cl-subseq items 0 (min n limit))
+                  items))
+         (more (max 0 (- n (length shown))))
+         (head (format "Контекст: файлов=%d — doc=%s gptel=%s vis=%s patched=%s scope=%s profile=%s"
+                       cnt
+                       (if (and (boundp 'carriage-mode-include-doc-context) carriage-mode-include-doc-context) "on" "off")
+                       (if (and (boundp 'carriage-mode-include-gptel-context) carriage-mode-include-gptel-context) "on" "off")
+                       (if (and (boundp 'carriage-mode-include-visible-context) carriage-mode-include-visible-context) "on" "off")
+                       (if (and (boundp 'carriage-mode-include-patched-files) carriage-mode-include-patched-files) "on" "off")
+                       (let ((sc (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)))
+                         (if (eq sc 'last) "last" "all"))
+                       (let ((pr (and (boundp 'carriage-doc-context-profile) carriage-doc-context-profile)))
+                         (if (eq pr 'p3) "P3" "P1"))))
+         (warn-lines (when (and warns (> (length warns) 0))
+                       (cons "Предупреждения:"
+                             (mapcar (lambda (w) (concat " - " w)) warns))))
+         (item-lines
+          (cons "Элементы:"
+                (append (mapcar (lambda (it)
+                                  (let ((p (plist-get it :path))
+                                        (src (plist-get it :source)))
+                                    (format " - [%s] %s" (or src "?") (or p "-"))))
+                                shown)
+                        (when (> more 0) (list (format "… (+%d more)" more)))))))
+    (cons (format "[Ctx:%d]" cnt)
+          (mapconcat #'identity
+                     (delq nil (list head
+                                     (and warn-lines (mapconcat #'identity warn-lines "\n"))
+                                     (and item-lines (mapconcat #'identity item-lines "\n"))))
+                     "\n"))))
+
+(defun carriage-ui--ctx--schedule-refresh (&optional delay)
+  "Schedule ctx recomputation (run-at-time, not idle). Coalesces requests."
+  (when (timerp carriage-ui--ctx-badge-refresh-timer)
+    (ignore-errors (cancel-timer carriage-ui--ctx-badge-refresh-timer)))
+  (let* ((buf (current-buffer))
+         (d (max 0.01 (float (or delay 0.05)))))
+    (setq carriage-ui--ctx-badge-pending t)
+    (setq carriage-ui--ctx-badge-refresh-timer
+          (run-at-time
+           d nil
+           (lambda (b)
+             (when (buffer-live-p b)
+               (with-current-buffer b
+                 (unwind-protect
+                     (let* ((sig (carriage-ui--ctx--badge-signature))
+                            (badge (condition-case e
+                                        (carriage-ui--ctx--compute-badge)
+                                      (error (cons "[Ctx:!]" (format "Ctx compute error: %s" (error-message-string e)))))))
+                       (carriage-ui--ctx--apply-badge badge sig))
+                   (setq carriage-ui--ctx-badge-refresh-timer nil
+                         carriage-ui--ctx-badge-pending nil)))))))))
+
+(defun carriage-ui--ctx-invalidate (&rest _)
+  "Invalidate ctx cache and schedule recompute ASAP (still throttled by getter)."
+  (setq carriage-ui--ctx-badge-cache-sig nil
+        carriage-ui--ctx-badge-last-time 0.0)
+  (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (carriage-ui--invalidate-ml-cache))
+  (carriage-ui--ctx--schedule-refresh 0.02)
+  (force-mode-line-update)
+  t)
+
+(defun carriage-ui--context-badge ()
+  "Return cached (LABEL . TOOLTIP) and schedule recompute ≤ 1 Hz when stale.
+Redisplay-safe: never scans buffers and never reads file contents."
+  (let* ((sig (carriage-ui--ctx--badge-signature))
+         (now (float-time))
+         (interval (max 0.1 (or carriage-ui-context-badge-refresh-interval 1.0)))
+         (last (or carriage-ui--ctx-badge-last-time 0.0))
+         (age (- now last))
+         (sig-stale (not (equal sig carriage-ui--ctx-badge-cache-sig)))
+         (have (consp carriage-ui--ctx-badge-cache)))
+    ;; Normalize any legacy string cache once.
+    (when (and (not have) (stringp carriage-ui--ctx-badge-cache))
+      (setq carriage-ui--ctx-badge-cache
+            (carriage-ui--ctx--normalize-badge carriage-ui--ctx-badge-cache))
+      (setq have (consp carriage-ui--ctx-badge-cache)))
+    ;; Schedule recompute when needed, but never more often than interval.
+    (when (and (not carriage-ui--ctx-badge-pending)
+               (or (not have) sig-stale (>= age interval)))
+      (carriage-ui--ctx--schedule-refresh (if have 0.05 0.01)))
+    (if (consp carriage-ui--ctx-badge-cache)
+        carriage-ui--ctx-badge-cache
+      (cons "[Ctx:?]" "Контекст: вычисляется… (обновится автоматически)"))))
+
+;; Robust modeline segment: always operate on cons, never signals.
+(defun carriage-ui--ml-seg-context ()
+  "Build Context badge segment (click to refresh) from cached value only."
+  (let* ((ctx (condition-case _
+                  (carriage-ui--context-badge)
+                (error (cons "[Ctx:!]" "Контекст: ошибка (см. *Messages*)"))))
+         (ctx2 (carriage-ui--ctx--normalize-badge ctx))
+         (lbl (car ctx2))
+         (hint (cdr ctx2)))
+    (when (stringp lbl)
+      (carriage-ui--ml-button lbl #'carriage-ui--ctx-invalidate
+                              (or hint "Обновить контекст (mouse-1)")))))
+
+;; -------------------------------------------------------------------
+;; FINAL NON-BLOCKING OVERRIDES (single source of truth, O(1) in redisplay)
+;;
+;; - Modeline reads cached values only (no scans/IO/require).
+;; - Context badge is computed by a single throttled worker (≤ carriage-ui-context-badge-refresh-interval).
+;; - Patch-count in modeline reads strictly from cache (no regex scans in redisplay).
+;;
+;; This block deliberately redefines a few functions at the very end of the file to
+;; ensure no earlier experimental/legacy definitions are active.
+
+(defcustom carriage-ui-context-badge-refresh-interval 1.0
+  "Minimum seconds between context badge recomputations for the current buffer (throttle)."
+  :type 'number
+  :group 'carriage-ui)
+
+(defvar-local carriage-ui--ctx-badge-cache nil)          ;; (LABEL . TOOLTIP)
+(defvar-local carriage-ui--ctx-badge-last-time 0.0)      ;; float-time of last successful compute
+(defvar-local carriage-ui--ctx-badge-refresh-timer nil)  ;; pending timer object
+(defvar-local carriage-ui--ctx-badge-pending nil)        ;; flag (non-nil when scheduled/running)
+(defvar-local carriage-ui--ctx-badge-version 0)          ;; bump on value change (for ml cache key)
+
+(defun carriage-ui--ctx--normalize-badge (badge)
+  "Normalize BADGE to a cons (LABEL . TOOLTIP), robust to legacy forms."
+  (cond
+   ((and (consp badge) (stringp (car badge)))
+    (cons (car badge) (and (stringp (cdr badge)) (cdr badge))))
+   ((stringp badge)
+    (cons badge (or (get-text-property 0 'help-echo badge) "")))
+   ((and (listp badge) (plist-member badge :label))
+    (let ((lbl (plist-get badge :label))
+          (tip (or (plist-get badge :tooltip) (plist-get badge :help) "")))
+      (cons (if (stringp lbl) lbl (format "%s" lbl))
+            (if (stringp tip) tip (format "%s" tip)))))
+   (t (cons "[Ctx:?]" "Контекст: вычисляется…"))))
+
+(defun carriage-ui--ctx--badge-signature ()
+  "Compute a signature of context-affecting toggles/options (no point/tick).
+Used to decide if recomputation is needed."
+  (list
+   :mode major-mode
+   :doc (and (boundp 'carriage-mode-include-doc-context) carriage-mode-include-doc-context)
+   :gpt (and (boundp 'carriage-mode-include-gptel-context) carriage-mode-include-gptel-context)
+   :vis (and (boundp 'carriage-mode-include-visible-context) carriage-mode-include-visible-context)
+   :patched (and (boundp 'carriage-mode-include-patched-files) carriage-mode-include-patched-files)
+   :scope (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+   :profile (and (boundp 'carriage-doc-context-profile) carriage-doc-context-profile)
+   :max-files (and (boundp 'carriage-mode-context-max-files) carriage-mode-context-max-files)
+   :max-bytes (and (boundp 'carriage-mode-context-max-total-bytes) carriage-mode-context-max-total-bytes)))
+
+(defun carriage-ui--ctx--compute-badge ()
+  "Compute context badge as (LABEL . TOOLTIP) using carriage-context-count (no file IO).
+Returns a normalized cons cell; never signals (errors are reported as Ctx:!)."
+  (condition-case e
+      (progn
+        (require 'carriage-context nil t)
+        (let* ((res (and (fboundp 'carriage-context-count)
+                         (carriage-context-count (current-buffer) (point))))
+               (cnt (or (and (listp res) (plist-get res :count)) 0))
+               (items (or (and (listp res) (plist-get res :items)) '()))
+               (warns (or (and (listp res) (plist-get res :warnings)) '()))
+               (limit (or (and (boundp 'carriage-ui-context-tooltip-max-items)
+                               carriage-ui-context-tooltip-max-items)
+                          50))
+               (shown (if (and (integerp limit) (> limit 0))
+                          (cl-subseq items 0 (min (length items) limit))
+                        items))
+               (more (max 0 (- (length items) (length shown))))
+               (head (format "Контекст: файлов=%d — doc=%s gptel=%s vis=%s patched=%s scope=%s profile=%s"
+                             cnt
+                             (if (and (boundp 'carriage-mode-include-doc-context)
+                                      carriage-mode-include-doc-context) "on" "off")
+                             (if (and (boundp 'carriage-mode-include-gptel-context)
+                                      carriage-mode-include-gptel-context) "on" "off")
+                             (if (and (boundp 'carriage-mode-include-visible-context)
+                                      carriage-mode-include-visible-context) "on" "off")
+                             (if (and (boundp 'carriage-mode-include-patched-files)
+                                      carriage-mode-include-patched-files) "on" "off")
+                             (let ((sc (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)))
+                               (if (eq sc 'last) "last" "all"))
+                             (let ((pr (and (boundp 'carriage-doc-context-profile) carriage-doc-context-profile)))
+                               (if (eq pr 'p3) "P3" "P1"))))
+               (warn-lines (when (and warns (> (length warns) 0))
+                             (cons "Предупреждения:"
+                                   (mapcar (lambda (w) (concat " - " w)) warns))))
+               (item-lines (cons "Элементы:"
+                                 (append (mapcar (lambda (it)
+                                                   (let ((p (plist-get it :path))
+                                                         (src (plist-get it :source)))
+                                                     (format " - [%s] %s" (or src "?") (or p "-"))))
+                                                 shown)
+                                         (when (> more 0)
+                                           (list (format "… (+%d more)" more))))))
+               (tip (mapconcat #'identity
+                               (delq nil (list head
+                                               (and warn-lines (mapconcat #'identity warn-lines "\n"))
+                                               (and item-lines (mapconcat #'identity item-lines "\n"))))
+                               "\n")))
+          (cons (format "[Ctx:%d]" cnt) tip)))
+    (error (cons "[Ctx:!]" (format "Ctx compute error: %s" (error-message-string e))))))
+
+(defun carriage-ui--ctx--apply-badge (badge sig)
+  "Install BADGE (cons) with SIG into cache; bump modeline only on real change."
+  (let* ((new (carriage-ui--ctx--normalize-badge badge))
+         (old carriage-ui--ctx-badge-cache)
+         (changed (not (equal new old))))
+    (setq carriage-ui--ctx-badge-cache new
+          carriage-ui--ctx-badge-last-time (float-time))
+    (when changed
+      (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+      (when (fboundp 'carriage-ui--invalidate-ml-cache)
+        (carriage-ui--invalidate-ml-cache))
+      (force-mode-line-update))
+    new))
+
+(defun carriage-ui--ctx--schedule-refresh (&optional delay)
+  "Schedule context recompute via run-at-time (not idle-only). Coalesces requests."
+  (unless carriage-ui--ctx-badge-pending
+    (setq carriage-ui--ctx-badge-pending t)
+    (let* ((buf (current-buffer))
+           (d (max 0.01 (float (or delay 0.05)))))
+      (when (timerp carriage-ui--ctx-badge-refresh-timer)
+        (ignore-errors (cancel-timer carriage-ui--ctx-badge-refresh-timer)))
+      (setq carriage-ui--ctx-badge-refresh-timer
+            (run-at-time
+             d nil
+             (lambda (b)
+               (when (buffer-live-p b)
+                 (with-current-buffer b
+                   (unwind-protect
+                       (let* ((sig (carriage-ui--ctx--badge-signature))
+                              (badge (carriage-ui--ctx--compute-badge)))
+                         (carriage-ui--ctx--apply-badge badge sig))
+                     (setq carriage-ui--ctx-badge-pending nil
+                           carriage-ui--ctx-badge-refresh-timer nil))))))))))
+
+(defun carriage-ui--ctx-invalidate (&rest _)
+  "Invalidate context badge cache and schedule recomputation ASAP."
+  (setq carriage-ui--ctx-badge-last-time 0.0)
+  (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (carriage-ui--invalidate-ml-cache))
+  (carriage-ui--ctx--schedule-refresh 0.02)
+  (force-mode-line-update)
+  t)
+
+(defun carriage-ui--context-badge ()
+  "Return cached (LABEL . TOOLTIP) and schedule recompute at most once per interval."
+  (let* ((now (float-time))
+         (interval (max 0.1 (or carriage-ui-context-badge-refresh-interval 1.0)))
+         (age (- now (or carriage-ui--ctx-badge-last-time 0.0))))
+    ;; Normalize legacy string cache once
+    (when (and (stringp carriage-ui--ctx-badge-cache))
+      (setq carriage-ui--ctx-badge-cache
+            (carriage-ui--ctx--normalize-badge carriage-ui--ctx-badge-cache)))
+    ;; schedule recompute if needed
+    (when (and (not carriage-ui--ctx-badge-pending)
+               (>= age interval))
+      (carriage-ui--ctx--schedule-refresh 0.01))
+    (if (consp carriage-ui--ctx-badge-cache)
+        carriage-ui--ctx-badge-cache
+      (cons "[Ctx:?]" "Контекст: вычисляется… (обновится автоматически)"))))
+
+(defun carriage-ui--ml-seg-context ()
+  "Build Context badge segment (click to refresh).
+Uses cached value only; never computes in redisplay."
+  (let* ((ctx (condition-case _ (carriage-ui--context-badge)
+                (error (cons "[Ctx:!]" "Контекст: ошибка (см. *Messages*)"))))
+         (ctx2 (carriage-ui--ctx--normalize-badge ctx))
+         (lbl (car ctx2))
+         (tip (cdr ctx2)))
+    (when (stringp lbl)
+      (carriage-ui--ml-button lbl #'carriage-ui--ctx-invalidate
+                              (or tip "Обновить контекст (mouse-1)")))))
+
+;; -------------------------
+;; Patch-count: strict O(1) in redisplay/modeline (cache only)
+
+(defvar-local carriage-ui--patch-count-cache 0
+  "Cached number of #+begin_patch blocks (maintained by background refreshers).")
+
+(defun carriage-ui--patch-count ()
+  "Return strictly O(1) cached number of #+begin_patch blocks."
+  (if (numberp carriage-ui--patch-count-cache)
+      carriage-ui--patch-count-cache
+    0))
+
+(defun carriage-ui--ml-seg-patch ()
+  "Build Patch counter segment from cached value only."
+  (let ((n (carriage-ui--patch-count)))
+    (when (and (numberp n) (> n 0))
+      (propertize (format "[P:%d]" n)
+                  'help-echo "Количество #+begin_patch блоков (кэш, без пересканов)"))))
+
+(defun carriage-ui--ml-cache-key ()
+  "Compute modeline cache key (strict O(1), no scans/IO in redisplay)."
+  (let* ((uicons (carriage-ui--icons-available-p))
+         (blocks (if (and (listp carriage-ui-modeline-blocks)
+                          carriage-ui-modeline-blocks)
+                     carriage-ui-modeline-blocks
+                   carriage-ui--modeline-default-blocks))
+         (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
+         ;; Ctx: use version stamp (worker bumps on real change)
+         (ctx-ver (and (memq 'context blocks) (or carriage-ui--ctx-badge-version 0)))
+         ;; Patch count: read cached number only (never compute from redisplay).
+         (patch-count (and (memq 'patch blocks)
+                           (not (memq state '(sending streaming dispatch waiting reasoning)))
+                           (numberp carriage-ui--patch-count-cache)
+                           carriage-ui--patch-count-cache))
+         (has-last (and (memq 'all blocks)
+                        (and (boundp 'carriage--last-iteration-has-patches)
+                             carriage--last-iteration-has-patches)))
+         (spin (and carriage-ui-enable-spinner
+                    (memq state '(sending streaming dispatch waiting reasoning))
+                    (carriage-ui--spinner-char)))
+         (branch-t (and (memq 'branch blocks) (boundp 'carriage-ui--branch-cache-time) carriage-ui--branch-cache-time))
+         (abortp (and (boundp 'carriage--abort-handler) carriage--abort-handler)))
+    (list uicons
+          state spin
+          ctx-ver
+          patch-count has-last abortp blocks
+          (and (boundp 'carriage-mode-intent)  carriage-mode-intent)
+          (and (boundp 'carriage-mode-suite)   carriage-mode-suite)
+          (and (boundp 'carriage-mode-model)   carriage-mode-model)
+          (and (boundp 'carriage-mode-backend) carriage-mode-backend)
+          (and (boundp 'carriage-mode-provider) carriage-mode-provider)
+          (and (boundp 'carriage-apply-engine) carriage-apply-engine)
+          (and (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)
+          branch-t
+          (and (boundp 'carriage-mode-include-gptel-context)
+               carriage-mode-include-gptel-context)
+          (and (boundp 'carriage-mode-include-doc-context)
+               carriage-mode-include-doc-context)
+          (and (boundp 'carriage-mode-include-visible-context)
+               carriage-mode-include-visible-context)
+          (and (boundp 'carriage-mode-include-patched-files)
+               carriage-mode-include-patched-files)
+          (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
           (and (boundp 'carriage-ui-context-badge-refresh-interval)
                carriage-ui-context-badge-refresh-interval))))
 

@@ -534,6 +534,19 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
   "Enable Carriage mode in the current buffer (internal)."
   (carriage-mode--init-state)
   (carriage-mode--init-ui)
+
+  ;; One-shot deferred ensure: survive late `setq-local mode-line-format' rewrites during file open.
+  ;; No watchdogs, no post-command hooks, no variable watchers.
+  (when (fboundp 'carriage-mode--modeline-ensure-once)
+    (let ((buf (current-buffer)))
+      (run-at-time
+       0 nil
+       (lambda ()
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (when (bound-and-true-p carriage-mode)
+               (ignore-errors (carriage-mode--modeline-ensure-once buf)))))))))
+
   ;; Warm up common modules on idle to avoid cold-start delays in first send.
   (run-at-time 0.2 nil
                (lambda ()

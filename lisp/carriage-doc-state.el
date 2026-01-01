@@ -835,9 +835,13 @@ Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tes
 
 (defun carriage-doc-state--fold--point-inside-ov-p (ov)
   "Non-nil if point is inside OV. End position is treated as inside (EOL)."
-  (and (overlayp ov)
-       (<= (overlay-start ov) (point))
-       (<= (point) (overlay-end ov))))
+  (when (overlayp ov)
+    (let ((beg (overlay-start ov))
+          (end (overlay-end ov)))
+      (and (number-or-marker-p beg)
+           (number-or-marker-p end)
+           (<= beg (point))
+           (<= (point) end)))))
 
 (defun carriage-doc-state--fold--ov-set-folded (ov)
   (when (overlayp ov)
@@ -854,15 +858,33 @@ Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tes
 (defun carriage-doc-state--fold--apply-for-point ()
   "Apply reveal/fold depending on current point for all fold overlays."
   (when carriage-doc-state--fold-enabled
+    ;; State line overlay
     (when (overlayp carriage-doc-state--fold-state-ov)
-      (if (carriage-doc-state--fold--point-inside-ov-p carriage-doc-state--fold-state-ov)
-          (carriage-doc-state--fold--ov-set-revealed carriage-doc-state--fold-state-ov)
-        (carriage-doc-state--fold--ov-set-folded carriage-doc-state--fold-state-ov)))
-    (dolist (ov carriage-doc-state--fold-fp-ovs)
-      (when (overlayp ov)
-        (if (carriage-doc-state--fold--point-inside-ov-p ov)
-            (carriage-doc-state--fold--ov-set-revealed ov)
-          (carriage-doc-state--fold--ov-set-folded ov))))))
+      (let ((beg (overlay-start carriage-doc-state--fold-state-ov))
+            (end (overlay-end carriage-doc-state--fold-state-ov)))
+        (if (and (number-or-marker-p beg) (number-or-marker-p end))
+            (if (carriage-doc-state--fold--point-inside-ov-p carriage-doc-state--fold-state-ov)
+                (carriage-doc-state--fold--ov-set-revealed carriage-doc-state--fold-state-ov)
+              (carriage-doc-state--fold--ov-set-folded carriage-doc-state--fold-state-ov))
+          (delete-overlay carriage-doc-state--fold-state-ov)
+          (setq carriage-doc-state--fold-state-ov nil))))
+    ;; Fingerprint overlays
+    (setq carriage-doc-state--fold-fp-ovs
+          (cl-remove-if-not
+           (lambda (ov)
+             (when (overlayp ov)
+               (let ((beg (overlay-start ov))
+                     (end (overlay-end ov)))
+                 (cond
+                  ((and (number-or-marker-p beg) (number-or-marker-p end))
+                   (if (carriage-doc-state--fold--point-inside-ov-p ov)
+                       (carriage-doc-state--fold--ov-set-revealed ov)
+                     (carriage-doc-state--fold--ov-set-folded ov))
+                   t)
+                  (t
+                   (delete-overlay ov)
+                   nil)))))
+           carriage-doc-state--fold-fp-ovs))))
 
 (defun carriage-doc-state--fold--maybe-summary-from-plist (pl kind)
   "Render summary badges from PL for KIND ('state or 'fingerprint).
@@ -1015,7 +1037,9 @@ Supported canonical format (no backwards compatibility): `#+CARRIAGE_FINGERPRINT
   (carriage-doc-state--fold--apply-for-point))
 
 (defun carriage-doc-state--fold--schedule-refresh (&rest _)
-  (when carriage-doc-state--fold-enabled
+  (when (and carriage-doc-state--fold-enabled
+             ;; Do not schedule work for hidden buffers; reduces per-keystroke churn.
+             (get-buffer-window (current-buffer) t))
     (when (timerp carriage-doc-state--fold-refresh-timer)
       (cancel-timer carriage-doc-state--fold-refresh-timer))
     (setq carriage-doc-state--fold-refresh-timer
@@ -1026,7 +1050,8 @@ Supported canonical format (no backwards compatibility): `#+CARRIAGE_FINGERPRINT
              (when (buffer-live-p buf)
                (with-current-buffer buf
                  (setq carriage-doc-state--fold-refresh-timer nil)
-                 (carriage-doc-state--fold--refresh-overlays))))
+                 (when (get-buffer-window (current-buffer) t)
+                   (carriage-doc-state--fold--refresh-overlays)))))
            (current-buffer)))))
 
 (defun carriage-doc-state-summary-enable ()

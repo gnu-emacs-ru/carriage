@@ -61,9 +61,12 @@ Return a repo-relative path string, or nil if invalid/outside-root/remote."
                  (not (string-prefix-p "/" s1)))
         s1)))))
 
-(defun carriage-context-fast--scan-context-blocks (buffer scope)
+(defun carriage-context-fast--scan-context-blocks (buffer scope point)
   "Return list of raw (un-normalized) lines from begin_context blocks in BUFFER.
-SCOPE is 'all or 'last."
+SCOPE is 'all or 'last.
+
+When SCOPE is 'last, the chosen block is the nearest preceding block relative to POINT
+(if none precedes POINT, fallback to the last block in the buffer)."
   (with-current-buffer buffer
     (if (not (derived-mode-p 'org-mode))
         '()
@@ -71,30 +74,42 @@ SCOPE is 'all or 'last."
         (save-restriction
           (widen)
           (let ((case-fold-search t)
+                ;; Each entry: (START BODY-BEG BODY-END)
                 (blocks '()))
             (goto-char (point-min))
             (while (re-search-forward "^[ \t]*#\\+begin_context\\b" nil t)
-              (let* ((body-beg (save-excursion (forward-line 1) (point)))
+              (let* ((start (match-beginning 0))
+                     (body-beg (save-excursion (forward-line 1) (point)))
                      (body-end (if (re-search-forward "^[ \t]*#\\+end_context\\b" nil t)
                                    (line-beginning-position)
                                  (point-max))))
-                (push (cons body-beg body-end) blocks)))
+                (push (list start body-beg body-end) blocks)))
             (setq blocks (nreverse blocks))
             (when (and (eq scope 'last) blocks)
-              (setq blocks (list (car (last blocks)))))
+              (let* ((pt (or (and (numberp point) point) (point)))
+                     (best nil))
+                (dolist (b blocks)
+                  (when (<= (nth 0 b) pt)
+                    (setq best b)))
+                ;; If no block precedes point: use last block in buffer.
+                (setq blocks (list (or best (car (last blocks)))))))
             (let ((acc '()))
-              (dolist (rg blocks)
-                (save-excursion
-                  (goto-char (car rg))
-                  (while (< (point) (cdr rg))
-                    (let* ((ln (buffer-substring-no-properties (line-beginning-position)
-                                                              (line-end-position)))
-                           (tln (string-trim ln)))
-                      (unless (or (string-empty-p tln)
-                                  (string-prefix-p "#" tln)
-                                  (string-prefix-p ";" tln))
-                        (push tln acc)))
-                    (forward-line 1))))
+              (dolist (b blocks)
+                (let ((body-beg (nth 1 b))
+                      (body-end (nth 2 b)))
+                  (when (and (numberp body-beg) (numberp body-end) (< body-beg body-end))
+                    (save-excursion
+                      (goto-char body-beg)
+                      (while (< (point) body-end)
+                        (let* ((ln (buffer-substring-no-properties (line-beginning-position)
+                                                                  (line-end-position)))
+                               (tln (string-trim ln)))
+                          (unless (or (string-empty-p tln)
+                                      (string-prefix-p "#" tln)
+                                      (string-prefix-p ";" tln))
+                            (push tln acc)))
+                        (forward-line 1))))))
+
               (nreverse acc))))))))
 
 (defun carriage-context-fast--visible-file-paths (buffer)
@@ -111,8 +126,9 @@ Only includes file-visiting buffers; ignores non-file buffers."
               (push fn acc)))))
       (nreverse (delete-dups acc)))))
 
-(defun carriage-context-fast--compute (buffer)
-  "Compute a fast context count for BUFFER (no file reads)."
+(defun carriage-context-fast--compute (buffer point)
+  "Compute a fast context count for BUFFER (no file reads).
+POINT is used for doc-context scope='last selection."
   (let* ((root (carriage-context-fast--project-root buffer))
          (inc-doc (with-current-buffer buffer
                     (and (boundp 'carriage-mode-include-doc-context)
@@ -125,11 +141,13 @@ Only includes file-visiting buffers; ignores non-file buffers."
                            (eq carriage-doc-context-scope 'last))
                       'last
                     'all)))
+         (pt (with-current-buffer buffer
+               (or (and (numberp point) point) (point))))
          (warnings '())
          (src (make-hash-table :test 'equal)))
 
     (when inc-doc
-      (dolist (ln (carriage-context-fast--scan-context-blocks buffer scope))
+      (dolist (ln (carriage-context-fast--scan-context-blocks buffer scope pt))
         (let* ((rel (carriage-context-fast--normalize-path ln root)))
           (if (not (stringp rel))
               (push (format "doc: ignored invalid/out-of-root path: %s" ln) warnings)
@@ -153,12 +171,13 @@ Only includes file-visiting buffers; ignores non-file buffers."
                                 (string< (plist-get a :path) (plist-get b :path)))))
       (list :count count :items items :warnings (nreverse warnings)))))
 
-(defun carriage-context-fast--schedule-refresh (buffer &optional delay)
-  "Schedule cached recomputation for BUFFER and invalidate UI context badge."
+(defun carriage-context-fast--schedule-refresh (buffer point &optional delay)
+  "Schedule cached recomputation for BUFFER at POINT and invalidate UI context badge."
   (with-current-buffer buffer
     (when (timerp carriage-context-fast--refresh-timer)
       (ignore-errors (cancel-timer carriage-context-fast--refresh-timer)))
     (let ((buf buffer)
+          (pt point)
           (d (or delay 0.15)))
       (setq carriage-context-fast--refresh-timer
             (run-with-idle-timer
@@ -168,7 +187,7 @@ Only includes file-visiting buffers; ignores non-file buffers."
                  (with-current-buffer buf
                    (setq carriage-context-fast--refresh-timer nil)
                    (setq carriage-context-fast--cache
-                         (carriage-context-fast--compute buf))
+                         (carriage-context-fast--compute buf pt))
                    (setq carriage-context-fast--cache-tick (buffer-chars-modified-tick))
                    (when (fboundp 'carriage-ui--ctx-invalidate)
                      (ignore-errors (carriage-ui--ctx-invalidate)))
@@ -176,13 +195,13 @@ Only includes file-visiting buffers; ignores non-file buffers."
 
 (defun carriage-context-fast--after-change (_beg _end _len)
   "After-change hook: schedule refresh (coalesced)."
-  (carriage-context-fast--schedule-refresh (current-buffer) 0.2))
+  (carriage-context-fast--schedule-refresh (current-buffer) (point) 0.2))
 
 ;;;###autoload
-(defun carriage-context-count-fast (&optional buffer _point)
+(defun carriage-context-count-fast (&optional buffer point)
   "Fast context counter for UI. Returns plist (:count N :items LIST :warnings LIST).
 
-BUFFER defaults to current buffer. POINT is currently ignored (kept for API compatibility).
+BUFFER defaults to current buffer. POINT defaults to current point.
 This function never reads file contents.
 
 Caching:
@@ -194,7 +213,8 @@ Caching:
       ;; Ensure change watch is installed once per buffer (lightweight).
       (unless (memq #'carriage-context-fast--after-change after-change-functions)
         (add-hook 'after-change-functions #'carriage-context-fast--after-change nil t))
-      (let ((tick (buffer-chars-modified-tick)))
+      (let* ((tick (buffer-chars-modified-tick))
+             (pt (or (and (numberp point) point) (point))))
         (cond
          ((and (listp carriage-context-fast--cache)
                (integerp carriage-context-fast--cache-tick)
@@ -202,11 +222,11 @@ Caching:
           carriage-context-fast--cache)
          ((listp carriage-context-fast--cache)
           ;; Stale cache: return immediately, refresh on idle.
-          (carriage-context-fast--schedule-refresh buf 0.15)
+          (carriage-context-fast--schedule-refresh buf pt 0.15)
           carriage-context-fast--cache)
          (t
           ;; First compute: do it now (context blocks are typically small).
-          (setq carriage-context-fast--cache (carriage-context-fast--compute buf))
+          (setq carriage-context-fast--cache (carriage-context-fast--compute buf pt))
           (setq carriage-context-fast--cache-tick tick)
           carriage-context-fast--cache))))))
 

@@ -535,8 +535,8 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
                  (ignore-errors (require 'carriage-op-aibo nil t))
                  (ignore-errors (require 'carriage-op-patch nil t))
                  (ignore-errors (require 'carriage-op-file nil t))
-                 ;; Fix modeline Ctx:?/Ctx:0 flicker: fast, throttled badge computation (≤1Hz).
-                 (ignore-errors (require 'carriage-ui-ctx-fast nil t))))
+                 ;; Context badge is handled by carriage-ui + carriage-context-count (fast, no file reads).
+                 ))
   ;; Restore state from document, persist snapshot, then fold the block; install save hook.
   (when (require 'carriage-doc-state nil t)
     (ignore-errors (carriage-doc-state-restore))

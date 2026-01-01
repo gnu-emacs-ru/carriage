@@ -134,14 +134,24 @@ Only considers annotated begin_patch blocks with (:applied t ...):
   "Use all #+begin_context blocks for document context in this buffer."
   (interactive)
   (setq-local carriage-doc-context-scope 'all)
-  (force-mode-line-update))
+  ;; Make Ctx badge reflect scope change immediately (no waiting for 1Hz refresh).
+  (when (fboundp 'carriage-ui--ctx-invalidate)
+    (ignore-errors (carriage-ui--ctx-invalidate)))
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (ignore-errors (carriage-ui--invalidate-ml-cache)))
+  (force-mode-line-update t))
 
 ;;;###autoload
 (defun carriage-select-doc-context-last ()
   "Use only the last/nearest #+begin_context block for document context in this buffer."
   (interactive)
   (setq-local carriage-doc-context-scope 'last)
-  (force-mode-line-update))
+  ;; Make Ctx badge reflect scope change immediately (no waiting for 1Hz refresh).
+  (when (fboundp 'carriage-ui--ctx-invalidate)
+    (ignore-errors (carriage-ui--ctx-invalidate)))
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (ignore-errors (carriage-ui--invalidate-ml-cache)))
+  (force-mode-line-update t))
 
 ;;;###autoload
 (defun carriage-toggle-doc-context-scope ()
@@ -957,7 +967,7 @@ SOURCE is one of: 'doc 'gptel 'visible. Patched files must be passed as 'doc."
       (_ nil)))
   state)
 
-(defun carriage-context--count-fast-process-path (p state source)
+(defun carriage-context--count-fast-process-path (p state &optional source)
   "Process candidate path P and update STATE (no file reads; size-based budgeting).
 SOURCE is used only for source classification maps."
   (let* ((root (plist-get state :root))
@@ -1056,13 +1066,13 @@ SOURCE is used only for source classification maps."
       (let ((pat (ignore-errors (carriage-context--patched-files buf))))
         (dolist (p pat)
           (when (carriage-context--count-fast-under-file-limit-p state)
-            (setq state (carriage-context--count-fast-process-path p state))))))
+            (setq state (carriage-context--count-fast-process-path p state 'doc))))))
     ;; 1b) Doc paths
     (when (and inc-doc (carriage-context--count-fast-under-file-limit-p state))
       (let ((doc (ignore-errors (carriage-context--doc-paths buf))))
         (dolist (p doc)
           (when (carriage-context--count-fast-under-file-limit-p state)
-            (setq state (carriage-context--count-fast-process-path p state))))))
+            (setq state (carriage-context--count-fast-process-path p state 'doc))))))
     ;; 2) Visible buffers
     (when (and inc-vis (carriage-context--count-fast-under-file-limit-p state))
       (let ((seen (make-hash-table :test 'eq))
@@ -1090,7 +1100,7 @@ SOURCE is used only for source classification maps."
                      (cond
                       ((and (stringp buffer-file-name) (not (file-remote-p buffer-file-name)))
                        (when (carriage-context--count-fast-under-file-limit-p state)
-                         (setq state (carriage-context--count-fast-process-path buffer-file-name state))))
+                         (setq state (carriage-context--count-fast-process-path buffer-file-name state 'visible))))
                       (t
                        (when (carriage-context--count-fast-under-file-limit-p state)
                          (setq state (carriage-context--count-fast-process-visible-buffer b state))))))))))))
@@ -1100,7 +1110,7 @@ SOURCE is used only for source classification maps."
       (let ((gpt (ignore-errors (carriage-context--maybe-gptel-files))))
         (dolist (p gpt)
           (when (carriage-context--count-fast-under-file-limit-p state)
-            (setq state (carriage-context--count-fast-process-path p state))))))
+            (setq state (carriage-context--count-fast-process-path p state 'gptel))))))
     (carriage-context--count-fast-finalize state)))
 
 (defun carriage-context-count (&optional buffer _point)

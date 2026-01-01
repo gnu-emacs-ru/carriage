@@ -2550,20 +2550,18 @@ Accepted keys: :model :provider :time-start :inc-chunk (t to increment) :time-la
        (carriage-ui--render-state-tooltip 'reasoning carriage--ui-state-meta)))))
 
 (defun carriage-ui-note-apply-summary (plist)
-  "Update apply/dry-run summary in meta and update apply-status badge.
+  "Update apply/dry-run status badge from a lightweight summary PLIST.
+
 PLIST keys: :phase ('apply|'dry-run), :ok :skip|:skipped :fail :total.
 
-Compatibility note:
-- We still update `carriage--ui-state-meta' so older tooltip renderers/tests keep working.
-- The primary UI surface for apply/dry-run is `apply-status' badge (separate from request state)."
-  (let* ((m (or carriage--ui-state-meta '()))
-         (sum (list :ok (or (plist-get plist :ok) 0)
+Important:
+- This function MUST NOT write into request/transport state metadata.
+- The only UI surface updated here is the separate `apply-status' badge."
+  (let* ((sum (list :ok (or (plist-get plist :ok) 0)
                     :skipped (or (plist-get plist :skipped) (plist-get plist :skip) 0)
                     :fail (or (plist-get plist :fail) 0)
                     :total (or (plist-get plist :total) 0)))
          (phase (plist-get plist :phase)))
-    (setq carriage--ui-state-meta
-          (plist-put (plist-put m :apply-summary sum) :phase phase))
     ;; Update apply-status badge best-effort (no messages in this legacy API).
     (ignore-errors
       (let* ((report (list :phase phase
@@ -2573,10 +2571,7 @@ Compatibility note:
                            :messages nil
                            :items nil)))
         (when (fboundp 'carriage-ui-note-apply-report)
-          (carriage-ui-note-apply-report report))))
-    ;; Note: request-state tooltip must not be driven by apply/dry-run results.
-    ;; Apply/dry-run status is rendered via the separate apply-status badge only.
-    ))
+          (carriage-ui-note-apply-report report))))))
 
 ;;;###autoload
 (defun carriage-show-state-details ()

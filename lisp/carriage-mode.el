@@ -37,6 +37,7 @@
 (require 'carriage-suite)
 (require 'carriage-sre-core)
 (require 'carriage-doc-state nil t)
+(require 'carriage-doc-state-perf nil t)
 (require 'carriage-reasoning-fold nil t)
 ;; Autoload stub ensures calling carriage-global-mode works even if file isn't loaded yet.
 (require 'carriage-global-mode)

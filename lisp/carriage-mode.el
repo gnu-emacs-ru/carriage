@@ -1613,37 +1613,53 @@ May include :context-text and :context-target per v1.1."
 (defun carriage-dry-run-at-point ()
   "Run dry-run for the patch block at point and open report."
   (interactive)
-  (carriage-ui-set-state 'dry-run)
+  (when (fboundp 'carriage-ui-apply-set-state)
+    (carriage-ui-apply-set-state 'running "Dry-run…"))
   (let* ((root (or (carriage-project-root) default-directory))
-         (plan-item (condition-case e
-                        (carriage-parse-block-at-point root)
-                      (error
-                       (carriage-ui-set-state 'error)
-                       (user-error "Carriage parse error: %s" (error-message-string e))))))
+         (plan-item
+          (condition-case e
+              (carriage-parse-block-at-point root)
+            (error
+             ;; Parse error is a local (apply/dry-run) concern, not a request concern.
+             (when (fboundp 'carriage-ui-apply-set-state)
+               (carriage-ui-apply-set-state
+                'dry-fail
+                (format "Ошибка парсинга: %s" (error-message-string e))))
+             (user-error "Carriage parse error: %s" (error-message-string e))))))
     ;; Early Suite↔Engine guard for patch
     (let ((op (or (and (listp plan-item) (plist-get plan-item :op))
                   (alist-get :op plan-item))))
       (when (and (eq op 'patch)
                  (not (carriage--engine-supports-op-p 'patch)))
-        (carriage-ui-set-state 'error)
+        (when (fboundp 'carriage-ui-apply-set-state)
+          (carriage-ui-apply-set-state 'dry-fail "Patch unsupported by current engine; switch to git"))
         (user-error "Patch unsupported by %s engine; switch to git" (carriage-apply-engine)))
       ;; If git engine selected but no repository, refuse early with a friendly hint
       (when (and (eq op 'patch)
                  (eq (carriage-apply-engine) 'git)
                  (null (carriage-project-root)))
-        (carriage-ui-set-state 'error)
+        (when (fboundp 'carriage-ui-apply-set-state)
+          (carriage-ui-apply-set-state 'dry-fail "Нет Git-репозитория (dry-run/apply невозможен для udiff без Git)"))
         (user-error "Нет Git-репозитория; выберите движок emacs (ограниченный) или инициализируйте Git")))
     (let ((report (carriage-dry-run-plan (list plan-item) root)))
       (when (not noninteractive)
         (carriage--report-open-maybe report))
-      (carriage-ui-set-state 'idle))))
+      ;; Apply badge is updated from the report (carriage-ui-note-apply-report).
+      report)))
 
 (defun carriage--parse-plan-item-or-error (root)
-  "Parse block at point under ROOT or signal user-error with UI state update."
+  "Parse block at point under ROOT or signal user-error with UI state update.
+
+Important UI rule:
+- Parse/validation errors are local (apply/dry-run) concerns and must not mutate
+  request/transport state."
   (condition-case e
       (carriage-parse-block-at-point root)
     (error
-     (carriage-ui-set-state 'error)
+     (when (fboundp 'carriage-ui-apply-set-state)
+       (carriage-ui-apply-set-state
+        'apply-fail
+        (format "Ошибка парсинга: %s" (error-message-string e))))
      (user-error "Carriage parse error: %s" (error-message-string e)))))
 
 (defun carriage--guard-patch-engine-for-item (plan-item)
@@ -1652,12 +1668,14 @@ May include :context-text and :context-target per v1.1."
                 (alist-get :op plan-item))))
     (when (and (eq op 'patch)
                (not (carriage--engine-supports-op-p 'patch)))
-      (carriage-ui-set-state 'error)
+      (when (fboundp 'carriage-ui-apply-set-state)
+        (carriage-ui-apply-set-state 'apply-fail "Patch unsupported by current engine; switch to git"))
       (user-error "Patch unsupported by %s engine; switch to git" (carriage-apply-engine)))))
 
 (defun carriage--dry-run-single-item (plan-item root)
   "Run dry-run for a single PLAN-ITEM under ROOT, setting UI state appropriately."
-  (carriage-ui-set-state 'dry-run)
+  (when (fboundp 'carriage-ui-apply-set-state)
+    (carriage-ui-apply-set-state 'running "Dry-run…"))
   (carriage-dry-run-plan (list plan-item) root))
 
 (defun carriage--announce-apply-success (report)
@@ -1680,6 +1698,40 @@ May include :context-text and :context-target per v1.1."
         (when (> total 0)
           (message "Carriage: applied OK (%d items) — created:%d modified:%d deleted:%d renamed:%d — %s"
                    total created modified deleted renamed files-str))))))
+(defun carriage--apply-async-enabled-p ()
+  "Return non-nil when async apply is enabled for the current session."
+  (and (boundp 'carriage-apply-async)
+       carriage-apply-async
+       (not noninteractive)))
+
+(defun carriage--apply-report-success-p (report)
+  "Return non-nil when REPORT indicates success (fail==0)."
+  (let* ((sum (and (listp report) (plist-get report :summary)))
+         (fails (or (and sum (plist-get sum :fail)) 0)))
+    (and (numberp fails) (zerop fails))))
+
+(defun carriage--apply-handle-finished-report (report)
+  "Common post-processing for finished apply REPORT (open report, announce success)."
+  (when (and report (not noninteractive))
+    (carriage--report-open-maybe report)
+    (when (carriage--apply-report-success-p report)
+      (carriage--announce-apply-success report)))
+  ;; Apply badge is updated from the apply report (carriage-ui-note-apply-report).
+  report)
+
+(defun carriage--apply-single-item-sync (plan-item root)
+  "Apply a single PLAN-ITEM under ROOT synchronously and post-process the report."
+  (carriage--apply-handle-finished-report
+   (carriage-apply-plan (list plan-item) root)))
+
+(defun carriage--apply-single-item-async (plan-item root)
+  "Apply a single PLAN-ITEM under ROOT asynchronously and post-process the report."
+  (carriage-log "apply-at-point: async apply scheduled")
+  (carriage-apply-plan-async
+   (list plan-item) root
+   (lambda (rep)
+     (carriage--apply-handle-finished-report rep))))
+
 (defun carriage--apply-single-item-dispatch (plan-item root)
   "Apply single PLAN-ITEM under ROOT, async when configured; update UI/report."
   (let* ((op (or (and (listp plan-item) (plist-get plan-item :op)) (alist-get :op plan-item)))
@@ -1687,27 +1739,9 @@ May include :context-text and :context-target per v1.1."
          (eng (carriage-apply-engine))
          (pol (and (eq eng 'git) (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)))
     (carriage-log "apply-dispatch: op=%s target=%s engine=%s policy=%s" op (or path "-") eng pol)
-    (if (and (boundp 'carriage-apply-async) carriage-apply-async (not noninteractive))
-        (progn
-          (carriage-log "apply-at-point: async apply scheduled")
-          (carriage-apply-plan-async
-           (list plan-item) root
-           (lambda (rep)
-             (when (not noninteractive)
-               (carriage--report-open-maybe rep))
-             (when (and (not noninteractive)
-                        (let* ((sum (plist-get rep :summary)))
-                          (and sum (zerop (or (plist-get sum :fail) 0)))))
-               (carriage--announce-apply-success rep))
-             (carriage-ui-set-state 'idle))))
-      (let ((ap (carriage-apply-plan (list plan-item) root)))
-        (when (not noninteractive)
-          (carriage--report-open-maybe ap))
-        (when (and (not noninteractive)
-                   (let* ((sum (plist-get ap :summary)))
-                     (and sum (zerop (or (plist-get sum :fail) 0)))))
-          (carriage--announce-apply-success ap))
-        (carriage-ui-set-state 'idle)))))
+    (if (carriage--apply-async-enabled-p)
+        (carriage--apply-single-item-async plan-item root)
+      (carriage--apply-single-item-sync plan-item root))))
 
 ;;;###autoload
 (defun carriage-apply-at-point ()
@@ -1726,7 +1760,10 @@ May include :context-text and :context-target per v1.1."
            (eph (and (stringp cur-br) (string-prefix-p epref cur-br))))
       (when (and (or wip eph)
                  (not (and (boundp 'carriage-allow-apply-on-wip) carriage-allow-apply-on-wip)))
-        (carriage-ui-set-state 'error)
+        (when (fboundp 'carriage-ui-apply-set-state)
+          (carriage-ui-apply-set-state
+           'apply-fail
+           (format "Запрещено применять на ветке %s (WIP/ephemeral)" (or cur-br ""))))
         (user-error "Нельзя применять патчи на ветке %s (не слита с основной)" (or cur-br ""))))
     (let ((dry (carriage--dry-run-single-item plan-item root)))
       (when (not noninteractive)
@@ -1735,11 +1772,12 @@ May include :context-text and :context-target per v1.1."
              (fails (or (plist-get sum :fail) 0)))
         (if (> fails 0)
             (progn
-              (carriage-ui-set-state 'error)
+              ;; Apply badge is already updated from the dry-run report.
               (user-error "Dry-run failed; see report for details"))
           (when (or (not carriage-mode-confirm-apply)
                     (y-or-n-p "Apply this block? "))
-            (carriage-ui-set-state 'apply)
+            (when (fboundp 'carriage-ui-apply-set-state)
+              (carriage-ui-apply-set-state 'running "Apply…"))
             (carriage--apply-single-item-dispatch plan-item root)))))))
 
 ;;;###autoload
@@ -1752,7 +1790,8 @@ May include :context-text and :context-target per v1.1."
              (end (region-end))
              (plan (carriage-parse-blocks-in-region beg end root)))
         (when (or (null plan) (zerop (length plan)))
-          (carriage-ui-set-state 'error)
+          (when (fboundp 'carriage-ui-apply-set-state)
+            (carriage-ui-apply-set-state 'apply-fail "Нет patch-блоков в регионе"))
           (user-error "Нет patch-блоков в регионе"))
         ;; Early guard: 'patch requires git engine
         (let ((has-patch (cl-some (lambda (it)
@@ -1761,7 +1800,8 @@ May include :context-text and :context-target per v1.1."
                                         'patch))
                                   plan)))
           (when (and has-patch (not (carriage--engine-supports-op-p 'patch)))
-            (carriage-ui-set-state 'error)
+            (when (fboundp 'carriage-ui-apply-set-state)
+              (carriage-ui-apply-set-state 'dry-fail "Patch unsupported by current engine; switch to git"))
             (user-error "Patch unsupported by %s engine; switch to git" (carriage-apply-engine))))
         ;; Guard: forbid applying on WIP/ephemeral branches unless explicitly allowed
         (let* ((cur-br (ignore-errors (and (fboundp 'carriage-git-current-branch)
@@ -1773,10 +1813,14 @@ May include :context-text and :context-target per v1.1."
                (eph (and (stringp cur-br) (string-prefix-p epref cur-br))))
           (when (and (or wip eph)
                      (not (and (boundp 'carriage-allow-apply-on-wip) carriage-allow-apply-on-wip)))
-            (carriage-ui-set-state 'error)
+            (when (fboundp 'carriage-ui-apply-set-state)
+              (carriage-ui-apply-set-state
+               'apply-fail
+               (format "Запрещено применять на ветке %s (WIP/ephemeral)" (or cur-br ""))))
             (user-error "Нельзя применять патчи на ветке %s (не слита с основной)" (or cur-br ""))))
-        ;; Dry-run group
-        (carriage-ui-set-state 'dry-run)
+        ;; Dry-run group (local apply/dry-run badge only)
+        (when (fboundp 'carriage-ui-apply-set-state)
+          (carriage-ui-apply-set-state 'running "Dry-run…"))
         (let* ((dry (carriage-dry-run-plan plan root)))
           (when (not noninteractive)
             (carriage--report-open-maybe dry))
@@ -1784,11 +1828,12 @@ May include :context-text and :context-target per v1.1."
                  (fails (or (plist-get sum :fail) 0)))
             (if (> fails 0)
                 (progn
-                  (carriage-ui-set-state 'error)
+                  ;; Apply badge is already updated from the dry-run report.
                   (user-error "Dry-run провалился для части блоков; смотрите отчёт"))
               (when (or (not carriage-mode-confirm-apply)
                         (y-or-n-p "Применить группу блоков? "))
-                (carriage-ui-set-state 'apply)
+                (when (fboundp 'carriage-ui-apply-set-state)
+                  (carriage-ui-apply-set-state 'running "Apply…"))
                 ;; Force sync for grouped apply
                 (let ((carriage-apply-async nil))
                   (let ((ap (carriage-apply-plan plan root)))
@@ -1798,7 +1843,8 @@ May include :context-text and :context-target per v1.1."
                                (let* ((sum (plist-get ap :summary)))
                                  (and sum (zerop (or (plist-get sum :fail) 0)))))
                       (carriage--announce-apply-success ap))
-                    (carriage-ui-set-state 'idle))))))))
+                    ;; Apply badge is updated from the apply report (carriage-ui-note-apply-report).
+                    ap)))))))
     (call-interactively #'carriage-apply-at-point)))
 
 ;;;###autoload
@@ -1818,9 +1864,13 @@ May include :context-text and :context-target per v1.1."
          (plan (when (numberp fp-pos)
                  (carriage-parse-blocks-in-region fp-pos (point-max) root))))
     (when (or (null fp-pos) (null plan) (zerop (length plan)))
+      (when (fboundp 'carriage-ui-apply-set-state)
+        (carriage-ui-apply-set-state 'apply-fail "Нет последнего отпечатка (CARRIAGE_FINGERPRINT) или нет патчей ниже него"))
       (user-error "Нет последнего отпечатка (CARRIAGE_FINGERPRINT) или нет патчей ниже него"))
     (when (and carriage-mode-confirm-apply-all
                (not (y-or-n-p (format "Применить все блоки (%d)? " (length plan)))))
+      (when (fboundp 'carriage-ui-apply-set-state)
+        (carriage-ui-apply-set-state 'aborted "Отменено пользователем"))
       (user-error "Отменено"))
     ;; Guard engine support for patch
     (let ((has-patch (seq-some
@@ -1830,7 +1880,8 @@ May include :context-text and :context-target per v1.1."
                             'patch))
                       plan)))
       (when (and has-patch (not (carriage--engine-supports-op-p 'patch)))
-        (carriage-ui-set-state 'error)
+        (when (fboundp 'carriage-ui-apply-set-state)
+          (carriage-ui-apply-set-state 'dry-fail "Patch unsupported by current engine; switch to git"))
         (user-error "Patch unsupported by %s engine; switch to git" (carriage-apply-engine))))
     ;; Guard WIP/ephemeral branches
     (let* ((cur-br (ignore-errors (and (fboundp 'carriage-git-current-branch)
@@ -1842,10 +1893,14 @@ May include :context-text and :context-target per v1.1."
            (eph (and (stringp cur-br) (string-prefix-p epref cur-br))))
       (when (and (or wip eph)
                  (not (and (boundp 'carriage-allow-apply-on-wip) carriage-allow-apply-on-wip)))
-        (carriage-ui-set-state 'error)
+        (when (fboundp 'carriage-ui-apply-set-state)
+          (carriage-ui-apply-set-state
+           'apply-fail
+           (format "Запрещено применять на ветке %s (WIP/ephemeral)" (or cur-br ""))))
         (user-error "Нельзя применять патчи на ветке %s (не слита с основной)" (or cur-br ""))))
-    ;; Dry-run → apply
-    (carriage-ui-set-state 'dry-run)
+    ;; Dry-run → apply (local apply/dry-run badge only)
+    (when (fboundp 'carriage-ui-apply-set-state)
+      (carriage-ui-apply-set-state 'running "Dry-run…"))
     (let* ((dry (carriage-dry-run-plan plan root)))
       (when (not noninteractive)
         (carriage--report-open-maybe dry))
@@ -1853,11 +1908,12 @@ May include :context-text and :context-target per v1.1."
              (fails (or (plist-get sum :fail) 0)))
         (if (> fails 0)
             (progn
-              (carriage-ui-set-state 'error)
+              ;; Apply badge is already updated from the dry-run report.
               (user-error "Dry-run провалился для части блоков; смотрите отчёт"))
           (when (or (not carriage-mode-confirm-apply-all)
                     (y-or-n-p "Применить группу блоков? "))
-            (carriage-ui-set-state 'apply)
+            (when (fboundp 'carriage-ui-apply-set-state)
+              (carriage-ui-apply-set-state 'running "Apply…"))
             (let ((carriage-apply-async nil))
               (if (and (boundp 'carriage-apply-async) carriage-apply-async (not noninteractive))
                   (progn
@@ -1867,7 +1923,8 @@ May include :context-text and :context-target per v1.1."
                      (lambda (rep)
                        (when (not noninteractive)
                          (carriage--report-open-maybe rep))
-                       (carriage-ui-set-state 'idle))))
+                       ;; Apply badge is updated from the apply report.
+                       rep)))
                 (let ((ap (carriage-apply-plan plan root)))
                   (when (not noninteractive)
                     (carriage--report-open-maybe ap))
@@ -1875,7 +1932,8 @@ May include :context-text and :context-target per v1.1."
                              (let* ((sum2 (plist-get ap :summary)))
                                (and sum2 (zerop (or (plist-get sum2 :fail) 0)))))
                     (carriage--announce-apply-success ap))
-                  (carriage-ui-set-state 'idle))))))))))
+                  ;; Apply badge is updated from the apply report.
+                  ap)))))))))
 
 
 ;;;###autoload
@@ -2241,15 +2299,18 @@ Return cons (BEG . END) of inserted region."
 
 (defun carriage--dry-run-last-iteration (root)
   "Collect last-iteration blocks for ROOT, run dry-run, open report if configured.
-Return the dry-run report plist."
+Return the dry-run report plist.
+
+UI rule: this is a local dry-run/apply concern and must not affect request state."
   (carriage-log "accept: collecting last-iteration blocks…")
   (let* ((plan (carriage-collect-last-iteration-blocks root)))
     (carriage-log "accept: plan-size=%d" (length plan))
-    (carriage-ui-set-state 'dry-run)
+    (when (fboundp 'carriage-ui-apply-set-state)
+      (carriage-ui-apply-set-state 'running "Dry-run…"))
     (let ((rep (carriage-dry-run-plan plan root)))
       (when (and carriage-mode-auto-open-report (not noninteractive))
         (carriage-report-open rep))
-      (carriage-ui-set-state 'idle)
+      ;; Apply badge is updated from the dry-run report.
       rep)))
 
 ;;;###autoload

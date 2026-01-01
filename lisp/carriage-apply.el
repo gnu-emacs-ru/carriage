@@ -35,16 +35,7 @@
 (require 'carriage-utils)
 (require 'carriage-git)
 (require 'carriage-format-registry)
-;; Ensure 'engines' subdirectory is on load-path when loading carriage-mode directly
-;; with :load-path pointing to the lisp/ directory, so that (require 'carriage-apply-engine)
-;; and engine modules resolve without extra user configuration.
-(let* ((this-dir (file-name-directory (or load-file-name buffer-file-name)))
-       (engines-dir (and this-dir (expand-file-name "engines" this-dir))))
-  (when (and engines-dir (file-directory-p engines-dir))
-    (add-to-list 'load-path engines-dir)))
 (require 'carriage-apply-engine)
-;; Also load the 'emacs engine to expose it in the registry (patch unsupported in v1).
-(ignore-errors (require 'carriage-engine-emacs))
 ;; Load default Git apply engine so it registers itself in the engine registry.
 (require 'carriage-engine-git)
 
@@ -361,9 +352,13 @@ Return report alist:
       (setq virt (carriage--virt-apply-create virt it)))
     (let ((report (carriage--dry-run-build-report plan ok fail skip items msgs)))
       (ignore-errors
-        (when (fboundp 'carriage-ui-note-apply-summary)
+        (cond
+         ((fboundp 'carriage-ui-note-apply-report)
+          (carriage-ui-note-apply-report report))
+         ((fboundp 'carriage-ui-note-apply-summary)
           (carriage-ui-note-apply-summary
-           (list :phase 'dry-run :ok ok :skip skip :fail fail :total (+ ok fail skip)))))
+           (list :phase 'dry-run :ok ok :skip skip :fail fail :total (+ ok fail skip))))))
+
       report)))
 
 (defun carriage-apply-plan (plan repo-root)
@@ -403,9 +398,12 @@ Stops on first failure. Returns report alist as in carriage-dry-run-plan."
                          :summary (list :ok ok :fail fail :skipped skip)
                          :items (nreverse items)
                          :messages (nreverse msgs))))
-      ;; Update UI state tooltip summary (sync path)
+      ;; Update UI apply-status badge (sync path)
       (ignore-errors
-        (when (fboundp 'carriage-ui-note-apply-summary)
+        (cond
+         ((fboundp 'carriage-ui-note-apply-report)
+          (carriage-ui-note-apply-report report))
+         ((fboundp 'carriage-ui-note-apply-summary)
           (carriage-ui-note-apply-summary
            (let* ((sum (plist-get report :summary)))
              (list :phase 'apply
@@ -414,32 +412,10 @@ Stops on first failure. Returns report alist as in carriage-dry-run-plan."
                    :fail (or (plist-get sum :fail) 0)
                    :total (+ (or (plist-get sum :ok) 0)
                              (or (plist-get sum :skipped) 0)
-                             (or (plist-get sum :fail) 0)))))))
-      ;; Announce concise success summary (only when no failures and in interactive session)
-      (let* ((sum (plist-get report :summary))
-             (fail (and (listp sum) (plist-get sum :fail))))
-        (when (and (not (bound-and-true-p noninteractive))
-                   (numberp fail) (= fail 0))
-          (let* ((its (or (plist-get report :items) '()))
-                 (oks (cl-remove-if-not (lambda (it) (eq (plist-get it :status) 'ok)) its))
-                 (created 0) (deleted 0) (renamed 0) (modified 0)
-                 (files '()))
-            (dolist (it oks)
-              (let ((op (plist-get it :op)))
-                (pcase op
-                  ('create (setq created (1+ created)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
-                  ('delete (setq deleted (1+ deleted)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
-                  ('rename (setq renamed (1+ renamed)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
-                  ((or 'patch 'sre 'aibo) (setq modified (1+ modified)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
-                  (_ (push (or (plist-get it :file) (plist-get it :path) "-") files)))))
-            (let* ((total (length oks))
-                   (files-str (mapconcat #'identity (nreverse (delete-dups (delq nil files))) ", ")))
-              (when (> total 0)
-                (message "Carriage: applied OK (%d items) — created:%d modified:%d deleted:%d renamed:%d — %s"
-                         total created modified deleted renamed files-str)))))
-        ;; Annotate successfully applied patch blocks (policy='annotate) or skip (policy='none) (sync path; also on partial success)
-        (ignore-errors (carriage--post-apply-handle-applied-blocks report))
-        report))))
+                             (or (plist-get sum :fail) 0))))))))
+      ;; Annotate successfully applied patch blocks (policy='annotate) or skip (policy='none) (sync path; also on partial success)
+      (ignore-errors (carriage--post-apply-handle-applied-blocks report))
+      report)))
 
 (defun carriage--make-apply-state (queue repo-root)
   "Create initial async apply STATE plist."
@@ -494,32 +470,6 @@ Stops on first failure. Returns report alist as in carriage-dry-run-plan."
                 (or (plist-get (plist-get report :summary) :fail) 0)
                 (or (plist-get (plist-get report :summary) :skipped) 0)))
 
-(defun carriage--apply-announce-success (report)
-  "Announce concise success summary (interactive only, when there are no failures)."
-  (let* ((sum (plist-get report :summary))
-         (fail (and (listp sum) (plist-get sum :fail))))
-    (when (and (not (bound-and-true-p noninteractive))
-               (numberp fail) (= fail 0))
-      (let* ((items (or (plist-get report :items) '()))
-             (oks (cl-remove-if-not (lambda (it) (eq (plist-get it :status) 'ok)) items))
-             (created 0) (deleted 0) (renamed 0) (modified 0)
-             (files '()))
-        (dolist (it oks)
-          (let ((op (plist-get it :op)))
-            (pcase op
-              ('create (setq created (1+ created)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
-              ('delete (setq deleted (1+ deleted)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
-              ('rename (setq renamed (1+ renamed)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
-              ((or 'patch 'sre 'aibo) (setq modified (1+ modified)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
-              (_ (push (or (plist-get it :file) (plist-get it :path) "-") files)))))
-        (let* ((total (length oks))
-               (files-str (mapconcat #'identity (nreverse (delete-dups (delq nil files))) ", ")))
-          (when (> total 0)
-            (message "Carriage: applied OK (%d items) — created:%d modified:%d deleted:%d renamed:%d — %s"
-                     total created modified deleted renamed files-str)))))))
-
-
-
 (defun carriage--apply-run-callback (callback report)
   "Invoke CALLBACK with REPORT on the main thread, if CALLBACK is callable."
   (when (functionp callback)
@@ -529,7 +479,10 @@ Stops on first failure. Returns report alist as in carriage-dry-run-plan."
   "Finish async apply: build REPORT from PLAN and STATE, invoke CALLBACK if any."
   (let* ((report (carriage--apply-build-report plan state)))
     (ignore-errors
-      (when (fboundp 'carriage-ui-note-apply-summary)
+      (cond
+       ((fboundp 'carriage-ui-note-apply-report)
+        (carriage-ui-note-apply-report report))
+       ((fboundp 'carriage-ui-note-apply-summary)
         (let* ((sum (plist-get report :summary)))
           (carriage-ui-note-apply-summary
            (list :phase 'apply
@@ -538,9 +491,8 @@ Stops on first failure. Returns report alist as in carriage-dry-run-plan."
                  :fail (or (plist-get sum :fail) 0)
                  :total (+ (or (plist-get sum :ok) 0)
                            (or (plist-get sum :skipped) 0)
-                           (or (plist-get sum :fail) 0)))))))
+                           (or (plist-get sum :fail) 0))))))))
     (carriage--apply-log-summary report)
-    (carriage--apply-announce-success report)
     ;; Annotate successfully applied patch blocks (policy='annotate) or skip (policy='none)
     (ignore-errors (carriage--post-apply-handle-applied-blocks report))
     (carriage--apply-run-callback callback report)

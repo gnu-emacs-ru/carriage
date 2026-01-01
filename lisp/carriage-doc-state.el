@@ -813,9 +813,6 @@ Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tes
 ;; - If point leaves the line: restore summary badges (display=summary).
 ;; - After any refresh (write/after-change/open): fold/reveal is re-applied for point.
 
-(require 'cl-lib)
-(require 'subr-x)
-
 (defgroup carriage-doc-state-fold nil
   "Fold UI for Carriage state/fingerprint lines."
   :group 'carriage)

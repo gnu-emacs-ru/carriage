@@ -354,7 +354,10 @@ In batch mode runs non-interactively and refreshes report."
       (let* ((op (or (and (listp plan-item) (plist-get plan-item :op)) (alist-get :op plan-item)))
              (target (or (alist-get :path plan-item) (alist-get :file plan-item))))
         (carriage-log "report-apply: op=%s target=%s root=%s" op (or target "-") root))
-      (carriage-ui-set-state 'apply)
+      ;; Apply/dry-run is a local pipeline concern: reflect it via apply-status badge,
+      ;; do not mutate request/transport state.
+      (when (fboundp 'carriage-ui-apply-set-state)
+        (carriage-ui-apply-set-state 'running "Apply…"))
       (if (and (boundp 'carriage-apply-async) carriage-apply-async (not noninteractive))
           (progn
             (carriage-log "report-apply: async apply scheduled for %s" (plist-get it :path))
@@ -383,11 +386,12 @@ In batch mode runs non-interactively and refreshes report."
                      (when (> total 0)
                        (message "Carriage: applied OK (%d items) — created:%d modified:%d deleted:%d renamed:%d — %s"
                                 total created modified deleted renamed files-str)))))
-               (carriage-ui-set-state 'idle))))
-        (let* ((rep (carriage-apply-plan (list plan-item) root)))
-          (carriage-report-open rep)
-          (carriage-ui-set-state 'idle)
-          rep)))))
+               ;; apply-status badge is updated from the apply report (carriage-ui-note-apply-report).
+               rep))))
+      (let* ((rep (carriage-apply-plan (list plan-item) root)))
+        (carriage-report-open rep)
+        ;; apply-status badge is updated from the apply report.
+        rep))))
 
 
 

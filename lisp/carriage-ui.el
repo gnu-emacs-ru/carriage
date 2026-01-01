@@ -199,7 +199,30 @@ Negative values move icons up; positive move them down."
 ;; carriage-mode-map moved to carriage-mode.el (UI must not define keymaps; keys go via keyspec)
 
 (defvar-local carriage--ui-state 'idle
-  "Current UI state: one of 'idle 'sending 'streaming 'dry-run 'apply 'error.")
+  "Current UI state: one of 'idle 'sending 'streaming 'dispatch 'waiting 'reasoning 'done 'error.
+
+NOTE: In v2 UI we treat this as *request/transport* state. Local apply/dry-run
+status is tracked separately and rendered in a separate modeline badge
+`apply-status' to avoid mixing request errors with apply errors.")
+
+;; Separate apply/dry-run status (must not mix with request state).
+(defvar-local carriage--ui-apply-state 'none
+  "Last known apply/dry-run UI state.
+One of:
+- 'none (no runs yet)
+- 'running
+- 'dry-ok | 'dry-fail
+- 'apply-ok | 'apply-fail
+- 'aborted")
+
+(defvar-local carriage--ui-apply-tooltip nil
+  "Cached tooltip string for apply-status badge (help-echo).")
+
+(defvar-local carriage--ui-apply-last-report nil
+  "Last dry-run/apply report plist used to populate apply-status badge (best-effort).")
+
+(defvar-local carriage-ui--apply-badge-version 0
+  "Monotonic version for apply-status badge; used to invalidate modeline cache.")
 
 ;; Spinner state (buffer-local)
 (defvar-local carriage--ui-spinner-timer nil
@@ -345,8 +368,7 @@ State change invalidates modeline cache and updates spinner lifecycle."
     ('reasoning " rzn")
     ('streaming " str")
     ('done " done")
-    ('dry-run " dry")
-    ('apply " apl")
+
     ('error " ERR")
     (_ "")))
 
@@ -366,9 +388,6 @@ State change invalidates modeline cache and updates spinner lifecycle."
     ('streaming "Streaming")
     ;; Completion
     ('done "Done")
-    ;; Local ops
-    ('dry-run "Dry-run")
-    ('apply "Apply")
     ('error "Error")
     (_ (capitalize (symbol-name (or state 'idle))))))
 
@@ -408,6 +427,7 @@ Disabling this eliminates periodic redisplay work during active phases."
   '(intent
     model
     state
+    apply-status
     abort
     all
     context
@@ -466,7 +486,8 @@ Recognized block symbols:
 - `branch' — current VCS branch badge.
 - `model' — model/backend selector.
 - `intent' — Ask/Code/Hybrid intent toggle.
-- `state' — Carriage state indicator with spinner.
+- `state' — Request/transport state indicator with spinner.
+- `apply-status' — last dry-run/apply status badge (separate from request state).
 - `context' — context badge.
 - `patch' — patch block counter.
 - `all' — Apply last iteration button.
@@ -485,7 +506,8 @@ Unknown symbols are ignored."
                          (const :tag "Branch badge" branch)
                          (const :tag "Model selector" model)
                          (const :tag "Intent toggle" intent)
-                         (const :tag "State indicator" state)
+                         (const :tag "Request state indicator" state)
+                         (const :tag "Apply/Dry-run status" apply-status)
                          (const :tag "Context badge" context)
                          (const :tag "Patch counter" patch)
                          (const :tag "Apply last iteration button" all)
@@ -1843,6 +1865,7 @@ Uses pulse.el when available, otherwise temporary overlays."
                    carriage-ui--modeline-default-blocks))
          (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
          (ctx-ver (and (memq 'context blocks) (or carriage-ui--ctx-badge-version 0)))
+         (apply-ver (and (memq 'apply-status blocks) (or carriage-ui--apply-badge-version 0)))
          ;; Avoid scanning buffers during redisplay: patch count must come from cache,
          ;; maintained asynchronously by `carriage-ui--patch-refresh-now'.
          (patch-count (and (memq 'patch blocks)
@@ -1859,7 +1882,7 @@ Uses pulse.el when available, otherwise temporary overlays."
          (abortp (and (boundp 'carriage--abort-handler) carriage--abort-handler)))
     (list uicons
           state spin
-          ctx-ver
+          ctx-ver apply-ver
           patch-count has-last abortp blocks
           (and (boundp 'carriage-mode-intent)  carriage-mode-intent)
           (and (boundp 'carriage-mode-suite)   carriage-mode-suite)
@@ -1986,7 +2009,8 @@ Uses pulse.el when available, otherwise temporary overlays."
     (carriage-ui--ml-button label #'carriage-select-apply-engine help)))
 
 (defun carriage-ui--ml-seg-state ()
-  "Build State segment with spinner and face, including help-echo tooltip when available."
+  "Build State segment with spinner and face, including help-echo tooltip when available.
+This segment represents *request/transport* state."
   (let* ((st (let ((s (and (boundp 'carriage--ui-state) carriage--ui-state)))
                (if (symbolp s) s 'idle)))
          (label (carriage-ui--state-label st))
@@ -2008,6 +2032,99 @@ Uses pulse.el when available, otherwise temporary overlays."
      (face            (propertize txt 'face face))
      (help            (propertize txt 'help-echo help))
      (t               txt))))
+
+(defun carriage-ui--apply--diag->line (m)
+  "Format a single diagnostic message plist M for tooltip."
+  (let* ((sev (or (plist-get m :severity) 'info))
+         (code (or (plist-get m :code) 'UNKNOWN))
+         (file (or (plist-get m :file) (plist-get m :path)))
+         (details (string-trim (or (plist-get m :details) ""))))
+    (concat " - [" (format "%s" sev) "] " (format "%s" code)
+            (if (and (stringp details) (not (string-empty-p details)))
+                (concat " — " details)
+              "")
+            (if (and (stringp file) (not (string-empty-p file)))
+                (concat " (file " file ")")
+              ""))))
+
+(defun carriage-ui--apply--tooltip-from-report (report)
+  "Build tooltip for apply-status badge from REPORT."
+  (let* ((phase (plist-get report :phase))
+         (sum (or (plist-get report :summary) '()))
+         (ok (or (plist-get sum :ok) 0))
+         (fail (or (plist-get sum :fail) 0))
+         (skipped (or (plist-get sum :skipped) 0))
+         (msgs (or (plist-get report :messages) '()))
+         (head (format "%s: ok=%d fail=%d skipped=%d"
+                       (pcase phase ('dry-run "Dry-run") ('apply "Apply") (_ "Apply"))
+                       ok fail skipped))
+         (tail (when (and (listp msgs) msgs)
+                 (let* ((limit 20)
+                        (shown (cl-subseq msgs 0 (min (length msgs) limit)))
+                        (more (- (length msgs) (length shown))))
+                   (mapconcat #'identity
+                              (append (list "Diagnostics:")
+                                      (mapcar #'carriage-ui--apply--diag->line shown)
+                                      (when (> more 0) (list (format "… (+%d more)" more))))
+                              "\n")))))
+    (string-join (delq nil (list head tail "Click to open report")) "\n")))
+
+(defun carriage-ui--apply--label-and-face ()
+  "Return (LABEL . FACE) for apply-status badge based on `carriage--ui-apply-state`."
+  (let* ((st (or carriage--ui-apply-state 'none)))
+    (pcase st
+      ('none     (cons "[Apply:—]" 'carriage-ui-muted-face))
+      ('running  (cons "[Apply:…]" 'carriage-ui-state-active-face))
+      ('dry-ok   (cons "[Dry:OK]"  'carriage-ui-state-success-face))
+      ('dry-fail (cons "[Dry:ERR]" 'carriage-ui-state-error-face))
+      ('apply-ok (cons "[Apply:OK]"  'carriage-ui-state-success-face))
+      ('apply-fail (cons "[Apply:ERR]" 'carriage-ui-state-error-face))
+      ('aborted  (cons "[Apply:ABORT]" 'carriage-ui-state-error-face))
+      (_         (cons (format "[Apply:%s]" (symbol-name st)) nil)))))
+
+(defun carriage-ui--apply-open-last-report (&optional _event)
+  "Open last apply/dry-run report stored for the apply-status badge."
+  (interactive "e")
+  (if (and (listp carriage--ui-apply-last-report)
+           (fboundp 'carriage-report-open))
+      (carriage-report-open carriage--ui-apply-last-report)
+    (message "Carriage: no apply report available")))
+
+(defun carriage-ui--ml-seg-apply-status ()
+  "Build Apply/Dry-run status segment (separate from request state)."
+  (let* ((lf (carriage-ui--apply--label-and-face))
+         (lbl (car lf))
+         (face (cdr lf))
+         (tip (or carriage--ui-apply-tooltip
+                  (and (listp carriage--ui-apply-last-report)
+                       (carriage-ui--apply--tooltip-from-report carriage--ui-apply-last-report))
+                  "Last apply/dry-run status (click to open report)"))
+         (btn (carriage-ui--ml-button lbl #'carriage-ui--apply-open-last-report tip)))
+    (if face
+        (propertize btn 'face face)
+      btn)))
+
+(defun carriage-ui-apply-set-state (state &optional tooltip)
+  "Set apply-status badge STATE and optional TOOLTIP (string)."
+  (setq carriage--ui-apply-state (or state 'none))
+  (when (and (stringp tooltip) (not (string-empty-p tooltip)))
+    (setq carriage--ui-apply-tooltip tooltip))
+  (setq carriage-ui--apply-badge-version (1+ (or carriage-ui--apply-badge-version 0)))
+  (carriage-ui--invalidate-ml-cache)
+  (force-mode-line-update))
+
+(defun carriage-ui-note-apply-report (report)
+  "Update apply-status badge from apply/dry-run REPORT."
+  (when (listp report)
+    (setq carriage--ui-apply-last-report report)
+    (let* ((phase (plist-get report :phase))
+           (sum (or (plist-get report :summary) '()))
+           (fail (or (plist-get sum :fail) 0))
+           (st (pcase phase
+                 ('dry-run (if (> fail 0) 'dry-fail 'dry-ok))
+                 ('apply   (if (> fail 0) 'apply-fail 'apply-ok))
+                 (_        (if (> fail 0) 'apply-fail 'apply-ok)))))
+      (carriage-ui-apply-set-state st (carriage-ui--apply--tooltip-from-report report)))))
 
 (defun carriage-ui--ml-seg-context ()
   "Build Context badge segment (click to refresh now).
@@ -2244,6 +2361,7 @@ Performance:
     ('model         (carriage-ui--ml-seg-model))
     ('intent        (carriage-ui--ml-seg-intent))
     ('state         (carriage-ui--ml-seg-state))
+    ('apply-status  (carriage-ui--ml-seg-apply-status))
     ('context       (carriage-ui--ml-seg-context))
     ('patch         (carriage-ui--ml-seg-patch))
     ;; 'dry removed
@@ -2384,22 +2502,12 @@ This avoids heavy redisplay churn during streaming; we only tick the line."
          (if (and tail (> (length (string-trim tail)) 0))
              (concat head "\n" (carriage-ui--i18n :state-tt-reasoning tail))
            head)))
-      ((or 'apply 'done)
-       (let ((ok (or (plist-get sum :ok) 0))
-             (sk (or (plist-get sum :skipped) (plist-get sum :skip) 0))
-             (fl (or (plist-get sum :fail) 0))
-             (tt (or (plist-get sum :total) (+ (or (plist-get sum :ok) 0)
-                                               (or (plist-get sum :skipped) (plist-get sum :skip) 0)
-                                               (or (plist-get sum :fail) 0)))))
-         (carriage-ui--i18n :state-tt-apply ok sk fl tt)))
-      ('dry-run
-       (let ((ok (or (plist-get sum :ok) 0))
-             (sk (or (plist-get sum :skipped) (plist-get sum :skip) 0))
-             (fl (or (plist-get sum :fail) 0))
-             (tt (or (plist-get sum :total) (+ (or (plist-get sum :ok) 0)
-                                               (or (plist-get sum :skipped) (plist-get sum :skip) 0)
-                                               (or (plist-get sum :fail) 0)))))
-         (carriage-ui--i18n :state-tt-dry ok sk fl tt)))
+      ('done
+       ;; Completion of the *request/transport* lifecycle.
+       ;; Apply/dry-run results MUST be shown in the separate apply-status badge
+       ;; (see `carriage-ui-note-apply-report'), not in the request state tooltip.
+       (format "Done: model=%s duration=%ss chunks=%s"
+               (or mdl "-") dur (or chunks 0)))
       (_ nil))))
 
 ;;; Public note-* API (called by transports/engines/mode)
@@ -2442,19 +2550,33 @@ Accepted keys: :model :provider :time-start :inc-chunk (t to increment) :time-la
        (carriage-ui--render-state-tooltip 'reasoning carriage--ui-state-meta)))))
 
 (defun carriage-ui-note-apply-summary (plist)
-  "Update apply/dry-run summary in meta and refresh tooltip accordingly.
-PLIST keys: :phase ('apply|'dry-run), :ok :skip|:skipped :fail :total."
+  "Update apply/dry-run summary in meta and update apply-status badge.
+PLIST keys: :phase ('apply|'dry-run), :ok :skip|:skipped :fail :total.
+
+Compatibility note:
+- We still update `carriage--ui-state-meta' so older tooltip renderers/tests keep working.
+- The primary UI surface for apply/dry-run is `apply-status' badge (separate from request state)."
   (let* ((m (or carriage--ui-state-meta '()))
          (sum (list :ok (or (plist-get plist :ok) 0)
                     :skipped (or (plist-get plist :skipped) (plist-get plist :skip) 0)
                     :fail (or (plist-get plist :fail) 0)
-                    :total (or (plist-get plist :total) 0))))
+                    :total (or (plist-get plist :total) 0)))
+         (phase (plist-get plist :phase)))
     (setq carriage--ui-state-meta
-          (plist-put (plist-put m :apply-summary sum) :phase (plist-get plist :phase)))
-    (let ((st (pcase (plist-get plist :phase)
-                ('apply 'apply) ('dry-run 'dry-run) (_ carriage--ui-state))))
-      (carriage-ui--set-tooltip
-       (carriage-ui--render-state-tooltip st carriage--ui-state-meta)))))
+          (plist-put (plist-put m :apply-summary sum) :phase phase))
+    ;; Update apply-status badge best-effort (no messages in this legacy API).
+    (ignore-errors
+      (let* ((report (list :phase phase
+                           :summary (list :ok (plist-get sum :ok)
+                                         :fail (plist-get sum :fail)
+                                         :skipped (plist-get sum :skipped))
+                           :messages nil
+                           :items nil)))
+        (when (fboundp 'carriage-ui-note-apply-report)
+          (carriage-ui-note-apply-report report))))
+    ;; Note: request-state tooltip must not be driven by apply/dry-run results.
+    ;; Apply/dry-run status is rendered via the separate apply-status badge only.
+    ))
 
 ;;;###autoload
 (defun carriage-show-state-details ()
@@ -2762,6 +2884,8 @@ Avoids heavy org computations on redisplay path."
 (with-eval-after-load 'carriage-mode
   (ignore-errors (carriage-ui--install-advices)))
 
+
+(when nil
 
 ;; Header-line refresh throttling and selection-aware gating
 ;; - Update header-line only for the selected window (opt-in, default t).
@@ -3092,6 +3216,8 @@ a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
 
 
 
+)
+
 ;; Integrated guards and cursor policy for inline ID and streaming cursor behavior.
 
 (defvar-local carriage--inline-id-inserted nil
@@ -3224,6 +3350,10 @@ Fingerprint insertion is handled by send commands (carriage-mode) to avoid dupli
 ;;
 ;; These functions are allowed to be invoked indirectly from redisplay/modeline
 ;; and therefore MUST be O(1) and MUST NOT read files / scan buffers.
+;;
+;; NOTE: Everything below is legacy/iterative "final override" debris kept in-tree
+;; during refactors. It is now disabled to avoid accidental redefinition storms.
+(when nil
 
 (defun carriage-ui--last-iteration-present-p ()
   "Return non-nil when there are patch blocks associated with the last iteration.
@@ -5023,6 +5153,261 @@ Important:
                       (format "Лимиты: файлы=%s байты=%s"
                               (or mf "-") (or mb "-"))))
                "\n"))))))
+
+)
+
+(when nil
+;; -------------------------------------------------------------------
+;; Final modeline performance overrides (single source of truth)
+;;
+;; Requirements:
+;; - Redisplay/modeline path MUST be O(1): no buffer scans, no file reads.
+;; - Context badge computation (carriage-context-count) runs only in a timer.
+;; - Patch counter in modeline is read strictly from `carriage-ui--patch-count-cache'.
+
+(defvar-local carriage-ui--ctx-badge-cache (cons "[Ctx:?]" "Контекст: вычисление…"))
+(defvar-local carriage-ui--ctx-badge-cache-sig nil)
+(defvar-local carriage-ui--ctx-badge-last-time 0.0)
+(defvar-local carriage-ui--ctx-badge-refresh-timer nil)
+(defvar-local carriage-ui--ctx-badge-pending nil)
+(defvar-local carriage-ui--ctx-badge-version 0)
+
+(defun carriage-ui--ctx-badge--signature ()
+  "Return a cheap signature of context-affecting toggles/options (no point/tick)."
+  (list
+   :mode major-mode
+   :doc (and (boundp 'carriage-mode-include-doc-context) carriage-mode-include-doc-context)
+   :gpt (and (boundp 'carriage-mode-include-gptel-context) carriage-mode-include-gptel-context)
+   :vis (and (boundp 'carriage-mode-include-visible-context) carriage-mode-include-visible-context)
+   :patched (and (boundp 'carriage-mode-include-patched-files) carriage-mode-include-patched-files)
+   :scope (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+   :profile (and (boundp 'carriage-doc-context-profile) carriage-doc-context-profile)
+   :max-files (and (boundp 'carriage-mode-context-max-files) carriage-mode-context-max-files)
+   :max-bytes (and (boundp 'carriage-mode-context-max-total-bytes) carriage-mode-context-max-total-bytes)))
+
+(defun carriage-ui--ctx-badge--normalize (badge)
+  "Normalize BADGE to (LABEL . TOOLTIP) cons cell. Never signal."
+  (condition-case _e
+      (cond
+       ((and (consp badge) (stringp (car badge)))
+        (cons (car badge) (if (stringp (cdr badge)) (cdr badge) "")))
+       ((stringp badge)
+        (cons badge (or (get-text-property 0 'help-echo badge) "")))
+       ((and (listp badge) (plist-member badge :label))
+        (let ((lbl (plist-get badge :label))
+              (tip (or (plist-get badge :tooltip) (plist-get badge :help) "")))
+          (cons (if (stringp lbl) lbl (format "%s" lbl))
+                (if (stringp tip) tip (format "%s" tip)))))
+       (t
+        (cons "[Ctx:?]" "Контекст: вычисление…")))
+    (error (cons "[Ctx:!]" "Контекст: ошибка нормализации"))))
+
+(defun carriage-ui--ctx-badge--compute ()
+  "Compute context badge using `carriage-context-count' (fast; no file contents).
+This MUST NOT run from redisplay/modeline."
+  (let* ((inc-doc (and (boundp 'carriage-mode-include-doc-context) carriage-mode-include-doc-context))
+         (inc-gpt (and (boundp 'carriage-mode-include-gptel-context) carriage-mode-include-gptel-context))
+         (inc-vis (and (boundp 'carriage-mode-include-visible-context) carriage-mode-include-visible-context))
+         (inc-pat (and (boundp 'carriage-mode-include-patched-files) carriage-mode-include-patched-files))
+         (off (not (or inc-doc inc-gpt inc-vis inc-pat))))
+    (if off
+        (cons "[Ctx:-]" "Контекст выключен (doc=off, gptel=off, vis=off, patched=off)")
+      (require 'carriage-context nil t)
+      (let* ((res (and (fboundp 'carriage-context-count)
+                       (ignore-errors (carriage-context-count (current-buffer) (point)))))
+             (cnt (or (and (listp res) (plist-get res :count)) 0))
+             (items (or (and (listp res) (plist-get res :items)) '()))
+             (warns (or (and (listp res) (plist-get res :warnings)) '()))
+             (limit (or (and (boundp 'carriage-ui-context-tooltip-max-items)
+                             carriage-ui-context-tooltip-max-items)
+                        50))
+             (shown (if (and (integerp limit) (> limit 0))
+                        (cl-subseq items 0 (min (length items) limit))
+                      items))
+             (more (max 0 (- (length items) (length shown))))
+             (head (format "Контекст: файлов=%d — doc=%s gptel=%s vis=%s patched=%s scope=%s profile=%s"
+                           cnt
+                           (if inc-doc "on" "off")
+                           (if inc-gpt "on" "off")
+                           (if inc-vis "on" "off")
+                           (if inc-pat "on" "off")
+                           (let ((sc (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)))
+                             (if (eq sc 'last) "last" "all"))
+                           (let ((pr (and (boundp 'carriage-doc-context-profile) carriage-doc-context-profile)))
+                             (if (eq pr 'p3) "P3" "P1"))))
+             (warn-lines (when warns
+                           (cons "Предупреждения:"
+                                 (mapcar (lambda (w) (concat " - " w)) warns))))
+             (item-lines
+              (cons "Элементы:"
+                    (append
+                     (mapcar #'carriage-ui--context-item->line shown)
+                     (when (> more 0) (list (format "… (+%d more)" more))))))
+             (tip (mapconcat #'identity
+                             (delq nil
+                                   (list head
+                                         (and warn-lines (mapconcat #'identity warn-lines "\n"))
+                                         (and item-lines (mapconcat #'identity item-lines "\n"))))
+                             "\n")))
+        (cons (format "[Ctx:%d]" cnt) tip)))))
+
+(defun carriage-ui--ctx-badge--apply (badge sig)
+  "Install computed BADGE with SIG into cache; bump version only on real change."
+  (let* ((new (carriage-ui--ctx-badge--normalize badge))
+         (old carriage-ui--ctx-badge-cache)
+         (changed (not (equal new old))))
+    (setq carriage-ui--ctx-badge-cache new
+          carriage-ui--ctx-badge-cache-sig sig
+          carriage-ui--ctx-badge-last-time (float-time))
+    (when changed
+      (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+      (when (fboundp 'carriage-ui--invalidate-ml-cache)
+        (carriage-ui--invalidate-ml-cache))
+      (force-mode-line-update))
+    new))
+
+(defun carriage-ui--ctx-badge--schedule-refresh (&optional delay)
+  "Schedule debounced context badge recomputation (run-at-time, not idle-only)."
+  (when (timerp carriage-ui--ctx-badge-refresh-timer)
+    (ignore-errors (cancel-timer carriage-ui--ctx-badge-refresh-timer)))
+  (let* ((buf (current-buffer))
+         (d (max 0.01 (float (or delay 0.05)))))
+    (setq carriage-ui--ctx-badge-pending t)
+    (setq carriage-ui--ctx-badge-refresh-timer
+          (run-at-time
+           d nil
+           (lambda (b)
+             (when (buffer-live-p b)
+               (with-current-buffer b
+                 (unwind-protect
+                     (let* ((sig (carriage-ui--ctx-badge--signature))
+                            (badge (condition-case e
+                                       (carriage-ui--ctx-badge--compute)
+                                     (error
+                                      (cons "[Ctx:!]"
+                                            (format "Ctx compute error: %s"
+                                                    (error-message-string e)))))))
+                       (carriage-ui--ctx-badge--apply badge sig))
+                   (setq carriage-ui--ctx-badge-refresh-timer nil
+                         carriage-ui--ctx-badge-pending nil)))))
+           buf)))
+  t)
+
+(defun carriage-ui--ctx-invalidate (&rest _)
+  "Invalidate context badge cache and schedule recomputation ASAP."
+  (setq carriage-ui--ctx-badge-cache-sig nil
+        carriage-ui--ctx-badge-last-time 0.0)
+  (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (carriage-ui--invalidate-ml-cache))
+  (carriage-ui--ctx-badge--schedule-refresh 0.02)
+  (force-mode-line-update)
+  t)
+
+(defun carriage-ui--context-badge ()
+  "Return cached (LABEL . TOOLTIP) and schedule recompute at most once per interval.
+Redisplay-safe: never scans buffers and never reads file contents."
+  (let* ((sig (carriage-ui--ctx-badge--signature))
+         (now (float-time))
+         (interval (max 0.1 (or (and (boundp 'carriage-ui-context-badge-refresh-interval)
+                                     carriage-ui-context-badge-refresh-interval)
+                                1.0)))
+         (last (or carriage-ui--ctx-badge-last-time 0.0))
+         (age (- now last))
+         (sig-stale (not (equal sig carriage-ui--ctx-badge-cache-sig)))
+         (have (consp carriage-ui--ctx-badge-cache)))
+    (when (and (not carriage-ui--ctx-badge-pending)
+               (or (not have) sig-stale (>= age interval)))
+      (carriage-ui--ctx-badge--schedule-refresh (if have 0.05 0.01)))
+    (if (consp carriage-ui--ctx-badge-cache)
+        carriage-ui--ctx-badge-cache
+      (cons "[Ctx:?]" "Контекст: вычисление… (обновится автоматически)"))))
+
+(defun carriage-ui-refresh-context-badge ()
+  "Force refresh of the [Ctx:N] badge asynchronously (nonblocking)."
+  (interactive)
+  (carriage-ui--ctx-invalidate))
+
+(defun carriage-ui--ml-seg-context ()
+  "Build Context badge segment (click to refresh) using cached value only."
+  (let* ((ctx (condition-case _e
+                  (carriage-ui--context-badge)
+                (error (cons "[Ctx:!]" "Контекст: ошибка (см. *Messages*)"))))
+         (ctx2 (carriage-ui--ctx-badge--normalize ctx))
+         (lbl (car ctx2))
+         (tip (cdr ctx2)))
+    (when (stringp lbl)
+      (carriage-ui--ml-button lbl #'carriage-ui--ctx-invalidate
+                              (or tip "Обновить контекст (mouse-1)")))))
+
+(defun carriage-ui--patch-count ()
+  "Return strictly O(1) cached number of #+begin_patch blocks."
+  (or (and (boundp 'carriage-ui--patch-count-cache)
+           (numberp carriage-ui--patch-count-cache)
+           carriage-ui--patch-count-cache)
+      0))
+
+(defun carriage-ui--ml-seg-patch ()
+  "Build Patch counter segment from cached value only (no scans)."
+  (let ((n (carriage-ui--patch-count)))
+    (when (and (numberp n) (> n 0))
+      (propertize (format "[P:%d]" n)
+                  'help-echo "Количество #+begin_patch блоков (кэш, без пересканов)"))))
+
+(defun carriage-ui--ml-cache-key ()
+  "Compute modeline cache key (strict O(1), no scans/IO in redisplay)."
+  (let* ((uicons (and (fboundp 'carriage-ui--icons-available-p)
+                      (carriage-ui--icons-available-p)))
+         (blocks (if (and (boundp 'carriage-ui-modeline-blocks)
+                          (listp carriage-ui-modeline-blocks)
+                          carriage-ui-modeline-blocks)
+                     carriage-ui-modeline-blocks
+                   carriage-ui--modeline-default-blocks))
+         (state (and (boundp 'carriage--ui-state) carriage--ui-state))
+         (spin (and (boundp 'carriage-ui-enable-spinner) carriage-ui-enable-spinner
+                    (memq state '(sending streaming dispatch waiting reasoning))
+                    (fboundp 'carriage-ui--spinner-char)
+                    (carriage-ui--spinner-char)))
+         (ctx-ver (and (memq 'context blocks) (or carriage-ui--ctx-badge-version 0)))
+         (patch-count (and (memq 'patch blocks)
+                           (not (memq state '(sending streaming dispatch waiting reasoning)))
+                           (carriage-ui--patch-count)))
+         (abortp (and (boundp 'carriage--abort-handler) carriage--abort-handler)))
+    (list uicons state spin
+          ctx-ver patch-count abortp blocks
+          (and (boundp 'carriage-mode-intent)  carriage-mode-intent)
+          (and (boundp 'carriage-mode-suite)   carriage-mode-suite)
+          (and (boundp 'carriage-mode-model)   carriage-mode-model)
+          (and (boundp 'carriage-mode-backend) carriage-mode-backend)
+          (and (boundp 'carriage-mode-provider) carriage-mode-provider)
+          (and (boundp 'carriage-apply-engine) carriage-apply-engine)
+          (and (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)
+          (and (boundp 'carriage-mode-include-gptel-context) carriage-mode-include-gptel-context)
+          (and (boundp 'carriage-mode-include-doc-context) carriage-mode-include-doc-context)
+          (and (boundp 'carriage-mode-include-visible-context) carriage-mode-include-visible-context)
+          (and (boundp 'carriage-mode-include-patched-files) carriage-mode-include-patched-files)
+          (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+          (and (boundp 'carriage-ui-context-badge-refresh-interval) carriage-ui-context-badge-refresh-interval))))
+
+(defun carriage-ui--compute-context-badge (inc-doc inc-gpt inc-vis inc-patched)
+  "Synchronous helper (tests/tooling): compute (LABEL . TOOLTIP) via carriage-context-count.
+Must not read file contents; uses the fast counter."
+  (let* ((off (not (or inc-doc inc-gpt inc-vis inc-patched))))
+    (if off
+        (cons "[Ctx:-]" "Контекст выключен (doc=off, gptel=off, vis=off, patched=off)")
+      (require 'carriage-context nil t)
+      (let* ((res (and (fboundp 'carriage-context-count)
+                       (ignore-errors (carriage-context-count (current-buffer) (point)))))
+             (cnt (or (and (listp res) (plist-get res :count)) 0)))
+        (cons (format "[Ctx:%d]" cnt)
+              (format "Контекст: файлов=%d — источники: doc=%s, gptel=%s, vis=%s, patched=%s"
+                      cnt
+                      (if inc-doc "on" "off")
+                      (if inc-gpt "on" "off")
+                      (if inc-vis "on" "off")
+                      (if incpatched "on" "off")))))))
+
+)
 
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

@@ -1916,24 +1916,31 @@ Uses pulse.el when available, otherwise temporary overlays."
     (carriage-ui--ml-button label #'carriage-ui-toggle-intent "Toggle Ask/Code/Hybrid intent")))
 
 (defun carriage-ui--ml-seg-suite ()
-  "Build Suite segment."
+  "Build Suite segment.
+
+GUI policy:
+- When icons are available and suite icons are enabled, render ONLY the icon in the modeline.
+- Current suite value is shown in tooltip (help-echo).
+TTY / icons disabled: keep text label fallback."
   (let* ((uicons (carriage-ui--icons-available-p))
          (suite  (and (boundp 'carriage-mode-suite) carriage-mode-suite))
          (suite-str (cond ((symbolp suite) (symbol-name suite))
                           ((stringp suite) suite) (t "udiff")))
-         (icon (and uicons
-                    (boundp 'carriage-mode-use-suite-icon)
-                    carriage-mode-use-suite-icon
-                    (carriage-ui--icon 'suite)))
+         ;; GUI policy: when icons are available, render ONLY the icon in the modeline.
+         ;; The current suite value is shown in tooltip.
+         (icon (and uicons (carriage-ui--icon 'suite)))
          (_ nil)
-         (label (if icon
-                    (concat icon (carriage-ui--icon-gap) "[" suite-str "]")
-                  (let ((name (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
-                                  (carriage-i18n :suite) "Suite")))
-                    (format "%s: [%s]" name suite-str))))
-         (help (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
-                   (carriage-i18n :suite-tooltip)
-                 "Select Suite (sre|udiff)")))
+         (label
+          (if icon
+              ;; GUI: icon-only, value goes to tooltip.
+              icon
+            (let ((name (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
+                            (carriage-i18n :suite) "Suite")))
+              (format "%s: [%s]" name suite-str))))
+         (help0 (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
+                    (carriage-i18n :suite-tooltip)
+                  "Select Suite (sre|udiff)"))
+         (help (format "%s\nТекущее значение: %s" help0 suite-str)))
     (carriage-ui--ml-button label #'carriage-select-suite help)))
 
 (defun carriage-ui--ml-seg-model ()
@@ -1972,7 +1979,12 @@ Uses pulse.el when available, otherwise temporary overlays."
       btn)))
 
 (defun carriage-ui--ml-seg-engine ()
-  "Build Engine segment."
+  "Build Engine segment.
+
+GUI policy:
+- When icons are available and engine icons are enabled, render ONLY the icon in the modeline.
+- Current engine value is shown in tooltip (help-echo).
+TTY / icons disabled: keep text label fallback."
   (let* ((uicons (carriage-ui--icons-available-p))
          (engine-str
           (let ((e (and (boundp 'carriage-apply-engine) carriage-apply-engine)))
@@ -1984,28 +1996,31 @@ Uses pulse.el when available, otherwise temporary overlays."
              ((symbolp e) (symbol-name e))
              ((stringp e) e)
              (t "git"))))
-         (icon (and uicons
-                    (boundp 'carriage-mode-use-engine-icon) carriage-mode-use-engine-icon
-                    (carriage-ui--icon 'engine)))
+         ;; GUI policy: when icons are available, render ONLY the icon in the modeline.
+         ;; The current engine value is shown in tooltip.
+         (icon (and uicons (carriage-ui--icon 'engine)))
          (_ (require 'carriage-i18n nil t))
          (eng (and (boundp 'carriage-apply-engine) carriage-apply-engine))
          (policy (and (eq eng 'git)
                       (boundp 'carriage-git-branch-policy)
                       (symbol-name carriage-git-branch-policy)))
-         (help (cond
-                ((and (eq eng 'git)
-                      (featurep 'carriage-i18n) (fboundp 'carriage-i18n)
-                      (stringp policy))
-                 (carriage-i18n :engine-tooltip-branch engine-str policy))
-                ((and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
-                 (carriage-i18n :engine-tooltip))
-                (t "Select apply engine")))
-         (label (if icon
-                    (concat icon (carriage-ui--icon-gap) "[" engine-str "]")
-                  (let ((name (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
-                                  (carriage-i18n :engine-label)
-                                "Engine")))
-                    (format "%s: [%s]" name engine-str)))))
+         (help0 (cond
+                 ((and (eq eng 'git)
+                       (featurep 'carriage-i18n) (fboundp 'carriage-i18n)
+                       (stringp policy))
+                  (carriage-i18n :engine-tooltip-branch engine-str policy))
+                 ((and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
+                  (carriage-i18n :engine-tooltip))
+                 (t "Select apply engine")))
+         (help (format "%s\nТекущее значение: %s" help0 engine-str))
+         (label
+          (if icon
+              ;; GUI: icon-only, value goes to tooltip.
+              icon
+            (let ((name (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
+                            (carriage-i18n :engine-label)
+                          "Engine")))
+              (format "%s: [%s]" name engine-str)))))
     (carriage-ui--ml-button label #'carriage-select-apply-engine help)))
 
 (defun carriage-ui--ml-seg-state ()

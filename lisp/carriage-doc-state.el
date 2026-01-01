@@ -837,6 +837,12 @@ Values:
 - nil      — no lines were found
 - :unknown — never scanned (or state was reset).")
 
+(defvar-local carriage-doc-state--fold--last-scan-env nil
+  "Last environment signature used to render fold summaries.
+
+Used to force a rescan/refresh when UI-affecting toggles change (e.g. minimal badge
+mode) without any buffer text edits.")
+
 (defun carriage-doc-state--fold--line-range-at-point ()
   "Return (BEG . END) for current logical line, excluding trailing newline."
   (save-excursion
@@ -1004,16 +1010,26 @@ Perf:
 - Full rescan is performed only when the buffer text changed since the last scan
   (`buffer-chars-modified-tick') or when overlays are missing.
 - On window/point moves (e.g. windmove) with no buffer edits, we only run
-  `carriage-doc-state--fold--apply-for-point' (O(1))."
+  `carriage-doc-state--fold--apply-for-point' (O(1)).
+- UI-affecting toggles (e.g. minimal badge mode) MUST force refresh even when the
+  buffer text did not change."
   (cl-block nil
     (when carriage-doc-state--fold-enabled
       (let* ((tick (buffer-chars-modified-tick))
+             (env (list
+                   (and (boundp 'carriage-badge-overlay-minimal)
+                        carriage-badge-overlay-minimal)
+                   (and (boundp 'carriage-state-badge-overlay-minimal)
+                        carriage-state-badge-overlay-minimal)
+                   (and (boundp 'carriage-fingerprint-badge-overlay-minimal)
+                        carriage-fingerprint-badge-overlay-minimal)))
              (have-state-ov (overlayp carriage-doc-state--fold-state-ov))
              (have-fp-ovs (cl-some #'overlayp carriage-doc-state--fold-fp-ovs))
              (have-any-ov (or have-state-ov have-fp-ovs))
              (same-tick (and (numberp carriage-doc-state--fold--last-scan-tick)
-                             (= tick carriage-doc-state--fold--last-scan-tick))))
-        (when (and same-tick have-any-ov)
+                             (= tick carriage-doc-state--fold--last-scan-tick)))
+             (same-env (equal env carriage-doc-state--fold--last-scan-env)))
+        (when (and same-tick same-env have-any-ov)
           ;; No buffer edits since last scan; only update fold/reveal for point.
           (carriage-doc-state--fold--apply-for-point)
           (cl-return-from nil t))
@@ -1064,6 +1080,7 @@ Perf:
 
           ;; Record scan outcome for fast-path early return.
           (setq carriage-doc-state--fold--last-scan-tick tick)
+          (setq carriage-doc-state--fold--last-scan-env env)
           (setq carriage-doc-state--fold--last-scan-had-lines
                 (if (or st (and (listp fps) (> (length fps) 0))) t nil)))))
 

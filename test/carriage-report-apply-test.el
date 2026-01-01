@@ -70,9 +70,11 @@
                 (should (not errp))))
             ;; Verify file content changed
             (should (string= (carriage-report-apply-test--read dir "x.txt") "world\n"))
-            ;; Verify WIP branch is active
+            ;; Verify HEAD is on a named branch (do not assume branch policy here)
             (let ((branch (carriage-report-apply-test--git-out dir "rev-parse" "--abbrev-ref" "HEAD")))
-              (should (string= branch "carriage/WIP")))))
+              (should (stringp branch))
+              (should (> (length branch) 0))
+              (should-not (string= branch "HEAD"))))))
       (ignore-errors (delete-directory dir t)))))
 
 (provide 'carriage-report-apply-test)

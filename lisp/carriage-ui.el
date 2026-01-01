@@ -4984,5 +4984,45 @@ Includes only cheap, cached values. Never calls functions that may scan buffers.
           (and (boundp 'carriage-ui-context-badge-refresh-interval)
                carriage-ui-context-badge-refresh-interval))))
 
+(defun carriage-ui--compute-context-badge (inc-doc inc-gpt inc-vis inc-patched)
+  "Compute context badge (LABEL . TOOLTIP) synchronously (test/tooling helper).
+
+Important:
+- This function is used by ERT tests and other non-redisplay call sites.
+- It MUST NOT read file contents; it relies on `carriage-context-count' (fast path).
+- Modeline rendering MUST NOT call this directly; modeline uses cached badge logic."
+  (let* ((off (not (or inc-doc inc-gpt inc-vis inc-patched))))
+    (if off
+        (cons "[Ctx:-]" "Контекст выключен (doc=off, gptel=off, vis=off, patched=off)")
+      (require 'carriage-context nil t)
+      (let* ((res (and (fboundp 'carriage-context-count)
+                       (ignore-errors (carriage-context-count (current-buffer) (point)))))
+             (cnt (or (and (listp res) (plist-get res :count)) 0))
+             (profile (and (boundp 'carriage-doc-context-profile) carriage-doc-context-profile))
+             (prof (if (eq profile 'p3) "P3" "P1"))
+             (mf (and (boundp 'carriage-mode-context-max-files) carriage-mode-context-max-files))
+             (mb (and (boundp 'carriage-mode-context-max-total-bytes) carriage-mode-context-max-total-bytes))
+             (scope (let ((sc (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)))
+                      (if (eq sc 'last) "last" "all")))
+             (warn (if (eq profile 'p3)
+                       " (внимание: расширенный бюджет — выше стоимость/шум)"
+                     "")))
+        (cons (format "[Ctx:%d]" cnt)
+              (mapconcat
+               #'identity
+               (delq nil
+                     (list
+                      (format "Контекст: файлов=%d — источники: doc=%s, gptel=%s, vis=%s, patched=%s, scope=%s"
+                              cnt
+                              (if inc-doc "on" "off")
+                              (if inc-gpt "on" "off")
+                              (if inc-vis "on" "off")
+                              (if inc-patched "on" "off")
+                              scope)
+                      (format "Профиль: %s%s" prof warn)
+                      (format "Лимиты: файлы=%s байты=%s"
+                              (or mf "-") (or mb "-"))))
+               "\n"))))))
+
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

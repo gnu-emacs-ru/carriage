@@ -28,6 +28,7 @@
            (root (or (and (fboundp 'carriage-project-root) (carriage-project-root))
                      default-directory))
            ;; Construct delta: create a real, repo-relative good path to ensure acceptance
+           (good "good.txt")
            (bad-abs "/etc/passwd")
            (bad-tramp "/ssh:localhost:/etc/hosts"))
       ;; Ensure good file exists under root so normalizer accepts it

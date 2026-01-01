@@ -369,10 +369,16 @@ REQ is a full HTTP request string already containing injected X-Auth."
                   connect-timeout nil
                   (lambda ()
                     (unless first-byte-seen
-                      (kill-upstream)
+                      ;; IMPORTANT: send envelope BEFORE killing upstream, otherwise upstream sentinel
+                      ;; may close downstream first and the client sees an empty response.
                       (ignore-errors
                         (carriage-hub--send-json cl-proc "504 Gateway Timeout"
-                                                 (list :ok :false :error "upstream timeout" :code "WEB_E_NOT_FOUND"))))))))
+                                                 (list :ok :false :error "upstream timeout" :code "WEB_E_NOT_FOUND")))
+                      ;; Do not rely on upstream sentinel to close the client connection:
+                      ;; when upstream is missing or sentinel doesn't run promptly, tests may see an empty response.
+                      (close-downstream)
+                      (dec-active)
+                      (kill-upstream))))))
          (arm-read-timeout ()
            (when (and (not is-sse)
                       (numberp read-timeout)
@@ -383,6 +389,11 @@ REQ is a full HTTP request string already containing injected X-Auth."
                    (run-at-time
                     read-timeout nil
                     (lambda ()
+                      ;; Same ordering rule as connect-timeout: respond first.
+                      (ignore-errors
+                        (carriage-hub--send-json cl-proc "504 Gateway Timeout"
+                                                 (list :ok :false :error "upstream read timeout" :code "WEB_E_NOT_FOUND")))
+                      (dec-active)
                       (kill-upstream)
                       (close-downstream)))))))
       (unwind-protect
@@ -431,7 +442,15 @@ REQ is a full HTTP request string already containing injected X-Auth."
                 (setq sentinel-installed t)
 
                 (process-send-string up req)
-                (process-send-eof up)
+                ;; IMPORTANT:
+                ;; Do NOT call `process-send-eof' for upstream connections.
+                ;; In practice (and in tests) it may close the TCP connection entirely,
+                ;; causing the upstream sentinel to fire immediately (before any bytes
+                ;; are received) and thus cancelling our timeout logic and closing the
+                ;; downstream with an empty response.
+                ;;
+                ;; For non-SSE requests we already send "Connection: close" in the
+                ;; proxied HTTP request; upstream will close after replying.
                 t)
             (error
              ;; Fail fast with bounded cleanup (avoid active slot leaks).
@@ -439,9 +458,11 @@ REQ is a full HTTP request string already containing injected X-Auth."
              (unless sentinel-installed
                (dec-active))
              (kill-upstream)
+             ;; IMPORTANT: respond before closing downstream.
+             (ignore-errors
+               (carriage-hub--send-json cl-proc "502 Bad Gateway"
+                                        (list :ok :false :error "proxy failure" :code "WEB_E_NOT_FOUND")))
              (close-downstream)
-             (carriage-hub--send-json client "502 Bad Gateway"
-                                      (list :ok :false :error "proxy failure" :code "WEB_E_NOT_FOUND"))
              t))
         (unless sentinel-installed
           (cleanup-timers)

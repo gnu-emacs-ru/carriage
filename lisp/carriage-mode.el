@@ -39,6 +39,59 @@
 (require 'carriage-doc-state nil t)
 (require 'carriage-doc-state-perf nil t)
 (require 'carriage-reasoning-fold nil t)
+
+;; -----------------------------------------------------------------------------
+;; Reasoning fold UX:
+;; - When reasoning blocks are folded via overlays, reveal the original text when point enters.
+;; - Restore the fold when point leaves the block.
+;; Best-effort: never signal; supports unknown overlay internals by using heuristics.
+(defvar-local carriage--reasoning-fold--revealed-ovs nil
+  "Internal list of reasoning fold overlays currently revealed due to point being inside.")
+
+(defun carriage--reasoning-fold--overlay-p (ov)
+  "Return non-nil when OV looks like a reasoning-fold overlay."
+  (and (overlayp ov)
+       (overlay-buffer ov)
+       (or (overlay-get ov 'carriage-reasoning-fold)
+           (overlay-get ov 'carriage-reasoning)
+           (memq (overlay-get ov 'invisible) '(carriage-reasoning-fold carriage-reasoning)))))
+
+(defun carriage--reasoning-fold--reveal (ov)
+  "Reveal OV by removing hiding properties, saving them for restoration."
+  (when (overlayp ov)
+    (unless (overlay-get ov 'carriage--saved-invisible)
+      (overlay-put ov 'carriage--saved-invisible (overlay-get ov 'invisible)))
+    (unless (overlay-get ov 'carriage--saved-display)
+      (overlay-put ov 'carriage--saved-display (overlay-get ov 'display)))
+    ;; Reveal
+    (overlay-put ov 'invisible nil)
+    (overlay-put ov 'display nil)))
+
+(defun carriage--reasoning-fold--restore (ov)
+  "Restore OV hiding properties if previously saved."
+  (when (overlayp ov)
+    (when (overlay-get ov 'carriage--saved-invisible)
+      (overlay-put ov 'invisible (overlay-get ov 'carriage--saved-invisible)))
+    (when (overlay-get ov 'carriage--saved-display)
+      (overlay-put ov 'display (overlay-get ov 'carriage--saved-display)))))
+
+(defun carriage--reasoning-fold--post-command ()
+  "Post-command hook to reveal folded reasoning block at point and refold on leave."
+  (condition-case _e
+      (let* ((ovs (overlays-at (point)))
+             (cur (cl-remove-if-not #'carriage--reasoning-fold--overlay-p ovs))
+             (prev (or carriage--reasoning-fold--revealed-ovs '())))
+        ;; Restore overlays that are no longer under point
+        (dolist (ov prev)
+          (unless (memq ov cur)
+            (ignore-errors (carriage--reasoning-fold--restore ov))))
+        ;; Reveal current overlays under point
+        (dolist (ov cur)
+          (unless (memq ov prev)
+            (ignore-errors (carriage--reasoning-fold--reveal ov))))
+        (setq carriage--reasoning-fold--revealed-ovs cur))
+    (error nil)))
+
 ;; Autoload stub ensures calling carriage-global-mode works even if file isn't loaded yet.
 (require 'carriage-global-mode)
 
@@ -529,7 +582,9 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
              carriage-mode-hide-reasoning-blocks
              (require 'carriage-reasoning-fold nil t))
     (ignore-errors (carriage-reasoning-fold-enable))
-    (ignore-errors (carriage-reasoning-fold-hide-all (current-buffer)))))
+    (ignore-errors (carriage-reasoning-fold-hide-all (current-buffer)))
+    ;; Reveal original reasoning text when point enters a folded block.
+    (add-hook 'post-command-hook #'carriage--reasoning-fold--post-command nil t)))
 
 (defun carriage-mode--enable ()
   "Enable Carriage mode in the current buffer (internal)."
@@ -622,6 +677,13 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
     (force-mode-line-update t))
   (when (featurep 'carriage-patch-fold)
     (ignore-errors (carriage-patch-fold-disable)))
+  ;; Remove reveal hook and restore any temporarily revealed overlays.
+  (remove-hook 'post-command-hook #'carriage--reasoning-fold--post-command t)
+  (when (listp carriage--reasoning-fold--revealed-ovs)
+    (dolist (ov carriage--reasoning-fold--revealed-ovs)
+      (ignore-errors (carriage--reasoning-fold--restore ov))))
+  (setq carriage--reasoning-fold--revealed-ovs nil)
+
   (when (featurep 'carriage-reasoning-fold)
     (ignore-errors (carriage-reasoning-fold-disable)))
   (carriage-log "carriage-mode disabled in %s" (buffer-name)))
@@ -1449,6 +1511,9 @@ May include :context-text and :context-target per v1.1."
   (interactive)
   ;; Early, immediate feedback before any heavy preparation:
   (carriage-ui-set-state 'sending)
+  ;; Reset apply-status when starting a new request (requirement: Apply must reappear only after next apply attempt).
+  (when (fboundp 'carriage-ui-apply-reset)
+    (ignore-errors (carriage-ui-apply-reset)))
   ;; Give redisplay a chance right away
   (sit-for 0)
   ;; Defer heavy preparation to the next tick so UI updates (spinner/state) are visible instantly.
@@ -1539,6 +1604,9 @@ May include :context-text and :context-target per v1.1."
   (interactive)
   ;; Early, immediate feedback before any heavy preparation:
   (carriage-ui-set-state 'sending)
+  ;; Reset apply-status when starting a new request (requirement: Apply must reappear only after next apply attempt).
+  (when (fboundp 'carriage-ui-apply-reset)
+    (ignore-errors (carriage-ui-apply-reset)))
   ;; Give redisplay a chance right away
   (sit-for 0)
   (let* ((backend carriage-mode-backend)

@@ -426,10 +426,8 @@ Disabling this eliminates periodic redisplay work during active phases."
 (defconst carriage-ui--modeline-default-blocks
   '(
     intent
-    model
     state
     apply-status
-    report
     abort
     all
     context
@@ -439,7 +437,9 @@ Disabling this eliminates periodic redisplay work during active phases."
     toggle-files
     doc-scope-all
     doc-scope-last
-    patch
+    model
+    ;; report
+    ;; patch
     ;; branch
     ;; save
     ;; settings
@@ -828,7 +828,7 @@ several placeholder frames or a time threshold."
         (carriage-ui--ctx-schedule-refresh toggles tick base-delay)
         (setq carriage-ui--ctx-last-placeholder-time t0
               carriage-ui--ctx-placeholder-count (1+ cnt))
-        (cons "[Ctx:?]" "Вычисление контекста…")))
+        (cons "Ctx:?" "Вычисление контекста…")))
 
      ;; Synchronous recompute fallback
      (t
@@ -1909,9 +1909,9 @@ Uses pulse.el when available, otherwise temporary overlays."
          (label
           (if uicons
               (pcase intent
-                ('Ask   (or (carriage-ui--icon 'ask) "[Ask]"))
-                ('Code  (or (carriage-ui--icon 'patch) "[Code]"))
-                (_      (or (carriage-ui--icon 'hybrid) "[Hybrid]")))
+                ('Ask   (or (carriage-ui--icon 'ask) "Ask"))
+                ('Code  (or (carriage-ui--icon 'patch) "Code"))
+                (_      (or (carriage-ui--icon 'hybrid) "Hybrid")))
             (format "%s" (pcase intent ('Ask "Ask") ('Code "Code") (_ "Hybrid"))))))
     (carriage-ui--ml-button label #'carriage-ui-toggle-intent "Toggle Ask/Code/Hybrid intent")))
 
@@ -2093,9 +2093,9 @@ This segment represents *request/transport* state."
       ('running    (cons "Apply…"     'carriage-ui-state-active-face))
       ('dry-ok     (cons "Dry OK"     'carriage-ui-state-success-face))
       ('dry-fail   (cons "Dry ERR"    'carriage-ui-state-error-face))
-      ('apply-ok   (cons "Apply OK"   'carriage-ui-state-success-face))
-      ('apply-fail (cons "Apply ERR"  'carriage-ui-state-error-face))
-      ('aborted    (cons "Apply ABORT" 'carriage-ui-state-error-face))
+      ('apply-ok   (cons "OK"   'carriage-ui-state-success-face))
+      ('apply-fail (cons "ERR"  'carriage-ui-state-error-face))
+      ('aborted    (cons "ABORT" 'carriage-ui-state-error-face))
       (_           (cons (format "Apply %s" (symbol-name st)) nil)))))
 
 (defun carriage-ui--apply-open-last-report (&optional _event)
@@ -2231,38 +2231,38 @@ Performance:
   "Build Apply-all button."
   (when (carriage-ui--last-iteration-present-p)
     (let* ((uicons (carriage-ui--icons-available-p))
-           (label (or (and uicons (carriage-ui--icon 'all)) "[All]")))
+           (label (or (and uicons (carriage-ui--icon 'all)) "All")))
       (carriage-ui--ml-button label #'carriage-apply-last-iteration "Apply last iteration"))))
 
 (defun carriage-ui--ml-seg-diff ()
   "Build Diff button."
   (let* ((uicons (carriage-ui--icons-available-p))
-         (label (or (and uicons (carriage-ui--icon 'diff)) "[Diff]")))
+         (label (or (and uicons (carriage-ui--icon 'diff)) "Diff")))
     (carriage-ui--ml-button label #'carriage-ui--diff-button "Открыть Diff для элемента отчёта")))
 
 (defun carriage-ui--ml-seg-ediff ()
   "Build Ediff button."
   (let* ((uicons (carriage-ui--icons-available-p))
-         (label (or (and uicons (carriage-ui--icon 'ediff)) "[Ediff]")))
+         (label (or (and uicons (carriage-ui--icon 'ediff)) "Ediff")))
     (carriage-ui--ml-button label #'carriage-ui--ediff-button "Открыть Ediff для элемента отчёта")))
 
 (defun carriage-ui--ml-seg-abort ()
   "Build Abort button (visible only when an abort handler is registered)."
   (when (and (boundp 'carriage--abort-handler) carriage--abort-handler)
     (let* ((uicons (carriage-ui--icons-available-p))
-           (label (or (and uicons (carriage-ui--icon 'abort)) "[Abort]")))
+           (label (or (and uicons (carriage-ui--icon 'abort)) "Abort")))
       (carriage-ui--ml-button label #'carriage-abort-current "Abort current request"))))
 
 (defun carriage-ui--ml-seg-report ()
   "Build Report button."
   (let* ((uicons (carriage-ui--icons-available-p))
-         (label (or (and uicons (carriage-ui--icon 'report)) "[Report]")))
+         (label (or (and uicons (carriage-ui--icon 'report)) "Report")))
     (carriage-ui--ml-button label #'carriage-report-open "Open report buffer")))
 
 (defun carriage-ui--ml-seg-save ()
   "Build Save-settings button."
   (let* ((uicons (carriage-ui--icons-available-p))
-         (label (or (and uicons (carriage-ui--icon 'save)) "[Save]")))
+         (label (or (and uicons (carriage-ui--icon 'save)) "Save")))
     (carriage-ui--ml-button label #'carriage-save-settings "Сохранить настройки Carriage сейчас")))
 
 (defun carriage-ui--ml-seg-toggle-ctx ()
@@ -2281,7 +2281,7 @@ Performance:
          (help (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
                    (carriage-i18n :files-tooltip)
                  "Toggle including files from #+begin_context")))
-    (carriage-ui--toggle "[Files]" 'carriage-mode-include-doc-context
+    (carriage-ui--toggle "Files" 'carriage-mode-include-doc-context
                          #'carriage-toggle-include-doc-context
                          help 'files)))
 
@@ -2291,7 +2291,7 @@ Performance:
          (help (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
                    (carriage-i18n :patched-tooltip)
                  "Toggle including files from applied begin_patch blocks (:applied t)")))
-    (carriage-ui--toggle "[Patched]" 'carriage-mode-include-patched-files
+    (carriage-ui--toggle "Patched" 'carriage-mode-include-patched-files
                          #'carriage-toggle-include-patched-files
                          help 'patched)))
 
@@ -2301,7 +2301,7 @@ Performance:
          (help (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
                    (carriage-i18n :visible-tooltip)
                  "Toggle including visible frame buffers")))
-    (carriage-ui--toggle "[Vis]" 'carriage-mode-include-visible-context
+    (carriage-ui--toggle "Vis" 'carriage-mode-include-visible-context
                          #'carriage-toggle-include-visible-context
                          help 'visible)))
 
@@ -2347,7 +2347,7 @@ Performance:
              (label
               (cond
                (ic ic)
-               (t (let ((txt "[LastCtx]"))
+               (t (let ((txt "LastCtx"))
                     (if on (propertize txt 'face 'mode-line-emphasis) txt))))))
         (carriage-ui--ml-button label #'carriage-ui-select-doc-context-last help)))))
 
@@ -4025,7 +4025,7 @@ Redisplay-safe: never scans buffers and never reads files."
     "Build Context badge segment (click to refresh now). Must not signal."
     (let* ((ctx (condition-case _e
                     (carriage-ui--context-badge)
-                  (error (cons "[Ctx:!]" "Контекст: ошибка (см. *Messages*)"))))
+                  (error (cons "Ctx:!" "Контекст: ошибка (см. *Messages*)"))))
            (ctx2 (carriage-ui--ctx--normalize-badge ctx))
            (lbl (car ctx2))
            (hint (cdr ctx2)))

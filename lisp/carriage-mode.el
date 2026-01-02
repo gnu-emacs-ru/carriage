@@ -63,9 +63,30 @@
       (overlay-put ov 'carriage--saved-invisible (overlay-get ov 'invisible)))
     (unless (overlay-get ov 'carriage--saved-display)
       (overlay-put ov 'carriage--saved-display (overlay-get ov 'display)))
-    ;; Reveal
+    (unless (overlay-get ov 'carriage--saved-before-string)
+      (overlay-put ov 'carriage--saved-before-string (overlay-get ov 'before-string)))
+    ;; Reveal (show original text)
+    ;; Also remove cursor-intangible/intangible so point can actually enter the block.
     (overlay-put ov 'invisible nil)
-    (overlay-put ov 'display nil)))
+    (overlay-put ov 'display nil)
+    (overlay-put ov 'before-string nil)
+    (overlay-put ov 'intangible nil)
+    (overlay-put ov 'cursor-intangible nil)))
+
+(defun carriage--reasoning-fold--sanitize-display (disp)
+  "Return DISP with noisy hints removed (e.g., \"TAB: toggle …\")."
+  (if (not (stringp disp))
+      disp
+    (let ((s disp))
+      ;; Remove the most common hint variants (keep it conservative).
+      ;; NOTE: Some placeholders include "(TAB: toggle …)" or localized variants.
+      (dolist (needle '("TAB: toggle" "Tab: toggle" "TAB — toggle" "TAB: Toggle" "TAB:"
+                        "(TAB: toggle" "(Tab: toggle" "(TAB — toggle" "(TAB:" "TAB)"
+                        "toggle" "Toggle"))
+        (setq s (replace-regexp-in-string (regexp-quote needle) "" s t t)))
+      ;; Collapse extra whitespace left after removals.
+      (setq s (replace-regexp-in-string "[ \t][ \t]+" " " s t t))
+      (string-trim s))))
 
 (defun carriage--reasoning-fold--restore (ov)
   "Restore OV hiding properties if previously saved."
@@ -73,7 +94,33 @@
     (when (overlay-get ov 'carriage--saved-invisible)
       (overlay-put ov 'invisible (overlay-get ov 'carriage--saved-invisible)))
     (when (overlay-get ov 'carriage--saved-display)
-      (overlay-put ov 'display (overlay-get ov 'carriage--saved-display)))))
+      (let ((d (overlay-get ov 'carriage--saved-display)))
+        (overlay-put ov 'display (carriage--reasoning-fold--sanitize-display d))))
+    (when (overlay-get ov 'carriage--saved-before-string)
+      (let ((b (overlay-get ov 'carriage--saved-before-string)))
+        (overlay-put ov 'before-string (carriage--reasoning-fold--sanitize-display b))))
+    ;; Ensure point can enter folded reasoning placeholder (avoid "cursor stuck").
+    (overlay-put ov 'intangible nil)
+    (overlay-put ov 'cursor-intangible nil)))
+
+(defun carriage--reasoning-fold--sanitize-all (&optional buffer)
+  "Best-effort sanitize all reasoning-fold overlays in BUFFER (or current buffer).
+
+- Remove noisy \"TAB: toggle …\" hints from overlay display/before-string.
+- Disable cursor-intangible/intangible so point can enter the folded placeholder."
+  (with-current-buffer (or buffer (current-buffer))
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when (carriage--reasoning-fold--overlay-p ov)
+        (ignore-errors
+          (let ((d (overlay-get ov 'display)))
+            (when d
+              (overlay-put ov 'display (carriage--reasoning-fold--sanitize-display d))))
+          (let ((b (overlay-get ov 'before-string)))
+            (when b
+              (overlay-put ov 'before-string (carriage--reasoning-fold--sanitize-display b))))
+          (overlay-put ov 'intangible nil)
+          (overlay-put ov 'cursor-intangible nil))))
+    t))
 
 (defun carriage--reasoning-fold--post-command ()
   "Post-command hook to reveal folded reasoning block at point and refold on leave."
@@ -583,6 +630,7 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
              (require 'carriage-reasoning-fold nil t))
     (ignore-errors (carriage-reasoning-fold-enable))
     (ignore-errors (carriage-reasoning-fold-hide-all (current-buffer)))
+    (ignore-errors (carriage--reasoning-fold--sanitize-all (current-buffer)))
     ;; Reveal original reasoning text when point enters a folded block.
     (add-hook 'post-command-hook #'carriage--reasoning-fold--post-command nil t)))
 
@@ -1003,7 +1051,8 @@ without auto-closing; the end marker is inserted later at tail."
                      carriage-mode-hide-reasoning-blocks
                      (require 'carriage-reasoning-fold nil t))
             (carriage-reasoning-fold-refresh-now (current-buffer))
-            (carriage-reasoning-fold-hide-all (current-buffer))))))))
+            (carriage-reasoning-fold-hide-all (current-buffer))
+            (carriage--reasoning-fold--sanitize-all (current-buffer))))))))
 
 (defun carriage--reasoning-tail-pos ()
   "Return tail position for inserting #+end_reasoning, or nil."
@@ -1100,7 +1149,8 @@ without auto-closing; the end marker is inserted later at tail."
                  carriage-mode-hide-reasoning-blocks
                  (require 'carriage-reasoning-fold nil t))
         (carriage-reasoning-fold-refresh-now (current-buffer))
-        (carriage-reasoning-fold-hide-all (current-buffer))))
+        (carriage-reasoning-fold-hide-all (current-buffer))
+        (carriage--reasoning-fold--sanitize-all (current-buffer))))
     (setq carriage--reasoning-open nil)
     t))
 

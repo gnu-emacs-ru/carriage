@@ -336,7 +336,48 @@ Strips:
       (goto-char (point-min))
       (while (re-search-forward "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
         (delete-region (line-beginning-position)
-                       (min (point-max) (1+ (line-end-position))))))
+                       (min (point-max) (1+ (line-end-position)))))
+
+      ;; Applied patch blocks must not leak full bodies into prompts, but their headers should remain
+      ;; (so the model can see what was already done). Collapse applied blocks into:
+      ;;   #+begin_patch (...)   ;; preserved
+      ;;   ;; applied: <desc|result> (content omitted)
+      ;;   #+end_patch          ;; preserved or synthesized
+      (goto-char (point-min))
+      (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
+        (let* ((beg-line-beg (line-beginning-position))
+               (beg-line-end (line-end-position))
+               (sexp-str (match-string 1))
+               (plist (condition-case _e
+                          (car (read-from-string sexp-str))
+                        (error nil))))
+          (if (and (listp plist) (plist-get plist :applied))
+              (let* ((desc (or (plist-get plist :description)
+                               (plist-get plist :result)
+                               "Applied"))
+                     (desc (string-trim (format "%s" desc)))
+                     (desc (if (string-empty-p desc) "Applied" desc))
+                     (summary (format ";; applied: %s (content omitted)\n" desc))
+                     (body-beg (min (point-max) (1+ beg-line-end)))
+                     (end-pos (save-excursion
+                                (goto-char body-beg)
+                                (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t))))
+                (if end-pos
+                    (let* ((end-line-beg (save-excursion
+                                           (goto-char end-pos)
+                                           (line-beginning-position))))
+                      (delete-region body-beg end-line-beg)
+                      (goto-char body-beg)
+                      (insert summary)
+                      ;; Continue scanning after the end_patch line (re-find, positions may have shifted).
+                      (when (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                        (goto-char (min (point-max) (1+ (line-end-position))))))
+                  (delete-region body-beg (point-max))
+                  (goto-char body-beg)
+                  (insert summary "#+end_patch\n")
+                  (goto-char (point-max))))
+            ;; not applied → continue scanning from next line to avoid infinite loops
+            (goto-char (min (point-max) (1+ (line-end-position))))))))
     (buffer-substring-no-properties (point-min) (point-max))))
 
 

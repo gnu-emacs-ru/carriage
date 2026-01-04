@@ -80,7 +80,7 @@ Defaults to 'carriage-doc-state to integrate with doc-state toggles."
   (let* ((arrow (if (display-graphic-p) "▸" ">"))
          (nm (format "begin_%s" (symbol-name kind)))
          (lines (max 1 (count-lines beg end)))
-         (txt (format "%s %s (%d lines) — mouse-1: toggle" arrow nm lines))
+         (txt (format "%s %s (%d lines)" arrow nm lines))
          (s (propertize txt 'face 'carriage-block-fold-summary-face)))
     (let ((map (make-sparse-keymap)))
       (define-key map [mouse-1]

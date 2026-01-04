@@ -119,15 +119,19 @@ Plist keys:
 (defun carriage-patch-fold--hover-exit ()
   "Exit hover-mode if active: restore placeholder overlay immediately.
 
-We intentionally keep Org folding in place (no org-show here), so that:
-- applied blocks are org-folded by default (even under the placeholder), and
-- when placeholder overlay is removed on hover, the block remains folded."
+Important: do NOT keep org-fold under our placeholder overlay.
+
+Keeping org-fold overlays inside our `invisible' overlay may render a second
+ellipsis/placeholder (looks like a duplicate) because org-fold uses overlays
+with before-string/display inside the hidden region."
   (when (and (listp carriage-patch-fold--hover-active)
              (numberp (plist-get carriage-patch-fold--hover-active :beg)))
     (let* ((beg (plist-get carriage-patch-fold--hover-active :beg))
            (pl  (plist-get carriage-patch-fold--hover-active :pl))
            (rg  (and (numberp beg) (carriage-patch-fold--block-bounds-at beg)))
            (end (and (consp rg) (cdr rg))))
+      ;; Remove org-fold created for hover-mode to avoid double placeholders.
+      (carriage-patch-fold--org-show-at beg)
       (when (and (numberp beg) (numberp end) (< beg end) (listp pl))
         (carriage-patch-fold--make beg end pl)))
     (setq carriage-patch-fold--hover-active nil)))
@@ -207,7 +211,7 @@ when point leaves that block, restore placeholder overlay immediately."
          (desc (or (plist-get pl :description)
                    (plist-get pl :result)
                    "Applied"))
-         (txt (format "%s %s — %s  (TAB: toggle)" tick path desc))
+         (txt (format "%s %s — %s" tick path desc))
          (s (propertize txt 'face 'carriage-patch-fold-placeholder-face)))
     (let ((map (make-sparse-keymap)))
       (define-key map (kbd "TAB") #'carriage-patch-fold-toggle-at)
@@ -239,15 +243,25 @@ when point leaves that block, restore placeholder overlay immediately."
   (setq carriage-patch-fold--overlays nil))
 
 (defun carriage-patch-fold--refresh-now ()
-  "Rescan buffer and (re)create overlays for applied patches."
+  "Rescan buffer and (re)create overlays for applied patches.
+
+Avoid duplicate placeholders:
+- When hover-mode is active for a block, do NOT recreate the placeholder overlay
+  for that same block (otherwise we get: placeholder overlay + org-fold ellipsis).
+- Before creating a placeholder overlay for other blocks, best-effort remove any
+  org-fold at their begin line."
   (carriage-patch-fold--clear-overlays)
   (when (derived-mode-p 'org-mode)
-    (dolist (cell (carriage-patch-fold--scan-applied))
-      (let ((beg (plist-get cell :beg))
-            (end (plist-get cell :end))
-            (pl  (plist-get cell :plist)))
-        (when (and (numberp beg) (numberp end) (< beg end))
-          (carriage-patch-fold--make beg end pl))))))
+    (let* ((hover-beg (and (listp carriage-patch-fold--hover-active)
+                           (plist-get carriage-patch-fold--hover-active :beg))))
+      (dolist (cell (carriage-patch-fold--scan-applied))
+        (let ((beg (plist-get cell :beg))
+              (end (plist-get cell :end))
+              (pl  (plist-get cell :plist)))
+          (when (and (numberp beg) (numberp end) (< beg end))
+            (unless (and (numberp hover-beg) (= beg hover-beg))
+              (carriage-patch-fold--org-show-at beg)
+              (carriage-patch-fold--make beg end pl))))))))
 
 (defun carriage-patch-fold--schedule-refresh (&optional delay)
   "Schedule debounced refresh with optional DELAY seconds (default 0.1)."

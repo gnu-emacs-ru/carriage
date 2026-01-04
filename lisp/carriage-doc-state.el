@@ -58,8 +58,11 @@ Behavior:
   :type 'boolean
   :group 'carriage-doc-state)
 
-(defcustom carriage-doc-state-summary-debounce-seconds 0.15
-  "Idle debounce (seconds) for refreshing CARRIAGE_STATE summary overlay after edits."
+(defcustom carriage-doc-state-summary-debounce-seconds 0.4
+  "Idle debounce (seconds) for refreshing CARRIAGE_STATE summary overlay after edits.
+
+Note: doc-state refresh may touch many fingerprint overlays; a slightly larger debounce
+reduces input lag during continuous typing."
   :type 'number
   :group 'carriage-doc-state)
 
@@ -73,6 +76,16 @@ When nil (default), render a richer badge (suite/model/context toggles, etc.)."
   "When non-nil, render CARRIAGE_FINGERPRINT fold badge in minimal form (model only).
 When nil (default), render a richer badge (suite/model/context toggles, etc.)."
   :type 'boolean
+  :group 'carriage-doc-state)
+
+(defcustom carriage-doc-state-tooltip-verbosity 'brief
+  "Verbosity policy for doc-state fold tooltips (CARRIAGE_STATE/CARRIAGE_FINGERPRINT).
+
+- 'brief (default): tooltip is lightweight and does NOT render full raw plist/details.
+  Intended for performance (safe during frequent refreshes).
+- 'full: tooltip renders the full details (may be expensive in buffers with many fingerprints)."
+  :type '(choice (const :tag "Brief (fast)" brief)
+                 (const :tag "Full (verbose; may be slow)" full))
   :group 'carriage-doc-state)
 
 (defvar-local carriage-doc-state--overlay nil
@@ -631,12 +644,12 @@ Important: use `concat' (not `format') to preserve icon text properties."
                         txt))
                     'shadow))
          (model-b  (carriage-doc-state--badge
-                   (let* ((ic (or model-ic ""))
-                          (gap (if (and (stringp ic) (> (length ic) 0))
-                                   (carriage-doc-state--icon-gap)
-                                 "")))
-                     (concat ic gap (carriage-doc-state--llm-display-name backend provider model)))
-                   'mode-line-emphasis))
+                    (let* ((ic (or model-ic ""))
+                           (gap (if (and (stringp ic) (> (length ic) 0))
+                                    (carriage-doc-state--icon-gap)
+                                  "")))
+                      (concat ic gap (carriage-doc-state--llm-display-name backend provider model)))
+                    'mode-line-emphasis))
          (ctx-b (string-join
                  (delq nil
                        (list
@@ -705,12 +718,12 @@ Differs from `carriage-doc-state--summary-string' by rendering context flags as
                       (concat ic gap (carriage-doc-state--as-string (or suite "-"))))
                     'shadow))
          (model-b  (carriage-doc-state--badge
-                   (let* ((ic (or model-ic ""))
-                          (gap (if (and (stringp ic) (> (length ic) 0))
-                                   (carriage-doc-state--icon-gap)
-                                 "")))
-                     (concat ic gap (carriage-doc-state--llm-display-name backend provider model)))
-                   'mode-line-emphasis))
+                    (let* ((ic (or model-ic ""))
+                           (gap (if (and (stringp ic) (> (length ic) 0))
+                                    (carriage-doc-state--icon-gap)
+                                  "")))
+                      (concat ic gap (carriage-doc-state--llm-display-name backend provider model)))
+                    'mode-line-emphasis))
          (ctx-b (string-join
                  (delq nil
                        (list
@@ -821,7 +834,17 @@ Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tes
 
 (defvar-local carriage-doc-state--fold-state-ov nil)
 (defvar-local carriage-doc-state--fold-fp-ovs nil)
+(defvar-local carriage-doc-state--fold--active-fp-ov nil
+  "Fingerprint overlay currently revealed due to point being inside (perf cache; O(1) post-command).")
+
+(defvar-local carriage-doc-state--fold--pending-kind nil
+  "Which doc-state overlays need a refresh.
+Nil means full refresh.
+Possible values: 'state, 'fingerprint, 'both.")
+
 (defvar-local carriage-doc-state--fold-refresh-timer nil)
+(defvar-local carriage-doc-state--fold--refresh-pending nil
+  "Non-nil when a fold overlay refresh is pending (coalesced by a single timer).")
 (defvar-local carriage-doc-state--fold-enabled nil)
 
 (defvar-local carriage-doc-state--fold--last-scan-tick nil
@@ -869,9 +892,16 @@ mode) without any buffer text edits.")
     (overlay-put ov 'mouse-face nil)))
 
 (defun carriage-doc-state--fold--apply-for-point ()
-  "Apply reveal/fold depending on current point for all fold overlays."
-  (when carriage-doc-state--fold-enabled
-    ;; State line overlay
+  "Apply reveal/fold depending on current point for fold overlays.
+
+Performance invariant:
+- Must be O(1) on every command (post-command-hook).
+- Must NOT traverse all fingerprint overlays (those can grow unbounded over time)."
+  (when (and carriage-doc-state--fold-enabled
+             ;; Skip work for buffers that are not visible; avoids background churn.
+             (get-buffer-window (current-buffer) t))
+    ;; ---------------------------------------------------------------------
+    ;; State line overlay (single; safe to handle every time)
     (when (overlayp carriage-doc-state--fold-state-ov)
       (let ((beg (overlay-start carriage-doc-state--fold-state-ov))
             (end (overlay-end carriage-doc-state--fold-state-ov)))
@@ -881,23 +911,56 @@ mode) without any buffer text edits.")
               (carriage-doc-state--fold--ov-set-folded carriage-doc-state--fold-state-ov))
           (delete-overlay carriage-doc-state--fold-state-ov)
           (setq carriage-doc-state--fold-state-ov nil))))
-    ;; Fingerprint overlays
-    (setq carriage-doc-state--fold-fp-ovs
-          (cl-remove-if-not
-           (lambda (ov)
-             (when (overlayp ov)
-               (let ((beg (overlay-start ov))
-                     (end (overlay-end ov)))
-                 (cond
-                  ((and (number-or-marker-p beg) (number-or-marker-p end))
-                   (if (carriage-doc-state--fold--point-inside-ov-p ov)
-                       (carriage-doc-state--fold--ov-set-revealed ov)
-                     (carriage-doc-state--fold--ov-set-folded ov))
-                   t)
-                  (t
-                   (delete-overlay ov)
-                   nil)))))
-           carriage-doc-state--fold-fp-ovs))))
+
+    ;; ---------------------------------------------------------------------
+    ;; Fingerprint overlays (many): ONLY touch at most one "active" fp overlay.
+    ;;
+    ;; Old behavior walked the whole list on every command, which makes cursor moves
+    ;; progressively slower as the buffer accumulates fingerprints.
+    (let ((active carriage-doc-state--fold--active-fp-ov))
+      ;; Drop stale active overlay (killed/evaporated/moved to other buffer).
+      (when (and (overlayp active)
+                 (not (eq (overlay-buffer active) (current-buffer))))
+        (setq active nil)
+        (setq carriage-doc-state--fold--active-fp-ov nil))
+
+      ;; If we have an active fp overlay, fold/reveal it depending on point.
+      (when (overlayp active)
+        (if (carriage-doc-state--fold--point-inside-ov-p active)
+            (carriage-doc-state--fold--ov-set-revealed active)
+          (carriage-doc-state--fold--ov-set-folded active)
+          ;; We are no longer inside; clear active so we can pick a new one quickly.
+          (setq active nil)
+          (setq carriage-doc-state--fold--active-fp-ov nil)))
+
+      ;; Find fingerprint overlay near point (boundary-safe) and reveal only that one.
+      ;; Avoid allocating (append (overlays-at ...) (overlays-in ...)) on every command.
+      (let* ((pt (point))
+             (fp
+              (cl-loop for ov in (overlays-at pt)
+                       when (and (overlayp ov)
+                                 (eq (overlay-get ov 'category) 'carriage-doc-state-fold)
+                                 (not (eq ov carriage-doc-state--fold-state-ov))
+                                 (overlay-get ov 'carriage-fold-summary))
+                       return ov)))
+        (unless (overlayp fp)
+          (let* ((lo (max (point-min) (1- pt)))
+                 (hi (min (point-max) (1+ pt))))
+            (setq fp
+                  (cl-loop for ov in (overlays-in lo hi)
+                           when (and (overlayp ov)
+                                     (eq (overlay-get ov 'category) 'carriage-doc-state-fold)
+                                     (not (eq ov carriage-doc-state--fold-state-ov))
+                                     (overlay-get ov 'carriage-fold-summary))
+                           return ov))))
+        (when (and (overlayp fp)
+                   (not (eq fp active)))
+          ;; Fold previously active fp overlay (if any), then reveal new one.
+          (when (overlayp active)
+            (carriage-doc-state--fold--ov-set-folded active))
+          (setq carriage-doc-state--fold--active-fp-ov fp)
+          (carriage-doc-state--fold--ov-set-revealed fp)))))
+  t)
 
 (defun carriage-doc-state--fold--maybe-summary-from-plist (pl kind)
   "Render summary badges from PL for KIND ('state or 'fingerprint).
@@ -934,21 +997,41 @@ When minimal mode is enabled for the given KIND, renders only the model badge."
         (_            (carriage-doc-state--summary-string pl2))))))
 
 (defun carriage-doc-state--fold--tooltip (raw-line pl kind)
-  "Build tooltip text for RAW-LINE + PL."
-  (let ((pretty
-         (cond
-          ((fboundp 'carriage-doc-state--tooltip-string)
-           (ignore-errors (carriage-doc-state--tooltip-string pl)))
-          (t
-           (ignore-errors (pp-to-string pl))))))
+  "Build tooltip text for RAW-LINE + PL (always brief/fast).
+
+Perf invariant:
+- Never renders full raw plist (no `pp-to-string`, no `carriage-doc-state--tooltip-string`).
+- Intended to be safe to call during redisplay without causing input lag."
+  (let* ((raw (string-trim-right (or raw-line "")))
+         (pl0 (or pl '()))
+         (imp (if (fboundp 'carriage-doc-state--important-plist)
+                  (ignore-errors (carriage-doc-state--important-plist pl0))
+                pl0))
+         (backend (carriage-doc-state--as-symbol (plist-get imp :CAR_BACKEND)))
+         (provider (carriage-doc-state--as-string (plist-get imp :CAR_PROVIDER)))
+         (model (carriage-doc-state--as-string (plist-get imp :CAR_MODEL)))
+         (ctx-doc (carriage-doc-state--bool (plist-get imp :CAR_CTX_DOC)))
+         (ctx-gptel (carriage-doc-state--bool (plist-get imp :CAR_CTX_GPTEL)))
+         (ctx-vis (carriage-doc-state--bool (plist-get imp :CAR_CTX_VISIBLE)))
+         (ctx-patched (carriage-doc-state--bool (plist-get imp :CAR_CTX_PATCHED)))
+         (scope (carriage-doc-state--as-string (plist-get imp :CAR_DOC_CTX_SCOPE)))
+         (profile (carriage-doc-state--as-string (plist-get imp :CAR_CTX_PROFILE))))
     (string-join
      (delq nil
            (list
             (format "%s" kind)
-            "—"
-            (string-trim-right (or raw-line ""))
-            (when (and pretty (not (string-empty-p (string-trim pretty))))
-              (string-trim-right pretty))))
+            raw
+            (format "Model: %s" (carriage-doc-state--llm-display-name backend provider model))
+            (format "Context: doc=%s gptel=%s visible=%s patched=%s"
+                    (if ctx-doc "on" "off")
+                    (if ctx-gptel "on" "off")
+                    (if ctx-vis "on" "off")
+                    (if ctx-patched "on" "off"))
+            (when (or (not (string-empty-p scope))
+                      (not (string-empty-p profile)))
+              (format "Scope/Profile: scope=%s profile=%s"
+                      (if (string-empty-p scope) "-" scope)
+                      (if (string-empty-p profile) "-" profile)))))
      "\n")))
 
 (defun carriage-doc-state--fold--parse-sexp (s)
@@ -1085,23 +1168,59 @@ Perf:
     (carriage-doc-state--fold--apply-for-point)
     t))
 
-(defun carriage-doc-state--fold--schedule-refresh (&rest _)
+(defun carriage-doc-state--fold--schedule-refresh (beg end _len)
+  "Coalesced schedule of fold overlay refresh (perf critical).
+
+Perf invariant for interactive typing:
+- This hook runs on every edit (often per character), so it MUST be O(1).
+- We schedule a fold refresh ONLY when the edit touches doc-state lines:
+  - #+PROPERTY: CARRIAGE_STATE ...
+  - #+CARRIAGE_FINGERPRINT: ...
+All other edits must not schedule doc-state overlay rebuilds.
+
+Debounce semantics:
+- If a timer is already pending, we do NOT cancel/reschedule it; we only postpone
+  its idle time (reduces GC churn).
+- When the timer fires, it refreshes overlays once, only for visible buffers."
   (when (and carriage-doc-state--fold-enabled
+             (number-or-marker-p beg)
+             (number-or-marker-p end)
              ;; Do not schedule work for hidden buffers; reduces per-keystroke churn.
              (get-buffer-window (current-buffer) t))
-    (when (timerp carriage-doc-state--fold-refresh-timer)
-      (cancel-timer carriage-doc-state--fold-refresh-timer))
-    (setq carriage-doc-state--fold-refresh-timer
-          (run-with-idle-timer
-           carriage-doc-state-summary-debounce-seconds
-           nil
-           (lambda (buf)
-             (when (buffer-live-p buf)
-               (with-current-buffer buf
-                 (setq carriage-doc-state--fold-refresh-timer nil)
-                 (when (get-buffer-window (current-buffer) t)
-                   (carriage-doc-state--fold--refresh-overlays)))))
-           (current-buffer)))))
+    (let* ((secs (or carriage-doc-state-summary-debounce-seconds 0.4))
+           (interesting
+            (save-excursion
+              (let ((case-fold-search t)
+                    (hit nil))
+                (goto-char beg)
+                (beginning-of-line)
+                (setq hit (or (looking-at-p "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b")
+                              (looking-at-p "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b")))
+                (unless hit
+                  (goto-char end)
+                  (beginning-of-line)
+                  (setq hit (or (looking-at-p "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b")
+                                (looking-at-p "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b"))))
+                hit))))
+      (when interesting
+        (cond
+         ;; Timer exists: postpone instead of cancel+recreate (reduces GC churn).
+         ((timerp carriage-doc-state--fold-refresh-timer)
+          (ignore-errors
+            (when (fboundp 'timer-set-idle-time)
+              (timer-set-idle-time carriage-doc-state--fold-refresh-timer secs))))
+         ;; No timer: create one.
+         (t
+          (setq carriage-doc-state--fold-refresh-timer
+                (run-with-idle-timer
+                 secs nil
+                 (lambda (buf)
+                   (when (buffer-live-p buf)
+                     (with-current-buffer buf
+                       (setq carriage-doc-state--fold-refresh-timer nil)
+                       (when (get-buffer-window (current-buffer) t)
+                         (carriage-doc-state--fold--refresh-overlays)))))
+                 (current-buffer)))))))))
 
 (defun carriage-doc-state-summary-enable ()
   "Enable summary folding for `CARRIAGE_STATE` and `CARRIAGE_FINGERPRINT` lines in current buffer."

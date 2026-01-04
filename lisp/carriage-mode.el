@@ -49,12 +49,20 @@
   "Internal list of reasoning fold overlays currently revealed due to point being inside.")
 
 (defun carriage--reasoning-fold--overlay-p (ov)
-  "Return non-nil when OV looks like a reasoning-fold overlay."
+  "Return non-nil when OV looks like a reasoning-fold overlay.
+
+Important: keep this predicate narrow to avoid touching unrelated overlays
+(e.g., doc-state/fingerprint folds)."
   (and (overlayp ov)
        (overlay-buffer ov)
        (or (overlay-get ov 'carriage-reasoning-fold)
            (overlay-get ov 'carriage-reasoning)
-           (memq (overlay-get ov 'invisible) '(carriage-reasoning-fold carriage-reasoning)))))
+           ;; carriage-reasoning-fold.el marks its overlays by category.
+           (eq (overlay-get ov 'category) 'carriage-reasoning-fold))
+       ;; Never touch doc-state/fingerprint fold overlays.
+       (not (eq (overlay-get ov 'category) 'carriage-doc-state-fold))
+       (not (overlay-get ov 'carriage-fold-summary))
+       (not (overlay-get ov 'carriage-fold-tooltip))))
 
 (defun carriage--reasoning-fold--reveal (ov)
   "Reveal OV by removing hiding properties, saving them for restoration."
@@ -74,19 +82,25 @@
     (overlay-put ov 'cursor-intangible nil)))
 
 (defun carriage--reasoning-fold--sanitize-display (disp)
-  "Return DISP with noisy hints removed (e.g., \"TAB: toggle …\")."
+  "Return DISP with noisy hints removed (e.g., \"(TAB: toggle …)\").
+
+Important:
+- Do not remove generic words like \"toggle\" globally (it can be part of legit text).
+- If sanitization would produce an empty placeholder, return a minimal \"…\" so the
+  overlay remains visible and clickable."
   (if (not (stringp disp))
       disp
-    (let ((s disp))
-      ;; Remove the most common hint variants (keep it conservative).
-      ;; NOTE: Some placeholders include "(TAB: toggle …)" or localized variants.
-      (dolist (needle '("TAB: toggle" "Tab: toggle" "TAB — toggle" "TAB: Toggle" "TAB:"
-                        "(TAB: toggle" "(Tab: toggle" "(TAB — toggle" "(TAB:" "TAB)"
-                        "toggle" "Toggle"))
-        (setq s (replace-regexp-in-string (regexp-quote needle) "" s t t)))
-      ;; Collapse extra whitespace left after removals.
+    (let* ((s disp))
+      ;; Remove parenthesized hint chunks like: "(TAB: toggle ...)" (case-insensitive for TAB).
+      (setq s (replace-regexp-in-string
+               "(\\s-*\\(TAB\\|Tab\\):\\s-*toggle\\([^)]*\\))" "" s t))
+      ;; Remove non-parenthesized tail hints like: "TAB: toggle ..." (keep left side).
+      (setq s (replace-regexp-in-string
+               "\\s-*\\(TAB\\|Tab\\):\\s-*toggle\\b.*\\'" "" s t))
+      ;; Collapse whitespace.
       (setq s (replace-regexp-in-string "[ \t][ \t]+" " " s t t))
-      (string-trim s))))
+      (setq s (string-trim s))
+      (if (string-empty-p s) "…" s))))
 
 (defun carriage--reasoning-fold--restore (ov)
   "Restore OV hiding properties if previously saved."
@@ -125,9 +139,28 @@
 (defun carriage--reasoning-fold--post-command ()
   "Post-command hook to reveal folded reasoning block at point and refold on leave."
   (condition-case _e
-      (let* ((ovs (overlays-at (point)))
-             (cur (cl-remove-if-not #'carriage--reasoning-fold--overlay-p ovs))
+      (let* ((pt (point))
+             ;; Also inspect overlays adjacent to point to avoid the \"stuck at boundary\"
+             ;; behavior when approaching folded overlays from below.
+             (lo (max (point-min) (1- pt)))
+             (hi (min (point-max) (1+ pt)))
+             (near (cl-remove-if-not #'carriage--reasoning-fold--overlay-p
+                                     (overlays-in lo hi)))
+             (cur  (cl-remove-if-not #'carriage--reasoning-fold--overlay-p
+                                     (overlays-at pt)))
              (prev (or carriage--reasoning-fold--revealed-ovs '())))
+        ;; Ensure the cursor can ENTER folded placeholders from either direction.
+        ;; If overlays remain cursor-intangible, point never enters → our reveal hook never runs.
+        (dolist (ov near)
+          (ignore-errors
+            (overlay-put ov 'intangible nil)
+            (overlay-put ov 'cursor-intangible nil)
+            ;; Also clean up noisy hints in-place (TAB: toggle ...)
+            (let ((d (overlay-get ov 'display))
+                  (b (overlay-get ov 'before-string)))
+              (when d (overlay-put ov 'display (carriage--reasoning-fold--sanitize-display d)))
+              (when b (overlay-put ov 'before-string (carriage--reasoning-fold--sanitize-display b))))))
+
         ;; Restore overlays that are no longer under point
         (dolist (ov prev)
           (unless (memq ov cur)
@@ -312,7 +345,8 @@ Also folds newly streamed reasoning as early as possible and keeps it folded whe
 (make-variable-buffer-local 'carriage-mode-include-gptel-context)
 
 (defcustom carriage-mode-include-doc-context t
-  "When non-nil, include file contents from the nearest #+begin_context block."
+  "When non-nil, include file contents from document #+begin_context blocks.
+Which block(s) are used depends on `carriage-doc-context-scope' (all vs last)."
   :type 'boolean :group 'carriage)
 (make-variable-buffer-local 'carriage-mode-include-doc-context)
 
@@ -564,40 +598,70 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
                        ml carriage--mode-modeline-construct))))
       (force-mode-line-update t))))
 
-(defun carriage-mode--init-ui ()
-  "Install header/modeline and key bindings; open optional panels."
-  ;; UI (buffer-local, no global effects); respect batch/noninteractive
-  (unless (bound-and-true-p noninteractive)
-    (when carriage-mode-show-header-line
-      (setq carriage--mode-prev-header-line-format header-line-format)
-      (setq-local header-line-format '(:eval (carriage-ui--header-line-for (selected-window))))
-      (add-hook 'post-command-hook #'carriage-ui--headerline-post-command nil t)
-      (add-hook 'window-scroll-functions #'carriage-ui--headerline-window-scroll nil t))
-    (when carriage-mode-show-mode-line-ui
-      ;; Minimal & safe policy:
-      ;; - If mode-line was disabled (mode-line-format=nil), show it for this buffer.
-      ;; - Insert Carriage segment at a likely-visible anchor (never blindly append to tail).
-      ;; - Save original mode-line-format and restore it on disable.
-      (unless carriage--mode-prev-mode-line-format-saved
-        (setq carriage--mode-prev-mode-line-format mode-line-format
-              carriage--mode-prev-mode-line-format-was-local (local-variable-p 'mode-line-format)
-              carriage--mode-prev-mode-line-format-saved t))
-      (when (null mode-line-format)
-        (setq-local mode-line-format (default-value 'mode-line-format)))
-      (setq carriage--mode-modeline-construct '(:eval (carriage-ui--modeline)))
-      (let* ((ml (carriage-mode--modeline--as-list mode-line-format)))
-        (unless (memq carriage--mode-modeline-construct ml)
-          (setq-local mode-line-format
-                      (carriage-mode--modeline--insert-visible
-                       ml carriage--mode-modeline-construct))))
-      (force-mode-line-update))
-    ;; Patch-count is expensive to compute by scanning; keep it off the redisplay path.
-    ;; Maintain the cache asynchronously on edits.
-    (when (and (derived-mode-p 'org-mode)
-               (fboundp 'carriage-ui--patch-after-change))
-      (add-hook 'after-change-functions #'carriage-ui--patch-after-change nil t)
-      (when (fboundp 'carriage-ui--patch-schedule-refresh)
-        (ignore-errors (carriage-ui--patch-schedule-refresh 0.05)))))
+(defun carriage-mode--install-headerline ()
+  "Install Carriage header-line (buffer-local)."
+  (when carriage-mode-show-header-line
+    (setq carriage--mode-prev-header-line-format header-line-format)
+    (setq-local header-line-format '(:eval (carriage-ui--header-line-for (selected-window))))
+    (add-hook 'post-command-hook #'carriage-ui--headerline-post-command nil t)
+    (add-hook 'window-scroll-functions #'carriage-ui--headerline-window-scroll nil t)))
+
+(defun carriage-mode--install-modeline ()
+  "Insert Carriage segment into the mode-line (buffer-local) and save snapshot."
+  ;; Minimal & safe policy:
+  ;; - If mode-line was disabled (mode-line-format=nil), show it for this buffer.
+  ;; - Insert Carriage segment at a likely-visible anchor (never blindly append to tail).
+  ;; - Save original mode-line-format and restore it on disable.
+  (unless carriage--mode-prev-mode-line-format-saved
+    (setq carriage--mode-prev-mode-line-format mode-line-format
+          carriage--mode-prev-mode-line-format-was-local (local-variable-p 'mode-line-format)
+          carriage--mode-prev-mode-line-format-saved t))
+  (when (null mode-line-format)
+    (setq-local mode-line-format (default-value 'mode-line-format)))
+  (setq carriage--mode-modeline-construct '(:eval (carriage-ui--modeline)))
+  (let* ((ml (carriage-mode--modeline--as-list mode-line-format)))
+    (unless (memq carriage--mode-modeline-construct ml)
+      (setq-local mode-line-format
+                  (carriage-mode--modeline--insert-visible
+                   ml carriage--mode-modeline-construct))))
+  (force-mode-line-update))
+
+(defun carriage-mode--ctx-window-change ()
+  "Window configuration change hook to refresh [Ctx:N] when visible-context is enabled.
+Debounced refresh is handled by `carriage-ui--ctx-schedule-refresh`."
+  (when (and (bound-and-true-p carriage-mode)
+             (boundp 'carriage-mode-include-visible-context)
+             carriage-mode-include-visible-context
+             (fboundp 'carriage-ui--ctx-invalidate))
+    ;; Invalidate cached badge (preserves last value), and schedule a refresh soon.
+    (ignore-errors (carriage-ui--ctx-invalidate))))
+
+(defun carriage-mode--install-counters-hooks ()
+  "Install modeline counters (patch/context) maintenance hooks."
+  ;; Patch-count is expensive to compute by scanning; keep it off the redisplay path.
+  ;; Maintain the cache asynchronously on edits, but only when patch counter is enabled.
+  (when (and (derived-mode-p 'org-mode)
+             (boundp 'carriage-ui-modeline-blocks)
+             (memq 'patch carriage-ui-modeline-blocks)
+             (fboundp 'carriage-ui--patch-after-change))
+    (add-hook 'after-change-functions #'carriage-ui--patch-after-change nil t)
+    (when (fboundp 'carriage-ui--patch-schedule-refresh)
+      (ignore-errors (carriage-ui--patch-schedule-refresh 0.05))))
+  ;; Keep [Ctx:N] badge up-to-date on document edits (debounced, non-blocking).
+  ;; IMPORTANT: no context computation on redisplay; only schedule a refresh timer.
+  (when (and (boundp 'carriage-ui-modeline-blocks)
+             (memq 'context carriage-ui-modeline-blocks)
+             (fboundp 'carriage-ui--ctx-after-change))
+    (add-hook 'after-change-functions #'carriage-ui--ctx-after-change nil t)
+    ;; Save/revert are strong signals that doc paths / file sizes may have changed.
+    (when (fboundp 'carriage-ui--after-save-refresh)
+      (add-hook 'after-save-hook #'carriage-ui--after-save-refresh nil t)
+      (add-hook 'after-revert-hook #'carriage-ui--after-save-refresh nil t))
+    ;; Visible-context depends on window layout; refresh on window config changes.
+    (add-hook 'window-configuration-change-hook #'carriage-mode--ctx-window-change nil t)))
+
+(defun carriage-mode--setup-keys-and-panels ()
+  "Apply keyspec keymaps, define bindings, and open optional panels."
   (when (require 'carriage-keyspec nil t)
     (carriage-keys-apply-known-keymaps)
     (let ((prefixes (carriage-keys-prefixes)))
@@ -615,15 +679,16 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
       (ignore-errors (carriage-show-log)))
     (when (and carriage-mode-auto-open-traffic (fboundp 'carriage-show-traffic))
       (ignore-errors (carriage-show-traffic)))
-    (carriage-log "carriage-mode enabled in %s" (buffer-name)))
+    (carriage-log "carriage-mode enabled in %s" (buffer-name))))
 
+(defun carriage-mode--fold-ui-enable ()
+  "Enable UI folds for applied patches and reasoning blocks in this buffer."
   ;; Folding UI must not depend on keyspec being present/loaded.
   ;; Fold applied patch blocks if enabled
   (when (and (boundp 'carriage-mode-hide-applied-patches)
              carriage-mode-hide-applied-patches
              (require 'carriage-patch-fold nil t))
     (ignore-errors (carriage-patch-fold-enable)))
-
   ;; Fold all reasoning blocks on mode enable (and keep newly streamed ones folded).
   (when (and (boundp 'carriage-mode-hide-reasoning-blocks)
              carriage-mode-hide-reasoning-blocks
@@ -633,6 +698,17 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
     (ignore-errors (carriage--reasoning-fold--sanitize-all (current-buffer)))
     ;; Reveal original reasoning text when point enters a folded block.
     (add-hook 'post-command-hook #'carriage--reasoning-fold--post-command nil t)))
+
+(defun carriage-mode--init-ui ()
+  "Install header/modeline and key bindings; open optional panels."
+  ;; UI (buffer-local, no global effects); respect batch/noninteractive
+  (unless (bound-and-true-p noninteractive)
+    (carriage-mode--install-headerline)
+    (when carriage-mode-show-mode-line-ui
+      (carriage-mode--install-modeline))
+    (carriage-mode--install-counters-hooks)
+    (carriage-mode--setup-keys-and-panels)
+    (carriage-mode--fold-ui-enable)))
 
 (defun carriage-mode--enable ()
   "Enable Carriage mode in the current buffer (internal)."
@@ -973,6 +1049,10 @@ Returns non-nil when inserted."
 Does not modify buffer text; only clears markers/state so the next chunk opens a region."
   (setq carriage--stream-beg-marker nil)
   (setq carriage--stream-end-marker nil)
+  ;; Reset Apply badge when starting a new request: Apply should reappear only after the next apply attempt.
+  ;; Best-effort: avoid errors when UI is not loaded.
+  (when (fboundp 'carriage-ui-apply-reset)
+    (ignore-errors (carriage-ui-apply-reset)))
   ;; Always pin origin to the cursor position at the moment of reset.
   ;; Never reuse an old marker object: stale origin makes preloader “drift” upward.
   (setq carriage--stream-origin-marker
@@ -1496,24 +1576,47 @@ May include :context-text and :context-target per v1.1."
                     (delete-region (line-beginning-position)
                                    (min (point-max) (1+ (line-end-position))))
                     (goto-char (line-beginning-position)))
-                  ;; Strip applied patch blocks entirely from payload:
-                  ;; detect #+begin_patch with (:applied t) header and remove up to matching #+end_patch.
+                  ;; Strip applied patch bodies from payload, but keep their headers so the LLM sees history:
+                  ;; - Keep '#+begin_patch (...)' line as-is
+                  ;; - Replace body with a short summary comment
+                  ;; - Keep (or synthesize) '#+end_patch'
                   (goto-char (point-min))
                   (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
-                    (let* ((line-beg (line-beginning-position))
+                    (let* ((beg-line-beg (line-beginning-position))
+                           (beg-line-end (line-end-position))
                            (sexp-str (match-string 1))
                            (plist (condition-case _e
                                       (car (read-from-string sexp-str))
                                     (error nil))))
                       (if (and (listp plist) (plist-get plist :applied))
-                          (let ((save-pt (point)))
-                            ;; Find matching end marker; if missing, delete till buffer end.
-                            (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
-                                (delete-region line-beg (min (point-max) (1+ (line-end-position))))
-                              (progn
-                                (delete-region line-beg (point-max))
-                                (goto-char (point-max)))))
-                        ;; not applied → continue scanning from next line to avoid infinite loops
+                          (let* ((desc (or (plist-get plist :description)
+                                           (plist-get plist :result)
+                                           "Applied"))
+                                 (desc (string-trim (format "%s" desc)))
+                                 (desc (if (string-empty-p desc) "Applied" desc))
+                                 (summary (format ";; applied: %s (content omitted)\n" desc))
+                                 ;; Body starts right after the begin_patch line newline (if any).
+                                 (body-beg (min (point-max) (1+ beg-line-end)))
+                                 (end-pos (save-excursion
+                                            (goto-char body-beg)
+                                            (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t))))
+                            (if end-pos
+                                (let* ((end-line-beg (save-excursion
+                                                       (goto-char end-pos)
+                                                       (line-beginning-position))))
+                                  ;; Replace the body with the summary, keep begin/end lines.
+                                  (delete-region body-beg end-line-beg)
+                                  (goto-char body-beg)
+                                  (insert summary)
+                                  ;; Continue scanning after the end_patch line (re-find, positions may have shifted).
+                                  (when (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                                    (goto-char (min (point-max) (1+ (line-end-position))))))
+                              ;; No end marker: truncate to end, insert summary and a synthetic end marker.
+                              (delete-region body-beg (point-max))
+                              (goto-char body-beg)
+                              (insert summary "#+end_patch\n")
+                              (goto-char (point-max))))
+                        ;; Not applied → continue scanning from next line to avoid infinite loops.
                         (goto-char (min (point-max) (1+ (line-end-position))))))))
                 (buffer-substring-no-properties (point-min) (point-max)))))
            (target (if (boundp 'carriage-mode-context-injection)

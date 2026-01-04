@@ -75,10 +75,10 @@ This helps avoid self-duplication and reduces noise/budget usage."
   :group 'carriage-context)
 
 (defcustom carriage-doc-context-scope 'all
-  "Scope for document (# +begin_context) collection: 'all or 'last.
+  "Scope for document (#+begin_context) collection: 'all or 'last.
 When 'all, collect paths from all #+begin_context blocks in the buffer.
-When 'last, collect paths only from the nearest preceding block relative to point,
-or the last block in the buffer if none precedes point."
+When 'last, collect paths only from the last #+begin_context block in the buffer
+(always the last block in the buffer; independent of point)."
   :type '(choice (const all) (const last))
   :group 'carriage-context)
 (make-variable-buffer-local 'carriage-doc-context-scope)
@@ -88,6 +88,16 @@ or the last block in the buffer if none precedes point."
   :type 'boolean
   :group 'carriage-context)
 (make-variable-buffer-local 'carriage-mode-include-patched-files)
+
+(defvar-local carriage-context--doc-paths-cache nil
+  "Cache of doc-context paths for the current buffer.
+Plist keys:
+  :tick  — `buffer-chars-modified-tick' at the time of computation
+  :scope — value of `carriage-doc-context-scope'
+  :paths — list of path strings extracted from doc context blocks.
+
+This cache exists to make context counting cheap when UI refreshes frequently.
+It is invalidated automatically when the buffer changes (tick changes) or when scope changes.")
 
 ;;;###autoload
 (defun carriage-toggle-include-patched-files ()
@@ -143,7 +153,7 @@ Only considers annotated begin_patch blocks with (:applied t ...):
 
 ;;;###autoload
 (defun carriage-select-doc-context-last ()
-  "Use only the last/nearest #+begin_context block for document context in this buffer."
+  "Use only the last #+begin_context block for document context in this buffer."
   (interactive)
   (setq-local carriage-doc-context-scope 'last)
   ;; Make Ctx badge reflect scope change immediately (no waiting for 1Hz refresh).
@@ -307,51 +317,51 @@ Uses a small cache with TTL and invalidation by file size/mtime."
 
 Scope rules:
 - 'all  (default): collect paths from all #+begin_context blocks in the buffer.
-- 'last: collect paths only from the last block above point; if none above,
-         use the last block in the buffer."
+- 'last: collect paths only from the LAST #+begin_context block in the buffer
+         (tail-most; independent of point)."
   (with-current-buffer buffer
     (save-excursion
       (let* ((scope (or (and (boundp 'carriage-doc-context-scope)
                              carriage-doc-context-scope)
-                        'all)))
-        (pcase scope
-          ('all
-           (delete-dups
-            (delq nil
-                  (carriage-context--find-context-block-in-region (point-min) (point-max)))))
-          (_
-           ;; Find all block ranges, pick the nearest one starting before point.
-           (let* ((pt (point))
-                  (ranges
-                   (save-excursion
-                     (goto-char (point-min))
-                     (let ((acc '())
-                           (case-fold-search t))
-                       (while (re-search-forward "^[ \t]*#\\+begin_context\\b" nil t)
-                         (let ((beg (match-beginning 0)))
-                           (if (re-search-forward "^[ \t]*#\\+end_context\\b" nil t)
-                               (let ((end (line-beginning-position)))
-                                 (push (cons beg end) acc))
-                             (push (cons beg (point-max)) acc))))
-                       (nreverse acc))))
-                  (choice
-                   (or
-                    ;; Best candidate: last range whose beg <= point
-                    (let ((best nil)
-                          (best-beg nil))
-                      (dolist (rg ranges)
-                        (when (<= (car rg) pt)
-                          (when (or (null best-beg) (> (car rg) best-beg))
-                            (setq best-beg (car rg))
-                            (setq best rg))))
-                      best)
-                    ;; Fallback: last block in the buffer
-                    (car (last ranges)))))
-             (if (consp choice)
-                 (delete-dups
-                  (delq nil
-                        (carriage-context--find-context-block-in-region (car choice) (cdr choice))))
-               '()))))))))
+                        'all))
+             (tick (buffer-chars-modified-tick))
+             (cache carriage-context--doc-paths-cache)
+             (cache-ok (and (listp cache)
+                            (eq (plist-get cache :scope) scope)
+                            (numberp (plist-get cache :tick))
+                            (= (plist-get cache :tick) tick)
+                            (listp (plist-get cache :paths)))))
+        (if cache-ok
+            (plist-get cache :paths)
+          (let ((paths
+                 (pcase scope
+                   ('all
+                    (delete-dups
+                     (delq nil
+                           (carriage-context--find-context-block-in-region (point-min) (point-max)))))
+                   (_
+                    ;; Tail-most block in the buffer (independent of point).
+                    ;; Optimization: scan from end to find the last begin_context.
+                    (let (last-beg last-end)
+                      (save-excursion
+                        (goto-char (point-max))
+                        (let ((case-fold-search t))
+                          (when (re-search-backward "^[ \t]*#\\+begin_context\\b" nil t)
+                            (setq last-beg (match-beginning 0))
+                            (goto-char last-beg)
+                            (setq last-end
+                                  (if (re-search-forward "^[ \t]*#\\+end_context\\b" nil t)
+                                      (line-end-position)
+                                    (point-max))))))
+                      (if (and (numberp last-beg) (numberp last-end) (> last-end last-beg))
+                          (delete-dups
+                           (delq nil
+                                 (carriage-context--find-context-block-in-region last-beg last-end)))
+                        '()))))))
+            (setq carriage-context--doc-paths-cache
+                  (list :tick tick :scope scope :paths paths))
+            paths))))))
+
 
 (defun carriage-context--maybe-gptel-files ()
   "Collect absolute file paths from gptel context (best-effort).
@@ -724,6 +734,52 @@ and size limits:
       ((or "rb") "ruby")
       ((or "yml" "yaml") "yaml")
       (_ "text"))))
+
+(defun carriage-context--collapse-applied-patches-in-text (text)
+  "Return TEXT with bodies of applied #+begin_patch blocks collapsed.
+
+Keeps the begin_patch header line so the LLM sees what was already applied,
+but replaces the body with a one-line summary comment and preserves (or
+synthesizes) the closing #+end_patch."
+  (with-temp-buffer
+    (insert (or text ""))
+    (goto-char (point-min))
+    (let ((case-fold-search t))
+      (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
+        (let* ((beg-line-end (line-end-position))
+               (sexp-str (match-string 1))
+               (plist (condition-case _e
+                          (car (read-from-string sexp-str))
+                        (error nil))))
+          (if (and (listp plist) (plist-get plist :applied))
+              (let* ((desc (or (plist-get plist :description)
+                               (plist-get plist :result)
+                               "Applied"))
+                     (desc (string-trim (format "%s" desc)))
+                     (desc (if (string-empty-p desc) "Applied" desc))
+                     (summary (format ";; applied: %s (content omitted)\n" desc))
+                     (body-beg (min (point-max) (1+ beg-line-end)))
+                     (end-pos (save-excursion
+                                (goto-char body-beg)
+                                (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t))))
+                (if end-pos
+                    (let ((end-line-beg (save-excursion
+                                          (goto-char end-pos)
+                                          (line-beginning-position))))
+                      (delete-region body-beg end-line-beg)
+                      (goto-char body-beg)
+                      (insert summary)
+                      ;; Continue after the real end_patch line.
+                      (when (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                        (goto-char (min (point-max) (1+ (line-end-position))))))
+                  ;; No end marker: truncate to end and synthesize it.
+                  (delete-region body-beg (point-max))
+                  (goto-char body-beg)
+                  (insert summary "#+end_patch\n")
+                  (goto-char (point-max))))
+            ;; Not applied: continue scanning from next line to avoid loops.
+            (goto-char (min (point-max) (1+ (line-end-position))))))))
+    (buffer-substring-no-properties (point-min) (point-max))))
 
 (defun carriage-context-format (ctx &key where)
   "Format CTX (plist from carriage-context-collect) into a string for insertion.

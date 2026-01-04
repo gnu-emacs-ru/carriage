@@ -217,7 +217,7 @@ OPENP indicates an unfinished (still streaming) block."
   (let* ((arrow (if (display-graphic-p) "▸" ">"))
          (lines (max 1 (count-lines beg end)))
          (state (if openp "streaming…" "done"))
-         (txt (format "%s reasoning (%s, %d lines) — TAB: toggle" arrow state lines))
+         (txt (format "%s reasoning (%s, %d lines)" arrow state lines))
          (s (propertize txt 'face 'carriage-reasoning-fold-placeholder-face)))
     (let ((map (make-sparse-keymap)))
       (define-key map (kbd "TAB") #'carriage-reasoning-fold-toggle-at)
@@ -232,14 +232,29 @@ OPENP indicates an unfinished (still streaming) block."
 
 (defun carriage-reasoning-fold--make (beg end openp)
   "Create a folded overlay covering BEG..END for a reasoning block."
-  (let ((ov (make-overlay beg end nil nil t))) ;; rear-advance=t so END grows as streaming appends
+  (let* ((ov (make-overlay beg end nil nil t)) ;; rear-advance=t so END grows as streaming appends
+         (ph (carriage-reasoning-fold--placeholder beg end openp)))
     (overlay-put ov 'evaporate t)
     (overlay-put ov 'category 'carriage-reasoning-fold)
+    ;; Marker property for external reveal hooks (carriage-mode).
+    (overlay-put ov 'carriage-reasoning-fold t)
+
     (overlay-put ov 'carriage-reasoning-openp openp)
     (overlay-put ov 'carriage-reasoning-revealed nil)
-    (overlay-put ov 'before-string (carriage-reasoning-fold--placeholder beg end openp))
+
+    ;; Keep a stable placeholder and "saved" state so carriage-mode can restore fold
+    ;; even if this overlay is revealed by a background refresh during streaming.
+    (overlay-put ov 'carriage-reasoning-placeholder ph)
+    (overlay-put ov 'carriage--saved-invisible carriage-reasoning-fold-invisible-symbol)
+    (overlay-put ov 'carriage--saved-before-string ph)
+    (overlay-put ov 'carriage--saved-display nil)
+
+    (overlay-put ov 'before-string ph)
     (overlay-put ov 'invisible carriage-reasoning-fold-invisible-symbol)
     (add-to-invisibility-spec carriage-reasoning-fold-invisible-symbol)
+    ;; Ensure cursor can enter the folded region (reveal hooks rely on it).
+    (overlay-put ov 'intangible nil)
+    (overlay-put ov 'cursor-intangible nil)
     (push ov carriage-reasoning-fold--overlays)
     ov))
 
@@ -251,18 +266,44 @@ OPENP indicates an unfinished (still streaming) block."
   (setq carriage-reasoning-fold--overlays nil))
 
 (defun carriage-reasoning-fold--refresh-now ()
-  "Rescan buffer and (re)create overlays for reasoning blocks."
-  (carriage-reasoning-fold--clear-overlays)
-  (when (and carriage-reasoning-fold--enabled
-             (derived-mode-p 'org-mode))
-    (dolist (cell (carriage-reasoning-fold--scan))
-      (let ((beg (plist-get cell :beg))
-            (end (plist-get cell :end))
-            (openp (plist-get cell :openp)))
-        (when (and (numberp beg) (numberp end) (< beg end))
-          (carriage-reasoning-fold--make beg end openp)))))
-  ;; No auto-reveal by cursor; keep overlays folded after refresh.
-  )
+  "Rescan buffer and (re)create overlays for reasoning blocks.
+
+Avoid duplicate placeholders:
+- When hover-mode is active for a completed reasoning block, do NOT recreate the
+  placeholder overlay for that same block (otherwise we can get placeholder overlay
+  + org-fold ellipsis at the same time).
+- Before creating a placeholder overlay for completed blocks, best-effort remove any
+  org-fold at their begin line.
+
+Important (streaming UX):
+- During streaming the buffer is constantly modified, so refresh runs often.
+- If point is currently inside a reasoning block, keep it REVEALED; otherwise the
+  overlay will be re-folded by refresh while point does not move (no post-command
+  to re-reveal), making it impossible to inspect the streamed reasoning."
+  (let ((pos (point)))
+    (carriage-reasoning-fold
+--clear-overlays)
+    (when (and carriage-reasoning-fold--enabled
+               (derived-mode-p 'org-mode))
+      (let* ((hover-beg (and (listp carriage-reasoning-fold--hover-active)
+                             (plist-get carriage-reasoning-fold--hover-active :beg))))
+        (dolist (cell (carriage-reasoning-fold--scan))
+          (let ((beg (plist-get cell :beg))
+                (end (plist-get cell :end))
+                (openp (plist-get cell :openp)))
+            (when (and (numberp beg) (numberp end) (< beg end))
+              (unless (and (numberp hover-beg) (= beg hover-beg))
+                ;; Clean up org-fold artifacts only for completed blocks.
+                (unless openp
+                  (carriage-reasoning-fold--org-show-at beg))
+                (let ((ov (carriage-reasoning-fold--make beg end openp)))
+                  ;; Keep revealed while point is inside this block (esp. streaming open blocks).
+                  (when (and (overlayp ov)
+                             (numberp pos)
+                             (<= beg pos) (<= pos end))
+                    (overlay-put ov 'before-string nil)
+                    (overlay-put ov 'invisible nil)
+                    (overlay-put ov 'carriage-reasoning-revealed t)))))))))))
 
 (defun carriage-reasoning-fold-refresh-now (&optional buffer)
   "Public: refresh reasoning overlays now in BUFFER (or current)."

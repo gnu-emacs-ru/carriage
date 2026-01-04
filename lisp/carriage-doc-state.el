@@ -88,6 +88,17 @@ When nil (default), render a richer badge (suite/model/context toggles, etc.)."
                  (const :tag "Full (verbose; may be slow)" full))
   :group 'carriage-doc-state)
 
+(defcustom carriage-doc-state-fingerprint-fold-max 30
+  "Maximum number of CARRIAGE_FINGERPRINT lines to fold with overlays.
+
+This directly bounds the number of persistent folding overlays in the buffer and
+reduces redisplay/input overhead in long-running file-chat buffers.
+
+Set to nil to disable limiting (fold all fingerprints)."
+  :type '(choice (const :tag "No limit" nil)
+                 (integer :tag "Max folded fingerprints"))
+  :group 'carriage-doc-state)
+
 (defvar-local carriage-doc-state--overlay nil
   "Overlay used to render the CARRIAGE_STATE property line as a compact summary (display-based fold).
 
@@ -808,6 +819,11 @@ Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tes
     (when (derived-mode-p 'org-mode)
       ;; Ensure fold engine is enabled, then refresh overlays and apply fold/reveal.
       (setq carriage-doc-state--fold-enabled t)
+      ;; Force a full rescan: summary-refresh can be called outside after-change,
+      ;; so `carriage-doc-state--fold--pending-kind' may still be nil even though
+      ;; new fingerprint lines were just inserted. Without this, fast-path may skip
+      ;; rescanning and the fingerprint overlay won't be created.
+      (setq carriage-doc-state--fold--pending-kind 'both)
       (ignore-errors (carriage-doc-state--fold--refresh-overlays))
       ;; Back-compat for older tests expecting `carriage-doc-state--overlay'.
       (setq carriage-doc-state--overlay carriage-doc-state--fold-state-ov)
@@ -990,7 +1006,14 @@ When minimal mode is enabled for the given KIND, renders only the model badge."
                            (carriage-doc-state--llm-display-name backend provider model))
                    'mode-line-emphasis)))
     (if minimal
-        model-b
+        (let* ((intent (carriage-doc-state--as-symbol (plist-get pl2 :CAR_INTENT)))
+               (intent-ic (pcase intent
+                            ('Ask    (carriage-doc-state--ui-icon 'ask "A"))
+                            ('Code   (carriage-doc-state--ui-icon 'patch "C"))
+                            ('Hybrid (carriage-doc-state--ui-icon 'hybrid "H"))
+                            (_       (carriage-doc-state--ui-icon 'ask "A"))))
+               (intent-b (carriage-doc-state--badge (or intent-ic "-") 'mode-line-emphasis)))
+          (string-join (delq nil (list intent-b model-b)) " "))
       ;; Rich badges: state keeps icon-only ctx flags; fingerprint renders icon+label for ctx flags.
       (pcase kind
         ('fingerprint (carriage-doc-state--summary-string-fingerprint pl2))
@@ -1059,7 +1082,7 @@ Returned plist keys: :beg :end :raw :pl."
 Supported canonical format (no backwards compatibility): `#+CARRIAGE_FINGERPRINT: <sexp>`."
   (save-excursion
     (goto-char (point-min))
-    (let ((rx "^#\\+CARRIAGE_FINGERPRINT:\\s-*\\(.*\\)$")
+    (let ((rx "^[ \t]*#\\+CARRIAGE_FINGERPRINT:\\s-*\\(.*\\)$")
           (acc nil))
       (while (re-search-forward rx nil t)
         (let* ((beg (line-beginning-position))
@@ -1068,7 +1091,12 @@ Supported canonical format (no backwards compatibility): `#+CARRIAGE_FINGERPRINT
                (sexp (match-string-no-properties 1))
                (pl (carriage-doc-state--fold--parse-sexp sexp)))
           (push (list :beg beg :end end :raw raw :pl pl) acc)))
-      (nreverse acc))))
+      (let* ((res (nreverse acc))
+             (mx (and (boundp 'carriage-doc-state-fingerprint-fold-max)
+                      carriage-doc-state-fingerprint-fold-max)))
+        (if (and (integerp mx) (> mx 0) (> (length res) mx))
+            (cl-subseq res (- (length res) mx))
+          res)))))
 
 (defun carriage-doc-state--fold--ov-upsert (ov beg end summary tooltip)
   (unless (overlayp ov)
@@ -1109,8 +1137,14 @@ Perf:
              (same-tick (and (numberp carriage-doc-state--fold--last-scan-tick)
                              (= tick carriage-doc-state--fold--last-scan-tick)))
              (same-env (equal env carriage-doc-state--fold--last-scan-env)))
-        (when (and same-tick same-env have-any-ov)
-          ;; No buffer edits since last scan; only update fold/reveal for point.
+        ;; Fast paths:
+        ;; - If buffer text/env did not change since last scan → only apply fold/reveal (O(1)).
+        ;; - If buffer changed but the edit did NOT touch doc-state lines (pending-kind=nil)
+        ;;   and env is unchanged → do NOT rescan the whole buffer; overlays track moves automatically.
+        (when (and same-env have-any-ov
+                   (or same-tick
+                       (null carriage-doc-state--fold--pending-kind)))
+          (setq carriage-doc-state--fold--last-scan-tick tick)
           (carriage-doc-state--fold--apply-for-point)
           (cl-return-from nil t))
 
@@ -1171,56 +1205,84 @@ Perf:
 (defun carriage-doc-state--fold--schedule-refresh (beg end _len)
   "Coalesced schedule of fold overlay refresh (perf critical).
 
-Perf invariant for interactive typing:
-- This hook runs on every edit (often per character), so it MUST be O(1).
-- We schedule a fold refresh ONLY when the edit touches doc-state lines:
+Hard performance contract:
+- Runs on EVERY edit, often per character => MUST be O(1).
+- MUST NOT trigger refresh for ordinary typing in the body.
+- Schedules refresh ONLY when the edit touches doc-state lines:
   - #+PROPERTY: CARRIAGE_STATE ...
   - #+CARRIAGE_FINGERPRINT: ...
-All other edits must not schedule doc-state overlay rebuilds.
 
-Debounce semantics:
-- If a timer is already pending, we do NOT cancel/reschedule it; we only postpone
-  its idle time (reduces GC churn).
-- When the timer fires, it refreshes overlays once, only for visible buffers."
+Debounce/coalescing semantics:
+- Never cancel+recreate timers on each keystroke.
+- If a timer exists, only postpone its idle time and update `carriage-doc-state--fold--pending-kind'.
+- Timer callback does ONE refresh for visible buffers, then clears pending state."
   (when (and carriage-doc-state--fold-enabled
              (number-or-marker-p beg)
-             (number-or-marker-p end)
-             ;; Do not schedule work for hidden buffers; reduces per-keystroke churn.
-             (get-buffer-window (current-buffer) t))
+             (number-or-marker-p end))
     (let* ((secs (or carriage-doc-state-summary-debounce-seconds 0.4))
-           (interesting
+           (kind
             (save-excursion
               (let ((case-fold-search t)
-                    (hit nil))
+                    (hit-state nil)
+                    (hit-fp nil))
                 (goto-char beg)
                 (beginning-of-line)
-                (setq hit (or (looking-at-p "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b")
-                              (looking-at-p "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b")))
-                (unless hit
-                  (goto-char end)
-                  (beginning-of-line)
-                  (setq hit (or (looking-at-p "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b")
-                                (looking-at-p "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b"))))
-                hit))))
-      (when interesting
-        (cond
-         ;; Timer exists: postpone instead of cancel+recreate (reduces GC churn).
-         ((timerp carriage-doc-state--fold-refresh-timer)
-          (ignore-errors
-            (when (fboundp 'timer-set-idle-time)
-              (timer-set-idle-time carriage-doc-state--fold-refresh-timer secs))))
-         ;; No timer: create one.
-         (t
-          (setq carriage-doc-state--fold-refresh-timer
-                (run-with-idle-timer
-                 secs nil
-                 (lambda (buf)
-                   (when (buffer-live-p buf)
-                     (with-current-buffer buf
-                       (setq carriage-doc-state--fold-refresh-timer nil)
-                       (when (get-buffer-window (current-buffer) t)
-                         (carriage-doc-state--fold--refresh-overlays)))))
-                 (current-buffer)))))))))
+                (setq hit-state (or hit-state (looking-at-p "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b")))
+                (setq hit-fp    (or hit-fp    (looking-at-p "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b")))
+                (goto-char end)
+                (beginning-of-line)
+                (setq hit-state (or hit-state (looking-at-p "^[ \t]*#\\+PROPERTY:[ \t]+CARRIAGE_STATE\\b")))
+                (setq hit-fp    (or hit-fp    (looking-at-p "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b")))
+                (cond
+                 ((and hit-state hit-fp) 'both)
+                 (hit-state 'state)
+                 (hit-fp 'fingerprint)
+                 (t nil))))))
+      (when kind
+        ;; Mark what needs refresh. This is consumed by refresh engine to avoid
+        ;; expensive rescans/rebuilds when only one kind changed.
+        (setq carriage-doc-state--fold--pending-kind
+              (cond
+               ;; Anything + both => both
+               ((or (eq carriage-doc-state--fold--pending-kind 'both)
+                    (eq kind 'both))
+                'both)
+               ;; First hit wins
+               ((null carriage-doc-state--fold--pending-kind)
+                kind)
+               ;; Same kind stays as-is
+               ((eq carriage-doc-state--fold--pending-kind kind)
+                kind)
+               ;; Different kinds coalesce to both
+               (t 'both)))
+        ;; Never do heavy work for invisible buffers.
+        (when (get-buffer-window (current-buffer) t)
+          (cond
+           ((timerp carriage-doc-state--fold-refresh-timer)
+            (ignore-errors
+              (when (fboundp 'timer-set-idle-time)
+                (timer-set-idle-time carriage-doc-state--fold-refresh-timer secs))))
+           (t
+            (let ((buf (current-buffer)))
+              (setq carriage-doc-state--fold-refresh-timer
+                    (run-with-idle-timer
+                     secs nil
+                     (lambda (&rest _ignored)
+                       (when (buffer-live-p buf)
+                         (with-current-buffer buf
+                           (setq carriage-doc-state--fold-refresh-timer nil)
+                           ;; Consume pending-kind; if another edit comes in, hook will set it again.
+                           ;; Avoid running heavy refresh for hidden buffers.
+                           (when (and carriage-doc-state--fold-enabled
+                                      (get-buffer-window (current-buffer) t)
+                                      carriage-doc-state--fold--pending-kind)
+                             ;; IMPORTANT: do not clear pending-kind before refresh.
+                             ;; `carriage-doc-state--fold--refresh-overlays' uses it to decide
+                             ;; whether a full rescan is necessary. Clearing it early may skip
+                             ;; rescans on fingerprint/state edits, leaving them without overlays.
+                             (ignore-errors (carriage-doc-state--fold--refresh-overlays))
+                             (setq carriage-doc-state--fold--pending-kind nil)))))
+                     nil))))))))))
 
 (defun carriage-doc-state-summary-enable ()
   "Enable summary folding for `CARRIAGE_STATE` and `CARRIAGE_FINGERPRINT` lines in current buffer."

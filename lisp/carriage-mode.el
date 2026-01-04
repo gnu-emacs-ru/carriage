@@ -1000,6 +1000,20 @@ Choose a visible face for your theme; 'shadow can be too dim."
   "Buffer-local end marker of the current streaming region.")
 (defvar-local carriage--stream-origin-marker nil
   "Buffer-local origin marker set at request time; first chunk will use it.")
+
+;; Streaming performance: coalesce small chunks into a single insert using a per-buffer flush timer.
+(defvar-local carriage--stream-pending-events nil
+  "Pending streamed events as a reversed list of (TYPE . STRING) to be flushed into the buffer.
+
+TYPE is either 'text or 'reasoning.
+We coalesce events to avoid doing expensive buffer modifications and redisplay per chunk.")
+
+(defvar-local carriage--stream-flush-timer nil
+  "Timer object for scheduled streaming flush in this buffer.")
+
+(defvar-local carriage--stream-last-redisplay 0.0
+  "Last time (float seconds) when we forced redisplay due to a streaming flush in this buffer.")
+
 (defvar-local carriage--reasoning-open nil
   "Non-nil when a #+begin_reasoning block is currently open for streaming.")
 (defvar-local carriage--reasoning-tail-marker nil
@@ -1049,6 +1063,12 @@ Returns non-nil when inserted."
 Does not modify buffer text; only clears markers/state so the next chunk opens a region."
   (setq carriage--stream-beg-marker nil)
   (setq carriage--stream-end-marker nil)
+  ;; Streaming perf: clear pending coalesced events and cancel flush timer.
+  (setq carriage--stream-pending-events nil)
+  (when (timerp carriage--stream-flush-timer)
+    (cancel-timer carriage--stream-flush-timer))
+  (setq carriage--stream-flush-timer nil)
+  (setq carriage--stream-last-redisplay 0.0)
   ;; Reset Apply badge when starting a new request: Apply should reappear only after the next apply attempt.
   ;; Best-effort: avoid errors when UI is not loaded.
   (when (fboundp 'carriage-ui-apply-reset)
@@ -1524,6 +1544,14 @@ so preloader/streaming starts strictly below the fingerprint line."
         (setq carriage--stream-origin-marker (copy-marker newpos t))
         ;; Policy: keep point at the new stream origin.
         (goto-char newpos)
+        ;; Ensure doc-state fold overlays are refreshed so the fingerprint line is immediately folded
+        ;; (shows at least Intent+Model) without relying on debounced after-change timers.
+        (ignore-errors
+          (when (require 'carriage-doc-state nil t)
+            (when (fboundp 'carriage-doc-state-summary-enable)
+              (carriage-doc-state-summary-enable))
+            (when (fboundp 'carriage-doc-state-summary-refresh)
+              (carriage-doc-state-summary-refresh (current-buffer)))))
         ;; Defensive de-dup: if any stray separators were added below the fingerprint line
         ;; (e.g., by legacy advice or double calls), remove a few consecutive ones under it.
         (save-excursion
@@ -2927,6 +2955,33 @@ Designed for use from `after-load-functions' so commands loaded later
   :group 'convenience)
 
 ;; Keep cursor free during streaming; spinner still moves to the tail.
+(defvar carriage--perf--reasoning-after-change-guard-installed nil)
+
+(defun carriage--perf--after-change-snippet (beg end &optional max-chars)
+  "Return small text snippet around BEG..END for cheap after-change guards."
+  (let* ((max-chars (or max-chars 800))
+         (lo (save-excursion (goto-char beg) (line-beginning-position)))
+         (hi (save-excursion (goto-char end) (line-end-position)))
+         (hi2 (min hi (+ lo max-chars))))
+    (buffer-substring-no-properties lo hi2)))
+
+(defun carriage--perf--snippet-matches-p (beg end re)
+  (string-match-p re (carriage--perf--after-change-snippet beg end)))
+
+(unless carriage--perf--reasoning-after-change-guard-installed
+  (setq carriage--perf--reasoning-after-change-guard-installed t)
+  (when (fboundp 'carriage-reasoning-fold--after-change)
+    (advice-add
+     'carriage-reasoning-fold--after-change
+     :around
+     (lambda (orig beg end len)
+       ;; Hot path: most edits are not inside reasoning blocks; bail out early.
+       (if (carriage--perf--snippet-matches-p
+            beg end
+            "^[ \t]*#\\+\\(begin\\|end\\)_reasoning\\b\\|^[ \t]*#\\+begin_assistant\\b\\|^[ \t]*#\\+end_assistant\\b")
+           (funcall orig beg end len)
+         nil)))))
+
 (provide 'carriage-mode)
 
 (defgroup carriage-separator nil

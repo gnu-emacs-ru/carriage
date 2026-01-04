@@ -55,6 +55,14 @@ Carriage already provides structured request/response logging via *carriage-traf
   :type 'boolean
   :group 'carriage-transport-gptel)
 
+(defcustom carriage-transport-gptel-log-stream-chunks nil
+  "When non-nil, log every incoming stream chunk to *carriage-traffic*.
+
+Default nil improves perceived streaming speed by avoiding per-chunk formatting,
+buffer growth and trimming work. Request/response summaries are still logged."
+  :type 'boolean
+  :group 'carriage-transport-gptel)
+
 (defun carriage--gptel--log@perf (orig-fn &rest args)
   "Around-advice for `gptel--log' to disable expensive logging when configured."
   (if carriage-transport-gptel-disable-gptel-log
@@ -316,7 +324,8 @@ Returns cons (UPDATED-SUMMARY . REMAINDER-TEXT-AFTER-HEAD)."
   "Handle reasoning CHUNK TEXT. Return updated STATE."
   (setq state (carriage--gptel--cb--ensure-reasoning gptel-buffer state))
   (if (plist-get state :any-text-seen)
-      (carriage-traffic-log 'in "[reasoning] %s" (or text ""))
+      (when carriage-transport-gptel-log-stream-chunks
+        (carriage-traffic-log 'in "[reasoning] %s" (or text "")))
     (with-current-buffer gptel-buffer
       (carriage-insert-stream-chunk (or text "") 'reasoning)
       (ignore-errors (carriage-ui-note-reasoning-chunk (or text "")))))

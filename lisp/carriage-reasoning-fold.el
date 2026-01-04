@@ -45,7 +45,8 @@
 (defvar-local carriage-reasoning-fold--refresh-timer nil
   "Idle timer used to coalesce rescans after edits.")
 
-
+(defvar-local carriage-reasoning-fold--saved-ignore-invis nil
+  "Saved value of `line-move-ignore-invisible' to restore on disable.")
 
 (defvar-local carriage-reasoning-fold--hover-active nil
   "When non-nil, hover-mode is active for a reasoning block.
@@ -259,11 +260,27 @@ OPENP indicates an unfinished (still streaming) block."
     ov))
 
 (defun carriage-reasoning-fold--clear-overlays ()
-  "Delete all managed overlays in current buffer."
+  "Delete all managed overlays in current buffer.
+
+Also purges any stale overlays left behind due to older bugs or lost bookkeeping,
+to guarantee a single placeholder per reasoning block."
+  ;; First, delete overlays we know about.
   (when (listp carriage-reasoning-fold--overlays)
     (dolist (ov carriage-reasoning-fold--overlays)
       (when (overlayp ov) (delete-overlay ov))))
-  (setq carriage-reasoning-fold--overlays nil))
+  (setq carriage-reasoning-fold--overlays nil)
+  ;; Defensive cleanup: if overlays list was stale/cleared incorrectly, remove all
+  ;; reasoning-fold overlays still present in the buffer.
+  (ignore-errors
+    (save-restriction
+      (widen)
+      (dolist (ov (overlays-in (point-min) (point-max)))
+        (when (and (overlayp ov)
+                   (overlay-buffer ov)
+                   (or (overlay-get ov 'carriage-reasoning-fold)
+                       (overlay-get ov 'carriage-reasoning)
+                       (eq (overlay-get ov 'category) 'carriage-reasoning-fold)))
+          (delete-overlay ov))))))
 
 (defun carriage-reasoning-fold--refresh-now ()
   "Rescan buffer and (re)create overlays for reasoning blocks.
@@ -281,8 +298,7 @@ Important (streaming UX):
   overlay will be re-folded by refresh while point does not move (no post-command
   to re-reveal), making it impossible to inspect the streamed reasoning."
   (let ((pos (point)))
-    (carriage-reasoning-fold
---clear-overlays)
+    (carriage-reasoning-fold--clear-overlays)
     (when (and carriage-reasoning-fold--enabled
                (derived-mode-p 'org-mode))
       (let* ((hover-beg (and (listp carriage-reasoning-fold--hover-active)

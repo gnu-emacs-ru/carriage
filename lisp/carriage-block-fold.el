@@ -246,5 +246,31 @@ Optional DELAY in seconds (default 0.1) and BUFFER."
           (ignore-errors (carriage-block-fold--ensure-overlay (car cell))))))
     t))
 
+(defvar carriage--perf--patch-fold-after-change-guard-installed nil)
+
+(defun carriage--perf--patch-fold--after-change-snippet (beg end &optional max-chars)
+  (let* ((max-chars (or max-chars 900))
+         (lo (save-excursion (goto-char beg) (line-beginning-position)))
+         (hi (save-excursion (goto-char end) (line-end-position)))
+         (hi2 (min hi (+ lo max-chars))))
+    (buffer-substring-no-properties lo hi2)))
+
+(defun carriage--perf--patch-fold--snippet-matches-p (beg end re)
+  (string-match-p re (carriage--perf--patch-fold--after-change-snippet beg end)))
+
+(unless carriage--perf--patch-fold-after-change-guard-installed
+  (setq carriage--perf--patch-fold-after-change-guard-installed t)
+  (when (fboundp 'carriage-patch-fold--after-change)
+    (advice-add
+     'carriage-patch-fold--after-change
+     :around
+     (lambda (orig beg end len)
+       ;; Only react to edits touching patch blocks markers.
+       (if (carriage--perf--patch-fold--snippet-matches-p
+            beg end
+            "^[ \t]*#\\+begin_\\(patch\\|from\\|to\\)\\b\\|^[ \t]*#\\+end_\\(patch\\|from\\|to\\)\\b")
+           (funcall orig beg end len)
+         nil)))))
+
 (provide 'carriage-block-fold)
 ;;; carriage-block-fold.el ends here

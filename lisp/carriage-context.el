@@ -99,6 +99,46 @@ Plist keys:
 This cache exists to make context counting cheap when UI refreshes frequently.
 It is invalidated automatically when the buffer changes (tick changes) or when scope changes.")
 
+(defvar-local carriage-context--patched-files-cache nil
+  "Cache of patched-files paths (from applied begin_patch blocks) for the current buffer.
+Plist keys:
+  :paths — list of path strings extracted from patches in current buffer.")
+
+(defvar-local carriage-context--patched-files-dirty t
+  "When non-nil, patched-files cache must be recomputed for the current buffer.
+
+Important perf invariant:
+- We do NOT want patched-files collection to depend on `buffer-chars-modified-tick',
+  because ordinary typing changes tick constantly and would force O(buffer) rescans.
+- Instead, we mark dirty only when edits touch begin_patch/end_patch lines.")
+
+(defun carriage-context--patched-files-mark-dirty (beg end _len)
+  "Mark patched-files cache dirty if edit touches begin_patch/end_patch lines.
+
+This function is designed to be O(1) per edit."
+  (when (and (number-or-marker-p beg) (number-or-marker-p end))
+    (save-excursion
+      (let ((case-fold-search t)
+            (hit nil))
+        (goto-char beg)
+        (beginning-of-line)
+        (setq hit (or (looking-at-p "^[ \t]*#\\+begin_patch\\b")
+                      (looking-at-p "^[ \t]*#\\+end_patch\\b")))
+        (unless hit
+          (goto-char end)
+          (beginning-of-line)
+          (setq hit (or (looking-at-p "^[ \t]*#\\+begin_patch\\b")
+                        (looking-at-p "^[ \t]*#\\+end_patch\\b"))))
+        (when hit
+          (setq carriage-context--patched-files-dirty t))))))
+
+(add-hook 'carriage-mode-hook
+          (lambda ()
+            ;; Buffer-local hook; O(1) per edit and only marks dirty when patch lines touched.
+            (add-hook 'after-change-functions
+                      #'carriage-context--patched-files-mark-dirty
+                      nil t)))
+
 ;;;###autoload
 (defun carriage-toggle-include-patched-files ()
   "Toggle inclusion of files referenced by applied begin_patch blocks (:applied t) for this buffer."
@@ -1282,6 +1322,35 @@ Writes CAR_CONTEXT_PROFILE on save via doc-state."
   "Toggle context profile between P1 and P3 in the current buffer."
   (interactive)
   (carriage-context-profile-set (if (eq carriage-doc-context-profile 'p3) 'p1 'p3)))
+
+(defvar carriage--perf--patched-files-dirty-guard-installed nil)
+
+(defun carriage--perf--context--after-change-snippet (beg end &optional max-chars)
+  (let* ((max-chars (or max-chars 900))
+         (lo (save-excursion (goto-char beg) (line-beginning-position)))
+         (hi (save-excursion (goto-char end) (line-end-position)))
+         (hi2 (min hi (+ lo max-chars))))
+    (buffer-substring-no-properties lo hi2)))
+
+(defun carriage--perf--context--snippet-matches-p (beg end re)
+  (string-match-p re (carriage--perf--context--after-change-snippet beg end)))
+
+(unless carriage--perf--patched-files-dirty-guard-installed
+  (setq carriage--perf--patched-files-dirty-guard-installed t)
+  (when (fboundp 'carriage-context--patched-files-mark-dirty)
+    (advice-add
+     'carriage-context--patched-files-mark-dirty
+     :around
+     (lambda (orig beg end len)
+       ;; This source is relevant only when the "patched files" context is enabled
+       ;; and the edit touches patch blocks content/markers.
+       (if (and (boundp 'carriage-mode-include-patched-files)
+                carriage-mode-include-patched-files
+                (carriage--perf--context--snippet-matches-p
+                 beg end
+                 "^[ \t]*#\\+begin_patch\\b\\|^[ \t]*#\\+end_patch\\b\\|^[ \t]*#\\+begin_from\\b\\|^[ \t]*#\\+end_from\\b\\|^[ \t]*#\\+begin_to\\b\\|^[ \t]*#\\+end_to\\b"))
+           (funcall orig beg end len)
+         nil)))))
 
 (provide 'carriage-context)
 ;;; carriage-context.el ends here

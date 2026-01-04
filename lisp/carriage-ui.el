@@ -2541,6 +2541,17 @@ Performance:
   :type 'boolean
   :group 'carriage-ui)
 
+(defcustom carriage-ui-tooltip-update-interval 0.12
+  "Minimum seconds between forced modeline refreshes caused by tooltip updates.
+
+Streaming may update tooltip text very frequently. This setting throttles
+`force-mode-line-update' calls triggered only by tooltip changes."
+  :type 'number
+  :group 'carriage-ui)
+
+(defvar-local carriage-ui--tooltip-last-update 0.0
+  "Last time (float seconds) we forced mode-line update due to tooltip changes.")
+
 (defvar-local carriage--ui-state-tooltip nil
   "Cached tooltip string for current UI state (help-echo for [STATE]).")
 
@@ -2564,14 +2575,26 @@ Keys (optional): :source :time-start :time-last :model :provider
 
 (defun carriage-ui--set-tooltip (s)
   "Set state tooltip to S without invalidating the whole modeline.
-This avoids heavy redisplay churn during streaming; we only tick the line."
+This avoids heavy redisplay churn during streaming; we only tick the line (throttled)."
   (setq carriage--ui-state-tooltip
         (when (and (stringp s) (> (length s) 0))
           (let* ((mx (or carriage-mode-state-tooltip-max-chars 1000)))
             (carriage-ui--trim-right s mx))))
   ;; Do not invalidate the whole modeline cache on tooltip-only changes.
   ;; A simple mode-line tick is enough; segments will pick up the new help-echo.
-  (force-mode-line-update))
+  ;; Throttle the tick to avoid per-chunk mode-line work during streaming.
+  (let* ((now (float-time))
+         (min (or (and (boundp 'carriage-ui-tooltip-update-interval)
+                       carriage-ui-tooltip-update-interval)
+                  0.12))
+         (last (or (and (boundp 'carriage-ui--tooltip-last-update)
+                        carriage-ui--tooltip-last-update)
+                   0.0)))
+    (when (or (not (numberp min))
+              (<= min 0)
+              (>= (- now last) min))
+      (setq carriage-ui--tooltip-last-update now)
+      (force-mode-line-update))))
 
 (defun carriage-ui--i18n (key &rest args)
   "Format i18n KEY with ARGS when available; fallback to format."
@@ -3441,12 +3464,40 @@ Fingerprint insertion is handled by send commands (carriage-mode) to avoid dupli
        carriage-mode-preloader-follow-point)
   "When non-nil, move point to the streaming tail on each chunk. Defaults to nil.")
 
+(defcustom carriage-stream-redisplay-interval 0.03
+  "Minimum seconds between forced redisplay calls during streaming chunk insertion.
+
+Goal: keep stream output visibly updating even without user input and even when the
+window is not selected, while staying cheap (throttled)."
+  :type 'number
+  :group 'carriage-ui)
+
+(defvar-local carriage--stream-last-redisplay 0.0
+  "Last (float-time) when we forced redisplay due to a streaming chunk in this buffer.")
+
+(defun carriage--stream-maybe-redisplay (&optional buffer)
+  "Force a throttled redisplay when BUFFER is visible in any window.
+This avoids the \"prints only when I move the cursor\" effect during streaming."
+  (let* ((buf (or buffer (current-buffer)))
+         (win (and (buffer-live-p buf) (get-buffer-window buf t)))
+         (now (float-time)))
+    (when (and (window-live-p win)
+               (>= (- now (or (buffer-local-value 'carriage--stream-last-redisplay buf) 0.0))
+                   (max 0.0 (or carriage-stream-redisplay-interval 0.03))))
+      (with-current-buffer buf
+        (setq carriage--stream-last-redisplay now))
+      ;; Use forced redisplay so updates are visible without user input.
+      (redisplay t))))
+
 (defun carriage--stream-chunk-save-point (orig-fun &rest args)
-  "Call ORIG-FUN without moving point unless follow-point is enabled."
-  (if carriage-mode-preloader-follow-point
-      (apply orig-fun args)
-    (save-excursion
-      (apply orig-fun args))))
+  "Call ORIG-FUN without moving point unless follow-point is enabled.
+Also ensure streaming output becomes visible without requiring user input (throttled)."
+  (prog1
+      (if carriage-mode-preloader-follow-point
+          (apply orig-fun args)
+        (save-excursion
+          (apply orig-fun args)))
+    (ignore-errors (carriage--stream-maybe-redisplay (current-buffer)))))
 
 (ignore-errors
   (advice-add 'carriage-insert-stream-chunk :around #'carriage--stream-chunk-save-point))
@@ -5632,6 +5683,23 @@ Robustness:
                        (error nil))
                      (force-mode-line-update t)))))))))
   t)
+
+(defvar carriage--perf--ctx-after-change-guard-installed nil)
+
+(unless carriage--perf--ctx-after-change-guard-installed
+  (setq carriage--perf--ctx-after-change-guard-installed t)
+  (when (fboundp 'carriage-ui--ctx-after-change)
+    (advice-add
+     'carriage-ui--ctx-after-change
+     :around
+     (lambda (orig &rest args)
+       ;; If no context sources are enabled, avoid any scheduling on every edit.
+       (if (or (bound-and-true-p carriage-mode-include-doc-context)
+               (bound-and-true-p carriage-mode-include-gptel-context)
+               (bound-and-true-p carriage-mode-include-visible-context)
+               (bound-and-true-p carriage-mode-include-patched-files))
+           (apply orig args)
+         nil)))))
 
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

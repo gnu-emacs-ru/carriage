@@ -35,6 +35,7 @@
 (require 'carriage-llm-registry)
 (require 'carriage-ui)
 (require 'carriage-suite)
+(require 'carriage-pricing nil t)
 (require 'carriage-sre-core)
 (require 'carriage-doc-state nil t)
 (require 'carriage-doc-state-perf nil t)
@@ -627,11 +628,18 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
   (force-mode-line-update))
 
 (defun carriage-mode--ctx-window-change ()
-  "Window configuration change hook to refresh [Ctx:N] when visible-context is enabled.
+  "Window configuration change hook to refresh [Ctx:N] when external context may change.
+
+External means:
+- visible-context (depends on window layout)
+- gptel-context   (can change without touching the Org buffer)
+
 Debounced refresh is handled by `carriage-ui--ctx-schedule-refresh`."
   (when (and (bound-and-true-p carriage-mode)
-             (boundp 'carriage-mode-include-visible-context)
-             carriage-mode-include-visible-context
+             (or (and (boundp 'carriage-mode-include-visible-context)
+                      carriage-mode-include-visible-context)
+                 (and (boundp 'carriage-mode-include-gptel-context)
+                      carriage-mode-include-gptel-context))
              (fboundp 'carriage-ui--ctx-invalidate))
     ;; Invalidate cached badge (preserves last value), and schedule a refresh soon.
     (ignore-errors (carriage-ui--ctx-invalidate))))
@@ -1456,6 +1464,12 @@ never be included in outgoing LLM prompts (transports must filter it)."
 
 (defvar-local carriage--fingerprint-inline-inserted nil
   "Non-nil when an inline CARRIAGE_FINGERPRINT line has been inserted for the current stream.")
+
+(defvar-local carriage--fingerprint-line-marker nil
+  "Marker pointing to the beginning of the current request's inline fingerprint line, or nil.
+
+This marker is used for two-phase fingerprint upsert (usage+cost) on request completion.")
+
 (defvar-local carriage--separator-inserted nil
   "Non-nil when a visual separator '-----' was already inserted for the current stream.")
 
@@ -1568,121 +1582,270 @@ so preloader/streaming starts strictly below the fingerprint line."
   (setq carriage--fingerprint-inline-inserted t)
   t)
 
+(defun carriage-fingerprint--find-line-marker ()
+  "Return a marker pointing at a fingerprint line suitable for upsert, or nil.
+Prefers `carriage--fingerprint-line-marker' when live; otherwise finds the first
+#+CARRIAGE_FINGERPRINT line in the buffer."
+  (cond
+   ((and (markerp carriage--fingerprint-line-marker)
+         (buffer-live-p (marker-buffer carriage--fingerprint-line-marker)))
+    carriage--fingerprint-line-marker)
+   (t
+    (save-excursion
+      (goto-char (point-min))
+      (let ((case-fold-search t))
+        (when (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:" nil t)
+          (copy-marker (line-beginning-position) t)))))))
+
+(defun carriage-fingerprint--read-plist-at (marker)
+  "Read fingerprint plist at MARKER (beginning of line). Return plist or nil."
+  (when (and (markerp marker) (buffer-live-p (marker-buffer marker)))
+    (save-excursion
+      (goto-char (marker-position marker))
+      (beginning-of-line)
+      (let ((case-fold-search t))
+        (when (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:[ \t]*\\(.*\\)$"
+                                 (line-end-position) t)
+          (let* ((s (match-string 1))
+                 (obj (condition-case _e
+                          (car (read-from-string s))
+                        (error nil))))
+            (when (listp obj) obj)))))))
+
+(defun carriage-fingerprint--write-plist-at (marker plist)
+  "Replace fingerprint line at MARKER with PLIST (printed). Return t on success."
+  (when (and (markerp marker) (buffer-live-p (marker-buffer marker)))
+    (save-excursion
+      (goto-char (marker-position marker))
+      (beginning-of-line)
+      (let ((inhibit-read-only t)
+            (case-fold-search t))
+        (when (looking-at "^[ \t]*#\\+CARRIAGE_FINGERPRINT\\b.*$")
+          (delete-region (line-beginning-position)
+                         (min (point-max) (1+ (line-end-position)))))
+        (let ((beg (point)))
+          (insert (format "#+CARRIAGE_FINGERPRINT: %s\n" (prin1-to-string (or plist '()))))
+          (set-marker marker beg (current-buffer))
+          t)))))
+
+(defun carriage-fingerprint-note-usage-and-cost (usage &optional backend provider model)
+  "Upsert current request fingerprint line with USAGE and computed cost.
+
+USAGE is a plist with keys:
+- :tokens-in :tokens-out :audio-in :audio-out
+
+When pricing is available, also adds:
+- :CAR_COST_KNOWN boolean
+- :CAR_COST_IN_U :CAR_COST_OUT_U :CAR_COST_AUDIO_IN_U :CAR_COST_AUDIO_OUT_U :CAR_COST_TOTAL_U
+
+This function is best-effort and must never signal."
+  (condition-case _e
+      (let* ((marker (carriage-fingerprint--find-line-marker))
+             (old (or (carriage-fingerprint--read-plist-at marker) '()))
+             (tin (plist-get usage :tokens-in))
+             (tout (plist-get usage :tokens-out))
+             (ain (plist-get usage :audio-in))
+             (aout (plist-get usage :audio-out))
+             (be (or backend (and (boundp 'carriage-mode-backend) carriage-mode-backend)))
+             (pr (or provider (and (boundp 'carriage-mode-provider) carriage-mode-provider)))
+             (mo (or model (and (boundp 'carriage-mode-model) carriage-mode-model)))
+             (canonical (and (fboundp 'carriage-llm-full-id)
+                             (carriage-llm-full-id be pr mo)))
+             (root (or (ignore-errors (carriage-project-root)) default-directory))
+             (tab (and (require 'carriage-pricing nil t)
+                       (fboundp 'carriage-pricing-load-table)
+                       (carriage-pricing-load-table root)))
+             (cost (and (hash-table-p tab)
+                        (stringp canonical)
+                        (fboundp 'carriage-pricing-compute)
+                        (carriage-pricing-compute canonical usage tab)))
+             ;; Determine known ONLY if a concrete integer total cost (in µ₽) is present.
+             (known (and (listp cost) (integerp (plist-get cost :cost-total-u))))
+             (pl old))
+        (unless (markerp marker)
+          (cl-return-from carriage-fingerprint-note-usage-and-cost nil))
+        ;; Usage keys (always upsert, even if nil)
+        (setq pl (plist-put pl :CAR_TOKENS_IN tin))
+        (setq pl (plist-put pl :CAR_TOKENS_OUT tout))
+        (setq pl (plist-put pl :CAR_AUDIO_IN ain))
+        (setq pl (plist-put pl :CAR_AUDIO_OUT aout))
+        ;; Cost keys (best-effort)
+        (when (listp cost)
+          (setq pl (plist-put pl :CAR_COST_KNOWN (if known t nil)))
+          (setq pl (plist-put pl :CAR_COST_IN_U (plist-get cost :cost-in-u)))
+          (setq pl (plist-put pl :CAR_COST_OUT_U (plist-get cost :cost-out-u)))
+          (setq pl (plist-put pl :CAR_COST_AUDIO_IN_U (plist-get cost :cost-audio-in-u)))
+          (setq pl (plist-put pl :CAR_COST_AUDIO_OUT_U (plist-get cost :cost-audio-out-u)))
+          (setq pl (plist-put pl :CAR_COST_TOTAL_U (plist-get cost :cost-total-u))))
+        (carriage-fingerprint--write-plist-at marker pl)
+        ;; Nudge doc-cost refresh if UI exposes it (best-effort; not required for correctness).
+        (when (fboundp 'carriage-ui-doc-cost-schedule-refresh)
+          (ignore-errors (carriage-ui-doc-cost-schedule-refresh 0.05)))
+        t)
+    (error nil)))
+
+(defun carriage--payload-from-source (source buffer)
+  "Return raw payload text for SOURCE from BUFFER.
+
+SOURCE is either:
+- 'buffer  — entire buffer text
+- 'subtree — current Org subtree when in org-mode; otherwise entire buffer."
+  (with-current-buffer buffer
+    (let ((mode (buffer-local-value 'major-mode buffer)))
+      (pcase source
+        ('subtree
+         (if (eq mode 'org-mode)
+             (save-excursion
+               (require 'org)
+               (ignore-errors (org-back-to-heading t))
+               (let ((beg (save-excursion (org-back-to-heading t) (point)))
+                     (end (save-excursion (org-end-of-subtree t t) (point))))
+                 (buffer-substring-no-properties beg end)))
+           (buffer-substring-no-properties (point-min) (point-max))))
+        (_ (buffer-substring-no-properties (point-min) (point-max)))))))
+
+(defun carriage--payload-strip-doc-state-and-markers (text)
+  "Remove doc-state and per-send marker lines from TEXT.
+This must never leak into the LLM payload."
+  (with-temp-buffer
+    (insert (or text ""))
+    (goto-char (point-min))
+    (let ((case-fold-search t))
+      ;; Doc-state + iteration id (canonical headers) must never reach the LLM
+      (while (re-search-forward
+              "^[ \t]*#\\+PROPERTY:[ \t]+\\(CARRIAGE_STATE\\|CARRIAGE_ITERATION_ID\\)\\b.*$"
+              nil t)
+        (delete-region (line-beginning-position)
+                       (min (point-max) (1+ (line-end-position)))))
+      ;; Per-send markers (must never reach the LLM)
+      (goto-char (point-min))
+      (while (re-search-forward
+              "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\|CARRIAGE_ITERATION_ID\\)\\b.*$"
+              nil t)
+        (delete-region (line-beginning-position)
+                       (min (point-max) (1+ (line-end-position))))
+        (goto-char (line-beginning-position))))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun carriage--payload-summarize-applied-patches (text)
+  "Replace bodies of applied #+begin_patch blocks in TEXT with a short summary.
+
+Policy:
+- Keep '#+begin_patch (...)' and '#+end_patch' lines.
+- Replace the body with one comment line:
+  ;; applied: <desc> (content omitted)
+
+This lets LLM see history without sending potentially large patch bodies."
+  (with-temp-buffer
+    (insert (or text ""))
+    (goto-char (point-min))
+    (let ((case-fold-search t))
+      (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
+        (let* ((beg-line-end (line-end-position))
+               (sexp-str (match-string 1))
+               (plist (condition-case _e
+                          (car (read-from-string sexp-str))
+                        (error nil))))
+          (if (and (listp plist) (plist-get plist :applied))
+              (let* ((desc (or (plist-get plist :description)
+                               (plist-get plist :result)
+                               "Applied"))
+                     (desc (string-trim (format "%s" desc)))
+                     (desc (if (string-empty-p desc) "Applied" desc))
+                     (summary (format ";; applied: %s (content omitted)\n" desc))
+                     ;; Body starts right after the begin_patch line newline (if any).
+                     (body-beg (min (point-max) (1+ beg-line-end)))
+                     (end-pos (save-excursion
+                                (goto-char body-beg)
+                                (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t))))
+                (if end-pos
+                    (let* ((end-line-beg (save-excursion
+                                           (goto-char end-pos)
+                                           (line-beginning-position))))
+                      ;; Replace the body with the summary, keep begin/end lines.
+                      (delete-region body-beg end-line-beg)
+                      (goto-char body-beg)
+                      (insert summary)
+                      ;; Continue scanning after the end_patch line (re-find, positions may have shifted).
+                      (when (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                        (goto-char (min (point-max) (1+ (line-end-position))))))
+                  ;; No end marker: truncate to end, insert summary and a synthetic end marker.
+                  (delete-region body-beg (point-max))
+                  (goto-char body-beg)
+                  (insert summary "#+end_patch\n")
+                  (goto-char (point-max))))
+            ;; Not applied → continue scanning from next line to avoid infinite loops.
+            (goto-char (min (point-max) (1+ (line-end-position))))))))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun carriage--sanitize-payload-for-llm (text)
+  "Return TEXT sanitized for LLM payload.
+Strips doc-state/markers and summarizes applied patch bodies."
+  (carriage--payload-summarize-applied-patches
+   (carriage--payload-strip-doc-state-and-markers text)))
+
+(defun carriage--context-target ()
+  "Return current buffer's context injection target ('system or 'user)."
+  (if (boundp 'carriage-mode-context-injection)
+      carriage-mode-context-injection
+    'system))
+
+(defun carriage--context-sources-enabled-p ()
+  "Return non-nil when any context source is enabled in current buffer."
+  (let* ((inc-doc (if (boundp 'carriage-mode-include-doc-context)
+                      carriage-mode-include-doc-context
+                    t))
+         (inc-gpt (and (boundp 'carriage-mode-include-gptel-context)
+                       carriage-mode-include-gptel-context))
+         (inc-vis (and (boundp 'carriage-mode-include-visible-context)
+                       carriage-mode-include-visible-context))
+         (inc-pat (and (boundp 'carriage-mode-include-patched-files)
+                       carriage-mode-include-patched-files)))
+    (or inc-doc inc-gpt inc-vis inc-pat)))
+
+(defun carriage--context-collect-and-format (buffer target)
+  "Return formatted external context text for BUFFER injected at TARGET, or nil.
+Best-effort: never signal."
+  (condition-case _e
+      (when (and (require 'carriage-context nil t)
+                 (carriage--context-sources-enabled-p))
+        (let* ((root (or (carriage-project-root) default-directory))
+               (col (carriage-context-collect buffer root)))
+          (when col
+            ;; Traffic: log context summary and individual elements (paths only)
+            (let* ((files (plist-get col :files))
+                   (stats (plist-get col :stats))
+                   (inc   (and stats (plist-get stats :included)))
+                   (sk    (and stats (plist-get stats :skipped)))
+                   (bytes (and stats (plist-get stats :total-bytes))))
+              (carriage-traffic-log 'out "context: target=%s included=%s skipped=%s total-bytes=%s"
+                                    target (or inc 0) (or sk 0) (or bytes 0))
+              (dolist (f files)
+                (let ((rel (plist-get f :rel))
+                      (included (plist-get f :content))
+                      (reason (plist-get f :reason)))
+                  (carriage-traffic-log 'out " - %s (%s)"
+                                        rel
+                                        (if (stringp included)
+                                            "included"
+                                          (format "omitted%s"
+                                                  (if reason (format ": %s" reason) "")))))))
+            (carriage-context-format col :where target))))
+    (error nil)))
+
 (defun carriage--build-context (source buffer)
   "Return context plist for prompt builder with at least :payload.
 SOURCE is 'buffer or 'subtree. BUFFER is the source buffer.
 May include :context-text and :context-target per v1.1."
   (with-current-buffer buffer
-    (let* ((mode (buffer-local-value 'major-mode buffer))
-           (payload
-            (pcase source
-              ('subtree
-               (if (eq mode 'org-mode)
-                   (save-excursion
-                     (require 'org)
-                     (ignore-errors (org-back-to-heading t))
-                     (let ((beg (save-excursion (org-back-to-heading t) (point)))
-                           (end (save-excursion (org-end-of-subtree t t) (point))))
-                       (buffer-substring-no-properties beg end)))
-                 (buffer-substring-no-properties (point-min) (point-max))))
-              (_ (buffer-substring-no-properties (point-min) (point-max)))))
-           ;; Do not leak document state into the LLM payload:
-           ;; remove file-level CARRIAGE_STATE property lines AND per-send fingerprint lines.
-           (payload
-            (let ((text (or payload "")))
-              (with-temp-buffer
-                (insert text)
-                (goto-char (point-min))
-                (let ((case-fold-search t))
-                  ;; Doc-state + iteration id (canonical headers) must never reach the LLM
-                  (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+\\(CARRIAGE_STATE\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
-                    (delete-region (line-beginning-position)
-                                   (min (point-max) (1+ (line-end-position)))))
-                  ;; Per-send markers (must never reach the LLM)
-                  (goto-char (point-min))
-                  (while (re-search-forward "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
-                    (delete-region (line-beginning-position)
-                                   (min (point-max) (1+ (line-end-position))))
-                    (goto-char (line-beginning-position)))
-                  ;; Strip applied patch bodies from payload, but keep their headers so the LLM sees history:
-                  ;; - Keep '#+begin_patch (...)' line as-is
-                  ;; - Replace body with a short summary comment
-                  ;; - Keep (or synthesize) '#+end_patch'
-                  (goto-char (point-min))
-                  (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
-                    (let* ((beg-line-beg (line-beginning-position))
-                           (beg-line-end (line-end-position))
-                           (sexp-str (match-string 1))
-                           (plist (condition-case _e
-                                      (car (read-from-string sexp-str))
-                                    (error nil))))
-                      (if (and (listp plist) (plist-get plist :applied))
-                          (let* ((desc (or (plist-get plist :description)
-                                           (plist-get plist :result)
-                                           "Applied"))
-                                 (desc (string-trim (format "%s" desc)))
-                                 (desc (if (string-empty-p desc) "Applied" desc))
-                                 (summary (format ";; applied: %s (content omitted)\n" desc))
-                                 ;; Body starts right after the begin_patch line newline (if any).
-                                 (body-beg (min (point-max) (1+ beg-line-end)))
-                                 (end-pos (save-excursion
-                                            (goto-char body-beg)
-                                            (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t))))
-                            (if end-pos
-                                (let* ((end-line-beg (save-excursion
-                                                       (goto-char end-pos)
-                                                       (line-beginning-position))))
-                                  ;; Replace the body with the summary, keep begin/end lines.
-                                  (delete-region body-beg end-line-beg)
-                                  (goto-char body-beg)
-                                  (insert summary)
-                                  ;; Continue scanning after the end_patch line (re-find, positions may have shifted).
-                                  (when (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
-                                    (goto-char (min (point-max) (1+ (line-end-position))))))
-                              ;; No end marker: truncate to end, insert summary and a synthetic end marker.
-                              (delete-region body-beg (point-max))
-                              (goto-char body-beg)
-                              (insert summary "#+end_patch\n")
-                              (goto-char (point-max))))
-                        ;; Not applied → continue scanning from next line to avoid infinite loops.
-                        (goto-char (min (point-max) (1+ (line-end-position))))))))
-                (buffer-substring-no-properties (point-min) (point-max)))))
-           (target (if (boundp 'carriage-mode-context-injection)
-                       carriage-mode-context-injection
-                     'system))
-           (ctx-text
-            (condition-case _e
-                (when (require 'carriage-context nil t)
-                  (let ((col (carriage-context-collect buffer (or (carriage-project-root) default-directory))))
-                    (when (and col
-                               (or (and (boundp 'carriage-mode-include-gptel-context)
-                                        carriage-mode-include-gptel-context)
-                                   (and (boundp 'carriage-mode-include-doc-context)
-                                        carriage-mode-include-doc-context)))
-                      ;; Traffic: log context summary and individual elements (paths only)
-                      (let* ((files (plist-get col :files))
-                             (stats (plist-get col :stats))
-                             (inc   (and stats (plist-get stats :included)))
-                             (sk    (and stats (plist-get stats :skipped)))
-                             (bytes (and stats (plist-get stats :total-bytes))))
-                        (carriage-traffic-log 'out "context: target=%s included=%s skipped=%s total-bytes=%s"
-                                              target (or inc 0) (or sk 0) (or bytes 0))
-                        (dolist (f files)
-                          (let ((rel (plist-get f :rel))
-                                (included (plist-get f :content))
-                                (reason (plist-get f :reason)))
-                            (carriage-traffic-log 'out " - %s (%s)"
-                                                  rel
-                                                  (if (stringp included)
-                                                      "included"
-                                                    (format "omitted%s"
-                                                            (if reason (format ": %s" reason) "")))))))
-                      (carriage-context-format col :where target))))
-              (error nil))))
-      (let ((res (list :payload payload)))
-        (when (and (stringp ctx-text) (not (string-empty-p ctx-text)))
-          (setq res (append res (list :context-text ctx-text :context-target target))))
-        res))))
+    (let* ((payload-raw (carriage--payload-from-source source buffer))
+           (payload (carriage--sanitize-payload-for-llm payload-raw))
+           (target (carriage--context-target))
+           (ctx-text (carriage--context-collect-and-format buffer target))
+           (res (list :payload payload)))
+      (when (and (stringp ctx-text) (not (string-empty-p ctx-text)))
+        (setq res (append res (list :context-text ctx-text :context-target target))))
+      res)))
 
 ;;; Commands (stubs/minimal implementations)
 

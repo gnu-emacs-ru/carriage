@@ -57,6 +57,8 @@ Normative Requirements
 - REQ-tr-006: Transport MUST record metrics per observability (pid, elapsed-ms, usage),
   and produce traffic summaries (head/tail/bytes).
 - REQ-tr-007: Streaming adapters MAY emit combined reasoning+text chunks; clients MUST handle both combined and separate forms.
+- REQ-tr-009: Terminal completion (done|error|abort) MUST provide token usage summary when available,
+  in a transport-agnostic schema suitable for pricing and fingerprint upsert. Missing usage MUST be allowed.
 
 Invariants
 - Anchor: INV
@@ -74,6 +76,12 @@ Grammar/Schema
 - Event (plist):
   - :type one of (begin chunk reasoning tool-call done error abort)
   - :id string, :ts number, :payload plist
+- Usage (plist, optional; present on terminal events when available):
+  - :tokens-in integer|nil
+  - :tokens-out integer|nil
+  - :audio-in integer|nil
+  - :audio-out integer|nil
+  - :raw any|nil (vendor payload preserved for diagnostics; must not affect UI logic)
 - Tool-call (plist):
   - :name string, :ver string, :args plist, :corr-id string
 

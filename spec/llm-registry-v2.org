@@ -50,6 +50,7 @@ Normative Requirements
 - REQ-llmr-001: Registry MUST normalize model ids to canonical form.
 - REQ-llmr-002: MUST expose available-models and default-candidate APIs.
 - REQ-llmr-003: Capabilities MUST be queryable by id.
+- REQ-llmr-004: Registry MUST provide a stable canonical id backend[:provider]:model usable as a pricing lookup key (see carriage/pricing/v2).
 
 Invariants
 - Anchor: INV

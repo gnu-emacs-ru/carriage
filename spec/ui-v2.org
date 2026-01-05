@@ -54,6 +54,8 @@ Normative Requirements
 - REQ-ui-005: Context controls MUST be rendered in a dedicated “Context” column; its header SHOULD provide help-echo guiding two-stroke usage (“press t, then letter”).
 - REQ-ui-006: UI MUST provide an explicit “Save settings” control in the modeline and a default key binding C-c e s. Saving MUST be explicit; no automatic writes are performed unless the user opts in.
 - REQ-ui-007: UI SHOULD expose Swarm supervisor controls (start/stop/restart hub and agents, status, open-dashboard, cleanup-stale, tail logs) via menu or commands; these controls MUST NOT perform network operations on the main thread.
+- REQ-ui-008: UI MUST display a document total cost badge in the modeline, computed from per-request fingerprints and cached (no buffer scans on redisplay).
+- REQ-ui-009: UI MUST support a configurable currency symbol (string) used for display in modeline badges and overlays; it MUST NOT affect computation.
 
 Invariants
 - Anchor: INV

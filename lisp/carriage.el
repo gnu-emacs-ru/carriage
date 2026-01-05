@@ -29,6 +29,7 @@
 (require 'carriage-logging)
 (require 'carriage-utils)
 (require 'carriage-git)
+(require 'carriage-pricing)
 ;; Registries and suite builder (ops modules register themselves)
 (require 'carriage-format-registry)
 (require 'carriage-intent-registry)

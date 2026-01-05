@@ -1,0 +1,238 @@
+#+title: Pricing v2 — Model pricing tables, currencies, and cost computation
+#+author: Peter Kosov <11111000000@email.com>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Meta
+- Spec-ID: carriage/pricing/v2
+- Version: v2.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: pricing
+- Prompt-ABI: v1
+- Pack-Profiles: P1-core, P2-full, P3-debug
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Anchor: PURPOSE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- LLM-Summary: Define how Carriage stores pricing tables and computes request/document cost.
+  - CSV schema for model prices
+  - Canonical lookup keys (backend[:provider]:model)
+  - Currency symbol configuration (display only)
+  - Integer-safe money units and rounding rules
+
+Scope
+- Anchor: SCOPE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- In scope:
+  - Price table storage and loading order (user vs project vs built-in default)
+  - Cost computation from token usage (in/out, optional audio)
+  - Currency symbol used only for UI presentation
+- Out of scope:
+  - Vendor billing, invoices, exchange rates, tax rules
+  - Any network fetching of price tables (forbidden in v2)
+
+Terms
+- Anchor: TERMS
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Price table: mapping from model key → rates (per 1M tokens).
+- Canonical model id: backend[:provider]:model (see llm-registry spec).
+- Money unit: integer “micro-ruble” (µ₽) unless configured otherwise.
+
+Normative Requirements
+- Anchor: REQ
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- REQ-price-001: Pricing MUST be computed from token usage counts and a price table.
+- REQ-price-002: Price table MUST support at least two rates per model:
+  - input_rub_per_1m (prompt/input tokens)
+  - output_rub_per_1m (completion/output tokens)
+- REQ-price-003: Price table MAY additionally include:
+  - input_audio_rub_per_1m, output_audio_rub_per_1m
+- REQ-price-004: Pricing lookup key MUST be the canonical model id: backend[:provider]:model.
+- REQ-price-005: Unknown model (no rate) MUST NOT be an error. It MUST yield a result with
+  :known nil and no numeric cost.
+- REQ-price-006: Cost computation MUST be integer-safe (no floating accumulation) using an
+  integer money unit:
+  - default money unit: micro-ruble (µ₽) = 1e-6 RUB
+- REQ-price-007: The system MUST define a stable rounding rule when displaying money:
+  - UI display default: two decimal digits in RUB (kopecks), derived from µ₽ by rounding
+    half-up at the kopeck boundary.
+- REQ-price-008: Pricing MUST NOT trigger any network operations.
+- REQ-price-009: Price table loading order MUST be deterministic and best-effort:
+  1) user file (customizable path; default "~/.carriage/model-prices.csv")
+  2) project file (project root; default "model-prices.csv")
+  3) built-in default table (shipped with Carriage)
+- REQ-price-010: If neither user nor project price file exists, the system MAY generate a
+  default project file "model-prices.csv" (using the built-in default table) on explicit
+  user command only (no auto-write unless opted in).
+- REQ-price-011: Currency symbol MUST be configurable (string) and used ONLY for display in UI
+  (modeline badges, overlays). It MUST NOT affect computations.
+
+Invariants
+- Anchor: INV
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- INV-price-001: All stored monetary values in fingerprints MUST use the selected money unit
+  (default: µ₽) and MUST be integers.
+- INV-price-002: CSV parsing MUST be strict for numeric columns; invalid numbers MUST be ignored
+  and treated as missing rates (unknown model) rather than causing errors.
+
+Grammar/Schema
+- Anchor: SCHEMA
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+
+- CSV schema (header required):
+  - model (string; canonical model key or bare model name)
+  - input_rub_per_1m (number; RUB per 1,000,000 input tokens)
+  - output_rub_per_1m (number; RUB per 1,000,000 output tokens)
+  - input_audio_rub_per_1m (number; optional)
+  - output_audio_rub_per_1m (number; optional)
+
+- Cost result plist schema:
+  - :known boolean
+  - :model string (canonical id used for lookup)
+  - :tokens-in integer|nil
+  - :tokens-out integer|nil
+  - :audio-in integer|nil
+  - :audio-out integer|nil
+  - :cost-in-u integer|nil     ;; u = money unit (default µ₽)
+  - :cost-out-u integer|nil
+  - :cost-audio-in-u integer|nil
+  - :cost-audio-out-u integer|nil
+  - :cost-total-u integer|nil
+
+Interfaces/Contracts
+- Anchor: IFC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- IFC-price-001: carriage-pricing-load-table (&optional root) → table
+  - MUST apply loading order REQ-price-009.
+- IFC-price-002: carriage-pricing-lookup (canonical-id table) → rate|nil
+- IFC-price-003: carriage-pricing-compute (canonical-id usage table) → cost-plist
+- IFC-price-004: carriage-pricing-format-money (amount-u &optional currency-symbol) → string
+- IFC-price-005: carriage-pricing-generate-project-csv (root &optional overwrite) → path|nil
+  - MUST be an explicit user action; no implicit writes.
+
+Algorithms
+- Anchor: ALG
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- ALG-price-001: Compute cost in money-unit from tokens and per-1M RUB rates:
+  - cost-u = round(tokens * rate_rub_per_1m * u_per_rub / 1_000_000)
+  - where u_per_rub = 1_000_000 for µ₽.
+- ALG-price-002: Lookup must first try canonical id, then MAY try fallback keys:
+  - raw model name (last segment of canonical id),
+  - provider:model when canonical has backend:provider:model.
+  This is best-effort and MUST NOT cause ambiguity errors.
+
+Errors and Diagnostics
+- Anchor: ERR
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- ERR-price-001: PRICE_E_CSV_PARSE — malformed CSV header/row (severity=warn; continue)
+- ERR-price-002: PRICE_E_RATE_INVALID — invalid numeric rate (severity=warn; treat as missing)
+
+Security and Limits
+- Anchor: SEC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- No network requests; no remote/TRAMP file reads for price tables by default.
+- Only local filesystem paths are permitted for price tables.
+
+Performance and Asynchrony
+- Anchor: PERF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Price lookup MUST be O(1) per request once the table is loaded (hash-table or equivalent).
+- Table loading SHOULD be cached per buffer/project and refreshed only on explicit reload or file change.
+
+UI/UX
+- Anchor: UI
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Currency symbol is presentation-only; default SHOULD be "₽" for RUB.
+- When price is unknown, UI SHOULD display a placeholder (e.g., "—") and expose details in tooltip.
+
+Prompt Guidance
+- Anchor: PRM
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- PRM-price-001: Pricing metadata MUST NOT be included in prompts to LLMs (internal-only).
+
+Context Packaging
+- Anchor: PACK
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- P1-core:
+  - include: carriage/pricing/v2#REQ priority=P1 max-tokens=600 summarize=0.5
+- P2-full:
+  - include: carriage/pricing/v2#SCHEMA priority=P2 max-tokens=500 summarize=0.5
+
+Retrieval and Indexing
+- Anchor: RAG
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Chunk ids CHK-carriage/pricing/v2-REQ-01..NN.
+
+Precedence Rules
+- Anchor: PREC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Pricing follows Security constraints; UI display rules never override Security.
+
+Testing and Conformance
+- Anchor: TST
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- TST-price-001: CSV parse: header required; numeric columns parsed; invalid rows ignored with warn.
+- TST-price-002: Cost compute: tokens-in/out produce integer µ₽ totals and stable rounding for display.
+- TST-price-003: Unknown model yields :known nil and no numeric totals.
+
+Cross-References and Anchors
+- Anchor: XREF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Related:
+  - carriage/transport/llm-registry/v2#REQ (canonical id)
+  - carriage/transport/llm/v2#REQ (usage availability)
+  - carriage/ui/general/v2#REQ (modeline badges)
+- Code (planned):
+  - lisp/carriage-pricing.el
+  - lisp/carriage-mode.el
+  - lisp/carriage-transport-gptel.el
+  - lisp/carriage-ui.el
+
+Evolution
+- Anchor: EVO
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Affects-Prompt: none

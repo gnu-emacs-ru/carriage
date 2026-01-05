@@ -34,6 +34,12 @@ Normative Requirements
 - Pack-Priority: P2
 - REQ-mode-001: Mode MUST not block the UI; async paths via timers.
 - REQ-mode-002: Commands MUST respect Specs and Security; refuse unsafe ops.
+- REQ-mode-003: On Send, mode MUST insert a per-request fingerprint line (#+CARRIAGE_FINGERPRINT: <plist>) describing response/context-shaping parameters.
+- REQ-mode-004: On successful request completion, mode MUST upsert the same fingerprint line with token usage (when available) and computed cost (when pricing is known).
+- REQ-mode-005: Fingerprint upsert MUST be idempotent and MUST NOT create duplicate fingerprint lines for a single request.
+- REQ-mode-006: Fingerprint lines and iteration markers MUST NOT be included in outgoing LLM prompts (internal-only metadata).
+- REQ-mode-007: Mode MUST maintain a cached “document total cost” value for UI consumption and refresh it asynchronously (no buffer scans in redisplay).
+- REQ-mode-008: Currency symbol used for display MUST be configurable and MUST NOT affect cost computation (see carriage/pricing/v2).
 
 Interfaces/Contracts
 - Anchor: IFC
@@ -50,6 +56,9 @@ Testing and Conformance
 - Pack-Priority: P2
 - TST-mode-001: abort handler registered and invoked
 - TST-mode-002: buffer remains writable; mode persists after apply
+- TST-mode-003: fingerprint is inserted on Send and then upserted on completion with usage and cost (single line, idempotent).
+- TST-mode-004: fingerprint/iteration markers are stripped from outgoing payload (no prompt leakage).
+- TST-mode-005: document total cost cache updates after fingerprint upsert and after manual edits (debounced).
 
 Cross-References and Anchors
 - Anchor: XREF

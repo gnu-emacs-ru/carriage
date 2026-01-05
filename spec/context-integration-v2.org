@@ -44,7 +44,7 @@ Terms
 - Normative: t
 - Stability: stable
 - Pack-Priority: P1
-- Sources: doc (from #+begin_context), gptel (registry/files), visible (open buffers).
+- Sources: doc (from #+begin_context plus optional patched-files from applied #+begin_patch blocks), gptel (registry/files), visible (open buffers).
 - Packaging target: 'system or 'user; where collected text is injected in prompts.
 - Collector: function that returns {:count :items :warnings :stats}.
 

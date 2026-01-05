@@ -42,6 +42,7 @@
 (declare-function carriage-begin-reasoning "carriage-mode" ())
 (declare-function carriage-end-reasoning "carriage-mode" ())
 (declare-function carriage-stream-finalize "carriage-mode" (&optional errorp mark-last-iteration))
+(declare-function carriage-fingerprint-note-usage-and-cost "carriage-mode" (usage &optional backend provider model))
 
 (defgroup carriage-transport-gptel nil
   "GPTel transport adapter for Carriage."
@@ -186,6 +187,60 @@ When both reasoning and text are present, returns :kind 'both with keys :thinkin
         (list :kind 'text :text txt))
        (t (list :kind 'unknown)))))
    (t (list :kind 'unknown))))
+
+(defun carriage--gptel--extract-usage (response info)
+  "Extract token/audio usage from GPTel RESPONSE/INFO and normalize to a plist.
+
+Returns plist with keys:
+- :tokens-in integer|nil
+- :tokens-out integer|nil
+- :audio-in integer|nil
+- :audio-out integer|nil
+- :raw any|nil
+
+Best-effort: returns nil when nothing can be extracted."
+  (cl-labels
+      ((alistish-get (k x)
+         (cond
+          ((and (listp x) (fboundp 'alist-get)) (alist-get k x))
+          (t nil)))
+       (plistish-get (k x)
+         (when (listp x) (plist-get x k)))
+       (any-get (k1 k2 x)
+         (or (plistish-get k1 x)
+             (plistish-get k2 x)
+             (alistish-get k1 x)
+             (alistish-get k2 x)))
+       (to-int (v)
+         (cond
+          ((integerp v) v)
+          ((and (numberp v) (>= v 0)) (truncate v))
+          ((and (stringp v) (string-match-p "\\`[0-9]+\\'" v)) (string-to-number v))
+          (t nil)))
+       (usage-from (x)
+         (or (plistish-get :usage x)
+             (alistish-get :usage x)
+             (alistish-get 'usage x)
+             (plistish-get 'usage x))))
+    (let* ((u (or (usage-from info)
+                  (usage-from response)
+                  ;; Some payloads may store usage nested under :payload.
+                  (usage-from (plistish-get :payload info))
+                  (usage-from (alistish-get :payload info))))
+           (tin (to-int (or (any-get :tokens-in :prompt_tokens u)
+                            (any-get :input_tokens :prompt-tokens u)
+                            (any-get 'input_tokens 'prompt_tokens u))))
+           (tout (to-int (or (any-get :tokens-out :completion_tokens u)
+                             (any-get :output_tokens :completion-tokens u)
+                             (any-get 'output_tokens 'completion_tokens u))))
+           (ain (to-int (or (any-get :audio-in :audio_prompt_tokens u)
+                            (any-get :audio_input_tokens :audio-prompt-tokens u)
+                            (any-get 'audio_input_tokens 'audio_prompt_tokens u))))
+           (aout (to-int (or (any-get :audio-out :audio_completion_tokens u)
+                             (any-get :audio_output_tokens :audio-completion-tokens u)
+                             (any-get 'audio_output_tokens 'audio_completion_tokens u)))))
+      (when (or tin tout ain aout u)
+        (list :tokens-in tin :tokens-out tout :audio-in ain :audio-out aout :raw u)))))
 
 (defun carriage--gptel--ensure-backend (backend buffer)
   "Ensure BACKEND is 'gptel or signal error and complete in BUFFER."
@@ -391,7 +446,10 @@ Returns cons (UPDATED-SUMMARY . REMAINDER-TEXT-AFTER-HEAD)."
           (let* ((cls (carriage--gptel--classify response))
                  (kind (plist-get cls :kind))
                  (text (plist-get cls :text))
-                 (thinking (plist-get cls :thinking)))
+                 (thinking (plist-get cls :thinking))
+                 (usage (carriage--gptel--extract-usage response info)))
+            (when usage
+              (setq state (plist-put state :usage usage)))
             (pcase kind
               ('reasoning
                (setq state (carriage--gptel--cb-handle-reasoning gptel-buffer state text)))

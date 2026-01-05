@@ -1,0 +1,195 @@
+#+title: UI Cost v2 — Per-request and document cost display
+#+author: Peter Kosov <11111000000@email.com>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Meta
+- Spec-ID: carriage/ui/cost/v2
+- Version: v2.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: ui
+- Prompt-ABI: v1
+- Pack-Profiles: P2-full
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Anchor: PURPOSE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- LLM-Summary: Define cached modeline rendering of per-request and document-wide cost.
+  - doc-total cost badge in modeline
+  - no buffer scans on redisplay
+  - debounced refresh triggered by fingerprint updates
+  - currency symbol display rules
+
+Scope
+- Anchor: SCOPE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- In scope: UI presentation (modeline/tooltip), caching rules, refresh triggers.
+- Out of scope: pricing math and table loading (see carriage/pricing/v2).
+
+Terms
+- Anchor: TERMS
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- Doc cost: sum of known per-request costs found in the buffer fingerprints.
+
+Normative Requirements
+- Anchor: REQ
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- REQ-ui-cost-001: UI MUST display a document total cost badge in the modeline.
+- REQ-ui-cost-002: Modeline rendering MUST be O(1) in buffer size; it MUST NOT scan the buffer
+  for fingerprints during redisplay.
+- REQ-ui-cost-003: Document cost MUST be computed in a debounced worker (timer/hook) and stored
+  in a buffer-local cache.
+- REQ-ui-cost-004: Cache refresh MUST be triggered by:
+  - fingerprint upsert on request completion, and
+  - after-change hook (debounced) as a best-effort fallback for manual edits.
+- REQ-ui-cost-005: Tooltip SHOULD show:
+  - total known cost (money-unit formatted with currency symbol),
+  - number of requests with known cost,
+  - number of requests with unknown cost (missing usage or missing rate),
+  - last refresh timestamp.
+- REQ-ui-cost-006: Currency symbol MUST be configurable and used in badges/tooltips/overlays
+  (presentation only).
+- REQ-ui-cost-007: If there are no known costs, badge SHOULD display placeholder (e.g., "Cost:—")
+  and tooltip MUST explain why (no fingerprints / missing usage / unknown rates).
+
+Invariants
+- Anchor: INV
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- INV-ui-cost-001: UI must never write to files as part of cost rendering or refresh.
+- INV-ui-cost-002: UI must never include fingerprint data in outgoing prompts (security invariant,
+  enforced by transport/mode stripping).
+
+Grammar/Schema
+- Anchor: SCHEMA
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- Modeline badge (conceptual):
+  - label: "<CUR><amount>" or "Cost:—"
+  - help-echo: multiline summary
+
+Interfaces/Contracts
+- Anchor: IFC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- IFC-ui-cost-001: carriage-ui-doc-cost-get () → plist
+  - returns cached snapshot: :known-total-u, :known-count, :unknown-count, :ts
+- IFC-ui-cost-002: carriage-ui-doc-cost-schedule-refresh (&optional delay) → t
+- IFC-ui-cost-003: carriage-ui-doc-cost-refresh-now (&optional buffer) → t
+  - MUST NOT be called from redisplay; may scan buffer text.
+
+Algorithms
+- Anchor: ALG
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- ALG-ui-cost-001: Worker scans fingerprint lines and extracts integer cost keys,
+  summing :CAR_COST_TOTAL_U (or equivalent) into cache.
+
+Errors and Diagnostics
+- Anchor: ERR
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- UI cost errors MUST be non-fatal; they must not affect request/apply pipelines.
+
+Security and Limits
+- Anchor: SEC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- No prompt leakage; no file IO for refresh; no TRAMP scanning.
+
+Performance and Asynchrony
+- Anchor: PERF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Refresh MUST be debounced and skip hidden buffers where practical.
+
+UI/UX
+- Anchor: UI
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- Badge SHOULD be compact and accessible (tooltip required; not color-only).
+
+Prompt Guidance
+- Anchor: PRM
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- PRM-ui-cost-001: Never ask the LLM to compute or render costs; costs are tool-owned.
+
+Context Packaging
+- Anchor: PACK
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- P2-full:
+  - include: carriage/ui/cost/v2#REQ priority=P2 max-tokens=400 summarize=0.5
+
+Retrieval and Indexing
+- Anchor: RAG
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- Chunk ids CHK-carriage/ui/cost/v2-REQ-01..NN.
+
+Precedence Rules
+- Anchor: PREC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- UI cost follows pricing and security specs.
+
+Testing and Conformance
+- Anchor: TST
+- Normative: t
+- Stability: stable
+- Pack-Priority: P2
+- TST-ui-cost-001: Badge updates after fingerprint upsert; no rescans during modeline render.
+- TST-ui-cost-002: After manual edits to fingerprints, debounce refresh updates cached totals.
+
+Run tests (ERT)
+#+begin_src sh :results output
+emacs -Q --batch \
+  -L lisp -L lisp/transports -L test \
+  -l test/carriage-pricing-test.el \
+  -f ert-run-tests-batch-and-exit
+#+end_src
+
+Cross-References and Anchors
+- Anchor: XREF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- Related:
+  - carriage/pricing/v2
+  - carriage/ui/general/v2
+- Code (planned):
+  - lisp/carriage-ui.el
+  - lisp/carriage-mode.el
+
+Evolution
+- Anchor: EVO
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- Affects-Prompt: none

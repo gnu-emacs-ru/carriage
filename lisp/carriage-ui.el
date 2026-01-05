@@ -28,6 +28,7 @@
 (require 'carriage-utils)
 (require 'carriage-git)
 (require 'carriage-llm-registry)
+(require 'carriage-pricing nil t)
 (require 'carriage-perf nil t)
 (require 'carriage-transient-async nil t)
 (declare-function carriage-select-apply-engine "carriage-apply-engine" (&optional engine))
@@ -224,6 +225,82 @@ One of:
 (defvar-local carriage-ui--apply-badge-version 0
   "Monotonic version for apply-status badge; used to invalidate modeline cache.")
 
+;; -----------------------------------------------------------------------------
+;; Doc-cost cache (sum of per-request costs from fingerprint lines).
+;; Public API is required by spec/ui-cost-v2.org and ERT tests.
+
+(defvar-local carriage-ui--doc-cost-cache nil
+  "Cached snapshot plist for document cost.
+Keys: :known-total-u :known-count :unknown-count :ts")
+
+(defvar-local carriage-ui--doc-cost-version 0
+  "Monotonic version of doc-cost cache; bump on refresh to invalidate modeline cache.")
+
+(defvar-local carriage-ui--doc-cost-refresh-timer nil
+  "Debounce timer for doc-cost refresh (buffer-local).")
+
+(defun carriage-ui-doc-cost-get ()
+  "Return cached document cost snapshot plist.
+
+Plist keys:
+- :known-total-u integer (µ₽) or 0
+- :known-count integer
+- :unknown-count integer
+- :ts float-time (last refresh)"
+  (or carriage-ui--doc-cost-cache
+      (list :known-total-u 0 :known-count 0 :unknown-count 0 :ts nil)))
+
+(defun carriage-ui-doc-cost-refresh-now (&optional buffer)
+  "Recompute and cache document cost for BUFFER (or current buffer).
+May scan buffer text; must not be called from redisplay."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((sum 0)
+          (known 0)
+          (unknown 0)
+          (case-fold-search t))
+      (save-excursion
+        (goto-char (point-min))
+        (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:[ \t]*\\(.*\\)$" nil t)
+          (let* ((s (match-string 1))
+                 (obj (condition-case _e
+                          (car (read-from-string s))
+                        (error nil)))
+                 (v (and (listp obj) (plist-get obj :CAR_COST_TOTAL_U))))
+            (cond
+             ((integerp v)
+              (setq sum (+ sum v))
+              (setq known (1+ known)))
+             ((and (listp obj) (plist-member obj :CAR_COST_TOTAL_U))
+              ;; Explicit nil (unknown cost)
+              (setq unknown (1+ unknown)))
+             (t nil)))))
+      (setq carriage-ui--doc-cost-cache
+            (list :known-total-u sum
+                  :known-count known
+                  :unknown-count unknown
+                  :ts (float-time)))
+      (setq carriage-ui--doc-cost-version (1+ (or carriage-ui--doc-cost-version 0)))
+      (carriage-ui--invalidate-ml-cache)
+      (force-mode-line-update t)
+      t)))
+
+(defun carriage-ui-doc-cost-schedule-refresh (&optional delay)
+  "Schedule a debounced doc-cost refresh for the current buffer."
+  (when (timerp carriage-ui--doc-cost-refresh-timer)
+    (ignore-errors (cancel-timer carriage-ui--doc-cost-refresh-timer)))
+  (let* ((buf (current-buffer))
+         (d (max 0.01 (float (or delay 0.08)))))
+    (setq carriage-ui--doc-cost-refresh-timer
+          (run-at-time
+           d nil
+           (lambda ()
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (setq carriage-ui--doc-cost-refresh-timer nil)
+                 (ignore-errors (carriage-ui-doc-cost-refresh-now buf))))))
+          ))
+  t)
+
 ;; Spinner state (buffer-local)
 (defvar-local carriage--ui-spinner-timer nil
   "Buffer-local spinner timer for Carriage mode-line.")
@@ -415,6 +492,14 @@ The modeline uses the last cached value and schedules a lightweight refresh."
   :type 'number
   :group 'carriage-ui)
 
+(defcustom carriage-ui-context-min-refresh-interval 1.0
+  "Minimum interval in seconds between actual context badge recomputations per buffer.
+
+This is a hard throttle on top of debounce and guarantees recomputation frequency
+is at most 1 Hz (default)."
+  :type 'number
+  :group 'carriage-ui)
+
 (defcustom carriage-ui-context-tooltip-max-items 50
   "Maximum number of context items to list in the [Ctx:N] tooltip.
 When more are present, the tooltip shows a tail line like \"… (+K more)\"."
@@ -432,6 +517,7 @@ Disabling this eliminates periodic redisplay work during active phases."
     intent
     state
     apply-status
+    doc-cost
     abort
     all
     context
@@ -737,11 +823,14 @@ Note: Avoids requiring carriage-context in the redisplay path; relies on boundp 
           t)
    :gpt (if (boundp 'carriage-mode-include-gptel-context)
             carriage-mode-include-gptel-context
-          t)
+          nil)
    :vis (and (boundp 'carriage-mode-include-visible-context)
              carriage-mode-include-visible-context)
    :patched (and (boundp 'carriage-mode-include-patched-files)
                  carriage-mode-include-patched-files)
+   :gptver (if (boundp 'carriage-ui--gptel-context-version)
+               carriage-ui--gptel-context-version
+             0)
    :scope (and (boundp 'carriage-doc-context-scope)
                carriage-doc-context-scope)))
 
@@ -764,6 +853,8 @@ Never signal from redisplay/modeline; treat non-plists as invalid."
        (eq (plist-get toggles :vis)     (plist-get cache :vis))
        (eq (plist-get toggles :scope)   (plist-get cache :scope))
        (eq (plist-get toggles :patched) (plist-get cache :patched))
+       (=  (or (plist-get toggles :gptver) 0)
+           (or (plist-get cache :gptver) 0))
        (=  tick (or (plist-get cache :tick) -1))
        (carriage-ui--ctx-cache-ttl-ok-p cache now ttl)))
 
@@ -774,6 +865,7 @@ Never signal from redisplay/modeline; treat non-plists as invalid."
         :vis (plist-get toggles :vis)
         :scope (plist-get toggles :scope)
         :patched (plist-get toggles :patched)
+        :gptver (or (plist-get toggles :gptver) 0)
         :tick tick :time time :value value))
 
 (defun carriage-ui--ctx-schedule-refresh (toggles tick delay)
@@ -828,13 +920,17 @@ Debounce semantics:
          (gpt (plist-get toggles :gpt))
          (vis (plist-get toggles :vis))
          (pt  (plist-get toggles :patched))
-         (val (carriage-ui--compute-context-badge doc gpt vis pt)))
+         (val (carriage-ui--compute-context-badge doc gpt vis pt))
+         (old (and (listp carriage-ui--ctx-cache)
+                   (plist-get carriage-ui--ctx-cache :value)))
+         (changed (not (equal val old))))
     (setq carriage-ui--ctx-cache (carriage-ui--ctx-build-cache toggles tick time val))
     (setq carriage-ui--ctx-placeholder-count 0
           carriage-ui--ctx-last-placeholder-time 0
           carriage-ui--ctx-refresh-timer nil)
-    (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
-    (carriage-ui--invalidate-ml-cache)
+    (when changed
+      (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+      (carriage-ui--invalidate-ml-cache))
     val))
 
 (defun carriage-ui--context-badge ()
@@ -5632,29 +5728,79 @@ This function is intentionally conservative and must never signal."
 ;; timer cannot fire (and error) before the first new refresh is scheduled.
 (ignore-errors (carriage-ui--purge-stale-ctx-timers))
 
+(defvar carriage-ui--gptel-context-version 0
+  "Monotonic global counter incremented when gptel-context changes.
+
+This is used as an O(1) invalidation signal for [Ctx:N] caches, without polling
+and without scanning gptel-context from the modeline/redisplay path.")
+
+(defun carriage-ui--note-gptel-context-change (&rest _ignored)
+  "Note that gptel-context changed and refresh Ctx in visible Carriage buffers.
+
+Policy:
+- Always bump global `carriage-ui--gptel-context-version' so caches become stale.
+- Additionally invalidate+schedule refresh only for *visible* carriage-mode buffers
+  that have gptel-context enabled."
+  (setq carriage-ui--gptel-context-version (1+ (or carriage-ui--gptel-context-version 0)))
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and (bound-and-true-p carriage-mode)
+                   (boundp 'carriage-mode-include-gptel-context)
+                   carriage-mode-include-gptel-context
+                   (get-buffer-window buf t)
+                   (fboundp 'carriage-ui--ctx-invalidate))
+          (ignore-errors (carriage-ui--ctx-invalidate)))))))
+
+(with-eval-after-load 'gptel-context
+  (dolist (fn '(gptel-context-add gptel-context-remove gptel-context-clear))
+    (when (and (fboundp fn)
+               (not (advice-member-p #'carriage-ui--note-gptel-context-change fn)))
+      (advice-add fn :after #'carriage-ui--note-gptel-context-change))))
+
 (defun carriage-ui--ctx-schedule-refresh (toggles tick delay)
   "Schedule a near-future context badge recomputation with TOGGLES and TICK after DELAY.
 
 Coalescing semantics (perf critical):
-- Repeated calls update pending snapshot (`carriage-ui--ctx-pending-toggles/tick`)
-  without canceling/recreating timers on every keystroke.
-- At most one timer is pending per buffer; when it fires, it computes using the
-  *latest* pending snapshot.
+- Repeated calls update pending snapshot (`carriage-ui--ctx-pending-toggles/tick`).
+- At most one timer is pending per buffer.
+
+Rate limiting:
+- Applies a hard throttle on top of debounce: actual recomputation happens at most
+  once per `carriage-ui-context-min-refresh-interval' seconds (default 1.0).
 
 Robustness:
 - Timer callback accepts `&rest` to tolerate older timer invocation conventions.
-- Computation runs only for visible buffers (avoid background churn)."
+- Computation runs only for visible buffers (avoid background churn).
+- Modeline cache is invalidated ONLY when the computed badge actually changes."
   ;; Always keep the latest request (cheap; avoids rescheduling churn).
   (setq carriage-ui--ctx-pending-toggles toggles)
   (setq carriage-ui--ctx-pending-tick tick)
-  ;; If a timer is already pending, do not cancel/reschedule (avoid GC churn on input).
-  (unless (timerp carriage-ui--ctx-refresh-timer)
-    (let* ((buf (current-buffer))
-           (dl  (max 0.0 (or delay 0.05))))
+  (let* ((buf (current-buffer))
+         (now (float-time))
+         (base-delay (max 0.0 (or delay 0.05)))
+         (min-interval (max 0.0 (or (and (boundp 'carriage-ui-context-min-refresh-interval)
+                                         carriage-ui-context-min-refresh-interval)
+                                    1.0)))
+         (last-time (or (and (listp carriage-ui--ctx-cache)
+                             (numberp (plist-get carriage-ui--ctx-cache :time))
+                             (plist-get carriage-ui--ctx-cache :time))
+                        0.0))
+         (earliest (+ last-time min-interval))
+         (desired (max (+ now base-delay) earliest))
+         (delay2 (max 0.01 (- desired now))))
+    (cond
+     ;; If a timer already exists, push it out if needed (do NOT recreate on every keystroke).
+     ((timerp carriage-ui--ctx-refresh-timer)
+      (ignore-errors
+        (when (fboundp 'timer-set-time)
+          (timer-set-time carriage-ui--ctx-refresh-timer (seconds-to-time desired)))))
 
+     ;; Otherwise create a new one.
+     (t
       (setq carriage-ui--ctx-refresh-timer
             (run-at-time
-             dl nil
+             delay2 nil
              (lambda (&rest _ignored)
                (ignore _ignored)
                (when (buffer-live-p buf)
@@ -5673,15 +5819,20 @@ Robustness:
                                 (vis (plist-get tog :vis))
                                 (pt  (plist-get tog :patched))
                                 (val (carriage-ui--compute-context-badge doc gpt vis pt))
-                                (t2 (float-time)))
+                                (t2 (float-time))
+                                (old (and (listp carriage-ui--ctx-cache)
+                                          (plist-get carriage-ui--ctx-cache :value)))
+                                (changed (not (equal val old))))
+                           ;; Always update cache time/tick, but invalidate UI only on real change.
                            (setq carriage-ui--ctx-cache
                                  (carriage-ui--ctx-build-cache tog tk t2 val))
                            (setq carriage-ui--ctx-placeholder-count 0
                                  carriage-ui--ctx-last-placeholder-time 0)
-                           (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
-                           (carriage-ui--invalidate-ml-cache))
+                           (when changed
+                             (setq carriage-ui--ctx-badge-version (1+ (or carriage-ui--ctx-badge-version 0)))
+                             (carriage-ui--invalidate-ml-cache)))
                        (error nil))
-                     (force-mode-line-update t)))))))))
+                     (force-mode-line-update t))))))))))
   t)
 
 (defvar carriage--perf--ctx-after-change-guard-installed nil)

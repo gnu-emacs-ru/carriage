@@ -54,7 +54,7 @@
 
 (defun carriage--echo--prompt (source buffer mode)
   "Build dev prompt string from BUFFER given SOURCE and MODE.
-Strips any #+begin_carriage … #+end_carriage blocks and per-send fingerprint lines."
+Strips internal Carriage marker lines (doc-state/fingerprint and similar)."
   (with-current-buffer buffer
     (let* ((raw
             (pcase source

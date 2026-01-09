@@ -312,7 +312,6 @@ Contract:
   "Remove internal Carriage marker lines from TEXT (best-effort, centralized).
 
 Strips:
-- #+begin_carriage … #+end_carriage blocks
 - Org property headers for CARRIAGE_STATE / CARRIAGE_FINGERPRINT
 - Inline CARRIAGE_FINGERPRINT lines"
   (with-temp-buffer

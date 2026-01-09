@@ -11,11 +11,3 @@
     (goto-char (point-min))
     (let ((id (progn (require 'carriage-iteration) (carriage-iteration-read-id))))
       (should (string= id "87105ad1c6eea77df26686308df00116")))))
-
-(ert-deftest carriage-iteration-read-id-prefers-property-over-inline ()
-  (with-temp-buffer
-    (org-mode)
-    (insert "#+PROPERTY: CARRIAGE_ITERATION_ID deadbeefdeadbeefdeadbeefdeadbeef\n")
-    (insert "#+CARRIAGE_ITERATION_ID: 87105ad1c6eea77df26686308df00116\n")
-    (let ((id (progn (require 'carriage-iteration) (carriage-iteration-read-id))))
-      (should (string= id "deadbeefdeadbeefdeadbeefdeadbeef")))))

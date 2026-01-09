@@ -2591,7 +2591,7 @@ Performance:
   "Build document total cost segment from cached doc-cost snapshot (O(1)).
 
 Label format:
-- \"Doc: 123.45₽\" (sum of known costs)
+- \"[123.45₽]\" (sum of known costs)
 If cache is empty/uninitialized, schedule an async refresh and show a placeholder."
   (let* ((snap (carriage-ui-doc-cost-get))
          (total-u (and (listp snap) (plist-get snap :known-total-u)))
@@ -2604,7 +2604,7 @@ If cache is empty/uninitialized, schedule an async refresh and show a placeholde
                        (not (timerp carriage-ui--doc-cost-refresh-timer)))
               (ignore-errors (carriage-ui-doc-cost-schedule-refresh 0.05))))
          (money (carriage-ui--format-money-suffix total-u))
-         (lbl (format "Doc: %s" money))
+         (lbl (format "[%s]" money))
          (tip (format "Document cost (known only)\nknown=%s unknown=%s\nClick to refresh"
                       (or known 0) (or unknown 0))))
     (carriage-ui--ml-button lbl #'carriage-ui-doc-cost-refresh tip)))

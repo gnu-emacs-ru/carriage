@@ -448,11 +448,11 @@ Behavior:
         (let ((case-fold-search t)
               (beg nil) (end nil))
           (goto-char (point-min))
-          (when (re-search-forward "^[ \t]*#\\+begin_carriage\\b" nil t)
+          (when (re-search-forward "^[ \t]*#\\+begin_comment\\b" nil t)
             (setq beg (match-beginning 0))
-            (when (re-search-forward "^[ \t]*#\\+end_carriage\\b" nil t)
+            (when (re-search-forward "^[ \t]*#\\+end_comment\\b" nil t)
               (setq end (match-end 0))))
-          (let* ((block (format "#+begin_carriage\nCARRIAGE_TEMPLATE_ID %s\nCARRIAGE_TEMPLATE_VER %s\nCARRIAGE_CONTEXT_PROFILE %s\nCARRIAGE_INHERITED %s\n#+end_carriage\n"
+          (let* ((block (format "#+begin_comment\nCARRIAGE_TEMPLATE_ID %s\nCARRIAGE_TEMPLATE_VER %s\nCARRIAGE_CONTEXT_PROFILE %s\nCARRIAGE_INHERITED %s\n#+end_comment\n"
                                 (or (and (symbolp template-id) (symbol-name template-id)) (format "%s" template-id))
                                 (or template-ver "1.0")
                                 (upcase (if (eq profile 'p3) "P3" "P1"))

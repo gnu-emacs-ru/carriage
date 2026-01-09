@@ -34,7 +34,6 @@ Transports
   - #+PROPERTY: CARRIAGE_STATE…
   - #+CARRIAGE_FINGERPRINT: …
   - Inline #+CARRIAGE_FINGERPRINT… (canonical)
-  - #+begin_carriage … #+end_carriage blocks
 
 Send pipeline
 - Separator insertion “-----” happens before fingerprint line (idempotent).

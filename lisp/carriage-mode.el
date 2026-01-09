@@ -1706,6 +1706,10 @@ This function is best-effort and must never signal."
           (setq pl (plist-put pl :CAR_COST_AUDIO_OUT_U (plist-get cost :cost-audio-out-u)))
           (setq pl (plist-put pl :CAR_COST_TOTAL_U (plist-get cost :cost-total-u))))
         (carriage-fingerprint--write-plist-at marker pl)
+        ;; Ensure fingerprint fold overlay sees the updated cost immediately (no debounce wait).
+        (when (and (require 'carriage-doc-state nil t)
+                   (fboundp 'carriage-doc-state-summary-refresh))
+          (ignore-errors (carriage-doc-state-summary-refresh (current-buffer))))
         ;; Nudge doc-cost refresh if UI exposes it (best-effort; not required for correctness).
         (when (fboundp 'carriage-ui-doc-cost-schedule-refresh)
           (ignore-errors (carriage-ui-doc-cost-schedule-refresh 0.05)))

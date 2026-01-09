@@ -692,11 +692,19 @@ Important: use `concat' (not `format') to preserve icon text properties."
                  " "))
          (scope-b (when (and scope (not (eq scope nil)))
                     (carriage-doc-state--badge
-                     (let* ((ic (or (carriage-doc-state--ui-icon 'scope nil) ""))
-                            (gap (if (and (stringp ic) (> (length ic) 0))
+                     (let* ((ic (pcase scope
+                                  ('all  (carriage-doc-state--ui-icon 'scope-all nil))
+                                  ('last (carriage-doc-state--ui-icon 'scope-last nil))
+                                  (_     (carriage-doc-state--ui-icon 'scope nil))))
+                            ;; When scope is all/last and we have an icon, render icon-only (no "all"/"last" label).
+                            (txt (unless (and (memq scope '(all last))
+                                              (stringp ic) (> (length ic) 0))
+                                   (carriage-doc-state--as-string scope)))
+                            (gap (if (and (stringp ic) (> (length ic) 0)
+                                          (stringp txt) (> (length txt) 0))
                                      (carriage-doc-state--icon-gap)
                                    "")))
-                       (concat ic gap (carriage-doc-state--as-string scope)))
+                       (concat (or ic "") gap (or txt "")))
                      'shadow)))
          (profile-b (when (and profile (not (eq profile nil)))
                       (carriage-doc-state--badge
@@ -720,8 +728,12 @@ Important: use `concat' (not `format') to preserve icon text properties."
   "Return compact summary string (badges/icons) for CARRIAGE_FINGERPRINT plist PL.
 
 Differs from `carriage-doc-state--summary-string' by rendering context flags as
-\"icon + gap + label\" so icons are always visible before Doc/Pat (and others).
-Also includes total request cost (when present) as a single \"22.76₽\" badge."
+icons-only (like the modeline). Labels like \"Doc\"/\"Pat\" are not shown.
+
+Also shows total request cost when present (as the last badge):
+- integer :CAR_COST_TOTAL_U → \"22.76₽\"
+- explicit nil (key present) → \"—\"
+- absent key → omitted (typically before usage/cost upsert)."
   (let* ((imp (carriage-doc-state--important-plist pl))
          (intent (plist-get imp :CAR_INTENT))
          (suite  (plist-get imp :CAR_SUITE))
@@ -734,6 +746,7 @@ Also includes total request cost (when present) as a single \"22.76₽\" badge."
          (ctx-patched (plist-get imp :CAR_CTX_PATCHED))
          (scope (plist-get imp :CAR_DOC_CTX_SCOPE))
          (profile (plist-get imp :CAR_CTX_PROFILE))
+         ;; IMPORTANT: cost keys are not part of important-plist; read them from PL directly.
          (cost-u (and (listp pl) (plist-get pl :CAR_COST_TOTAL_U)))
          (cost-b
           (cond
@@ -767,19 +780,27 @@ Also includes total request cost (when present) as a single \"22.76₽\" badge."
          (ctx-b (string-join
                  (delq nil
                        (list
-                        (carriage-doc-state--ctx-flag-badge-with-label "Doc" ctx-doc 'files)
-                        (carriage-doc-state--ctx-flag-badge-with-label "Gpt" ctx-gptel 'ctx)
-                        (carriage-doc-state--ctx-flag-badge-with-label "Vis" ctx-vis 'visible)
+                        (carriage-doc-state--ctx-flag-badge "Doc" ctx-doc 'files)
+                        (carriage-doc-state--ctx-flag-badge "Gpt" ctx-gptel 'ctx)
+                        (carriage-doc-state--ctx-flag-badge "Vis" ctx-vis 'visible)
                         (when (plist-member imp :CAR_CTX_PATCHED)
-                          (carriage-doc-state--ctx-flag-badge-with-label "Pat" ctx-patched 'patched))))
+                          (carriage-doc-state--ctx-flag-badge "Pat" ctx-patched 'patched))))
                  " "))
          (scope-b (when (and scope (not (eq scope nil)))
                     (carriage-doc-state--badge
-                     (let* ((ic (or (carriage-doc-state--ui-icon 'scope nil) ""))
-                            (gap (if (and (stringp ic) (> (length ic) 0))
+                     (let* ((ic (pcase scope
+                                  ('all  (carriage-doc-state--ui-icon 'scope-all nil))
+                                  ('last (carriage-doc-state--ui-icon 'scope-last nil))
+                                  (_     (carriage-doc-state--ui-icon 'scope nil))))
+                            ;; When scope is all/last and we have an icon, render icon-only (no "all"/"last" label).
+                            (txt (unless (and (memq scope '(all last))
+                                              (stringp ic) (> (length ic) 0))
+                                   (carriage-doc-state--as-string scope)))
+                            (gap (if (and (stringp ic) (> (length ic) 0)
+                                          (stringp txt) (> (length txt) 0))
                                      (carriage-doc-state--icon-gap)
                                    "")))
-                       (concat ic gap (carriage-doc-state--as-string scope)))
+                       (concat (or ic "") gap (or txt "")))
                      'shadow)))
          (profile-b (when (and profile (not (eq profile nil)))
                       (carriage-doc-state--badge
@@ -789,7 +810,7 @@ Also includes total request cost (when present) as a single \"22.76₽\" badge."
                                      "")))
                          (concat ic gap (carriage-doc-state--as-string profile)))
                        'shadow))))
-    (string-join (delq nil (list intent-b suite-b model-b cost-b ctx-b scope-b profile-b)) " ")))
+    (string-join (delq nil (list intent-b suite-b model-b ctx-b scope-b profile-b cost-b)) " ")))
 
 (defun carriage-doc-state--tooltip-string (pl)
   "Return detailed tooltip text for CARRIAGE_STATE plist PL (includes budgets)."

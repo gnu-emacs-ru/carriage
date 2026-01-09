@@ -33,8 +33,7 @@ Transports
 - lisp/transports/carriage-transport.el: centralized stripper removes:
   - #+PROPERTY: CARRIAGE_STATE…
   - #+CARRIAGE_FINGERPRINT: …
-  - #+PROPERTY: CARRIAGE_ITERATION_ID… (legacy)
-  - Inline #+CARRIAGE_ITERATION_ID… (legacy)
+  - Inline #+CARRIAGE_FINGERPRINT… (canonical)
   - #+begin_carriage … #+end_carriage blocks
 
 Send pipeline

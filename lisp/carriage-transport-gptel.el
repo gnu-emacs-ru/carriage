@@ -114,7 +114,7 @@ If MODEL cannot be interned meaningfully, return it unchanged."
 
 (defun carriage--gptel--prompt (source buffer mode)
   "Build prompt string for GPTel from SOURCE and BUFFER in MODE.
-Strips any #+begin_carriage … #+end_carriage blocks from the outgoing text."
+Strips internal Carriage marker lines from the outgoing text."
   (with-current-buffer buffer
     (let* ((raw
             (pcase source

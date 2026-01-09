@@ -666,7 +666,13 @@ Debounced refresh is handled by `carriage-ui--ctx-schedule-refresh`."
       (add-hook 'after-save-hook #'carriage-ui--after-save-refresh nil t)
       (add-hook 'after-revert-hook #'carriage-ui--after-save-refresh nil t))
     ;; Visible-context depends on window layout; refresh on window config changes.
-    (add-hook 'window-configuration-change-hook #'carriage-mode--ctx-window-change nil t)))
+    (add-hook 'window-configuration-change-hook #'carriage-mode--ctx-window-change nil t))
+  ;; Document cost badge: compute asynchronously once on mode enable so existing
+  ;; fingerprints are reflected in the modeline without waiting for a new request.
+  (when (and (boundp 'carriage-ui-modeline-blocks)
+             (memq 'doc-cost carriage-ui-modeline-blocks)
+             (fboundp 'carriage-ui-doc-cost-schedule-refresh))
+    (ignore-errors (carriage-ui-doc-cost-schedule-refresh 0.05))))
 
 (defun carriage-mode--setup-keys-and-panels ()
   "Apply keyspec keymaps, define bindings, and open optional panels."
@@ -1450,10 +1456,8 @@ Deduplicates segments if MODEL already contains provider/backend."
 ;; Per-send fingerprint (inline, near iteration marker)
 
 (defcustom carriage-mode-insert-fingerprint t
-  "When non-nil, Send commands insert an inline fingerprint line right under
-the inline iteration marker:
+  "When non-nil, Send commands insert an inline fingerprint line at the stream origin:
 
-  #+CARRIAGE_ITERATION_ID: <id>
   #+CARRIAGE_FINGERPRINT: (<plist>)
 
 The fingerprint captures only response-shaping and context-shaping parameters
@@ -1735,16 +1739,16 @@ This must never leak into the LLM payload."
     (insert (or text ""))
     (goto-char (point-min))
     (let ((case-fold-search t))
-      ;; Doc-state + iteration id (canonical headers) must never reach the LLM
+      ;; Doc-state (canonical header) must never reach the LLM
       (while (re-search-forward
-              "^[ \t]*#\\+PROPERTY:[ \t]+\\(CARRIAGE_STATE\\|CARRIAGE_ITERATION_ID\\)\\b.*$"
+              "^[ \t]*#\\+PROPERTY:[ \t]+\\(CARRIAGE_STATE\\)\\b.*$"
               nil t)
         (delete-region (line-beginning-position)
                        (min (point-max) (1+ (line-end-position)))))
       ;; Per-send markers (must never reach the LLM)
       (goto-char (point-min))
       (while (re-search-forward
-              "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\|CARRIAGE_ITERATION_ID\\)\\b.*$"
+              "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\)\\b.*$"
               nil t)
         (delete-region (line-beginning-position)
                        (min (point-max) (1+ (line-end-position))))

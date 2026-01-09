@@ -506,6 +506,26 @@ Must be a no-op when `carriage-doc-state-save-on-save' is nil."
        (t t))))
    (t t)))
 
+(defun carriage-doc-state--money-symbol ()
+  "Return currency symbol string for UI rendering (best-effort)."
+  (cond
+   ((and (boundp 'carriage-pricing-currency-symbol)
+         (stringp carriage-pricing-currency-symbol))
+    carriage-pricing-currency-symbol)
+   (t "₽")))
+
+(defun carriage-doc-state--format-money-suffix (amount-u &optional currency-symbol)
+  "Format AMOUNT-U (µ₽ integer) as \"12.34₽\" with half-up kopeck rounding.
+When AMOUNT-U is nil/non-integer, return \"—\"."
+  (if (not (integerp amount-u))
+      "—"
+    (let* ((sym (or (and (stringp currency-symbol) currency-symbol)
+                    (carriage-doc-state--money-symbol)))
+           (kopecks (/ (+ amount-u 5000) 10000)) ;; 1 коп. = 10_000 µ₽, half-up
+           (rub (/ kopecks 100))
+           (kop (% kopecks 100)))
+      (format "%d.%02d%s" rub kop (or sym "")))))
+
 (defun carriage-doc-state--important-plist (pl)
   "Extract a stable \"response/context-shaping\" subset of PL for summary rendering.
 Budgets are intentionally NOT included in the summary subset (they go to tooltip).
@@ -700,7 +720,8 @@ Important: use `concat' (not `format') to preserve icon text properties."
   "Return compact summary string (badges/icons) for CARRIAGE_FINGERPRINT plist PL.
 
 Differs from `carriage-doc-state--summary-string' by rendering context flags as
-\"icon + gap + label\" so icons are always visible before Doc/Pat (and others)."
+\"icon + gap + label\" so icons are always visible before Doc/Pat (and others).
+Also includes total request cost (when present) as a single \"22.76₽\" badge."
   (let* ((imp (carriage-doc-state--important-plist pl))
          (intent (plist-get imp :CAR_INTENT))
          (suite  (plist-get imp :CAR_SUITE))
@@ -713,6 +734,14 @@ Differs from `carriage-doc-state--summary-string' by rendering context flags as
          (ctx-patched (plist-get imp :CAR_CTX_PATCHED))
          (scope (plist-get imp :CAR_DOC_CTX_SCOPE))
          (profile (plist-get imp :CAR_CTX_PROFILE))
+         (cost-u (and (listp pl) (plist-get pl :CAR_COST_TOTAL_U)))
+         (cost-b
+          (cond
+           ((integerp cost-u)
+            (carriage-doc-state--badge (carriage-doc-state--format-money-suffix cost-u) 'shadow))
+           ((and (listp pl) (plist-member pl :CAR_COST_TOTAL_U))
+            (carriage-doc-state--badge "—" 'shadow))
+           (t nil)))
          (intent-ic (pcase intent
                       ('Ask    (carriage-doc-state--ui-icon 'ask "A"))
                       ('Code   (carriage-doc-state--ui-icon 'patch "C"))
@@ -760,7 +789,7 @@ Differs from `carriage-doc-state--summary-string' by rendering context flags as
                                      "")))
                          (concat ic gap (carriage-doc-state--as-string profile)))
                        'shadow))))
-    (string-join (delq nil (list intent-b suite-b model-b ctx-b scope-b profile-b)) " ")))
+    (string-join (delq nil (list intent-b suite-b model-b cost-b ctx-b scope-b profile-b)) " ")))
 
 (defun carriage-doc-state--tooltip-string (pl)
   "Return detailed tooltip text for CARRIAGE_STATE plist PL (includes budgets)."
@@ -1015,8 +1044,11 @@ When minimal mode is enabled for the given KIND, renders only the model badge."
                (intent-b (carriage-doc-state--badge (or intent-ic "-") 'mode-line-emphasis)))
           (string-join (delq nil (list intent-b model-b)) " "))
       ;; Rich badges: state keeps icon-only ctx flags; fingerprint renders icon+label for ctx flags.
+      ;; IMPORTANT: fingerprint summary needs access to pricing keys (e.g. :CAR_COST_TOTAL_U),
+      ;; which are intentionally not part of `carriage-doc-state--important-plist`.
+      ;; Therefore, for fingerprint overlays pass the full PL, not PL2.
       (pcase kind
-        ('fingerprint (carriage-doc-state--summary-string-fingerprint pl2))
+        ('fingerprint (carriage-doc-state--summary-string-fingerprint pl))
         (_            (carriage-doc-state--summary-string pl2))))))
 
 (defun carriage-doc-state--fold--tooltip (raw-line pl kind)
@@ -1038,13 +1070,25 @@ Perf invariant:
          (ctx-vis (carriage-doc-state--bool (plist-get imp :CAR_CTX_VISIBLE)))
          (ctx-patched (carriage-doc-state--bool (plist-get imp :CAR_CTX_PATCHED)))
          (scope (carriage-doc-state--as-string (plist-get imp :CAR_DOC_CTX_SCOPE)))
-         (profile (carriage-doc-state--as-string (plist-get imp :CAR_CTX_PROFILE))))
+         (profile (carriage-doc-state--as-string (plist-get imp :CAR_CTX_PROFILE)))
+         (cost-u (and (eq kind 'CARRIAGE_FINGERPRINT)
+                      (listp pl0)
+                      (plist-get pl0 :CAR_COST_TOTAL_U)))
+         (cost-line
+          (when (eq kind 'CARRIAGE_FINGERPRINT)
+            (cond
+             ((integerp cost-u)
+              (format "Cost: %s" (carriage-doc-state--format-money-suffix cost-u)))
+             ((and (listp pl0) (plist-member pl0 :CAR_COST_TOTAL_U))
+              "Cost: —")
+             (t nil)))))
     (string-join
      (delq nil
            (list
             (format "%s" kind)
             raw
             (format "Model: %s" (carriage-doc-state--llm-display-name backend provider model))
+            cost-line
             (format "Context: doc=%s gptel=%s visible=%s patched=%s"
                     (if ctx-doc "on" "off")
                     (if ctx-gptel "on" "off")

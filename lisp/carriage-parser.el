@@ -30,7 +30,6 @@
 (require 'carriage-utils)
 (require 'carriage-logging)
 (require 'carriage-format-registry)
-(require 'carriage-iteration)
 
 ;; Forward declaration: buffer-local id of the "last iteration".
 ;; Defined as buffer-local in carriage-iteration.el.
@@ -247,8 +246,7 @@ Otherwise, return all patch blocks in the buffer.
 
 If REPO-ROOT is nil, detect via =carriage-project-root' or use =default-directory'."
   (let* ((root (or repo-root (carriage-project-root) default-directory))
-         (id   (or (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id)
-                   (ignore-errors (carriage-iteration-read-id)))))
+         (id   (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id)))
     (carriage-log "collect-last-iteration root=%s id=%s"
                   (or root "<nil>")
                   (and id (substring id 0 (min 8 (length id)))))
@@ -317,58 +315,20 @@ If REPO-ROOT is nil, detect via =carriage-project-root' or use =default-director
 
 (defun carriage-collect-last-iteration-blocks-strict (&optional repo-root)
   "Collect blocks of the last iteration strictly; return nil when no id is present.
-Unlike =carriage-collect-last-iteration-blocks', this function NEVER falls back to
-collecting all blocks in the buffer when the last-iteration id is missing.
 
-Behavior:
-- If an inline marker \"#+CARRIAGE_ITERATION_ID: <id>\" is present, collect all
-  patch blocks AFTER the last such marker line (covers the common case when
-  text properties are lost after reopening a file).
-- Otherwise, fall back to collecting blocks whose begin lines carry the
-  text property 'carriage-iteration-id equal to the current id."
+This strict collector relies only on:
+- buffer-local variable `carriage--last-iteration-id'
+- text property `carriage-iteration-id' on the #+begin_patch line
+
+It NEVER falls back to collecting all blocks in the buffer."
   (let* ((root (or repo-root (carriage-project-root) default-directory))
-         (id   (or (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id)
-                   (ignore-errors (carriage-iteration-read-id)))))
+         (id   (and (boundp 'carriage--last-iteration-id) carriage--last-iteration-id)))
     (carriage-log "collect-last-iteration STRICT root=%s id=%s"
                   (or root "<nil>")
                   (and id (substring id 0 (min 8 (length id)))))
     (unless id
       (carriage-log "no last-iteration id; strict collector returns nil")
       (cl-return-from carriage-collect-last-iteration-blocks-strict nil))
-    ;; 1) Prefer inline marker position: collect blocks after the last marker line.
-    (let* ((case-fold-search t)
-           (rx (format "^[ \t]*#\\+CARRIAGE_ITERATION_ID:[ \t]+%s[ \t]*$"
-                       (regexp-quote (downcase id))))
-           (last-pos nil))
-      (save-excursion
-        (goto-char (point-min))
-        (while (re-search-forward rx nil t)
-          ;; Position after the marker line
-          (setq last-pos (line-end-position))))
-      (when (numberp last-pos)
-        (carriage-log "collect-last-iteration STRICT: using region after inline marker @%d" last-pos)
-        ;; Collect blocks strictly between this marker and the next inline marker (if any).
-        (let* ((end-limit (save-excursion
-                            (goto-char (1+ last-pos))
-                            (when (re-search-forward "^[ \t]*#\\+CARRIAGE_ITERATION_ID:[ \t]+\\([0-9a-fA-F-]+\\)[ \t]*$" nil t)
-                              (line-beginning-position))))
-               (plan (carriage-parse-blocks-in-region last-pos (or end-limit (point-max)) root)))
-          ;; If nothing found (e.g., the marker was inserted late), do not return yet;
-          ;; fall back to other strategies below.
-          (when (and plan (> (length plan) 0))
-            (cl-return-from carriage-collect-last-iteration-blocks-strict plan))))
-      ;; Fallback: if no inline marker with the exact ID is found,
-      ;; use the last inline marker of any ID as the anchor.
-      (let ((any-pos nil))
-        (save-excursion
-          (goto-char (point-min))
-          (while (re-search-forward "^[ \t]*#\\+CARRIAGE_ITERATION_ID:[ \t]+\\([0-9a-fA-F-]+\\)[ \t]*$" nil t)
-            (setq any-pos (line-end-position))))
-        (when (numberp any-pos)
-          (carriage-log "collect-last-iteration STRICT: fallback to last inline marker @%d (any id)" any-pos)
-          (cl-return-from carriage-collect-last-iteration-blocks-strict
-            (carriage-parse-blocks-in-region any-pos (point-max) root)))))
-    ;; 2) Fallback: collect blocks tagged via text property (works within the same session).
     (save-excursion
       (goto-char (point-min))
       (let ((plan '()))
@@ -381,7 +341,9 @@ Behavior:
                        (let ((here (point)))
                          (and (<= here p)
                               (string-prefix-p "#+begin_patch"
-                                               (buffer-substring-no-properties here (min (+ here 13) (line-end-position))))))))
+                                               (buffer-substring-no-properties
+                                                here
+                                                (min (+ here 13) (line-end-position))))))))
                  (prop (and ok (get-text-property line-beg 'carriage-iteration-id))))
             (when ok
               (let* ((body-beg (save-excursion (goto-char line-beg) (forward-line 1) (point)))
@@ -400,7 +362,9 @@ Behavior:
                                           (let ((here (point)))
                                             (and (<= here q)
                                                  (string-prefix-p "#+end_patch"
-                                                                  (buffer-substring-no-properties here (min (+ here 11) (line-end-position)))))))))
+                                                                  (buffer-substring-no-properties
+                                                                   here
+                                                                   (min (+ here 11) (line-end-position)))))))))
                               (when ok2 (setq found (line-beginning-position)))))
                           (unless found
                             (signal (carriage-error-symbol 'SRE_E_UNCLOSED_BLOCK)
@@ -417,7 +381,6 @@ Behavior:
                                                (cons :_beg-marker mb)
                                                (cons :_end-marker me)))))
                     (push it2 plan)))
-
                 (goto-char after)))))
         (nreverse plan)))))
 

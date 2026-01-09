@@ -6,7 +6,7 @@
 
 ;;; Commentary:
 ;; ERT tests for:
-;; - Writing provenance into #+begin_carriage and reading it back via carriage-doc-state.
+;; - Writing provenance via doc-state (#+PROPERTY: CARRIAGE_STATE).
 ;; - Inserting begin_context blocks with given paths.
 
 ;;; Code:

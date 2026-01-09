@@ -860,44 +860,26 @@ WHERE is 'system or 'user (affects only label string)."
 (defun carriage-context--count-include-flags (buf)
   "Return cons of inclusion toggles for COUNT: (INC-GPT . INC-DOC).
 
-Compatibility rules:
-- Prefer new variables when they are bound; legacy variables are used only when
-  the corresponding new variable is unbound.
-- Defaults: doc ON, gptel OFF (align with `carriage-mode-include-gptel-context' default)."
+Legacy context variables are no longer supported.
+Defaults: doc ON, gptel OFF."
   (with-current-buffer buf
-    (let* ((have-gpt-new (boundp 'carriage-mode-include-gptel-context))
-           (have-gpt-old (boundp 'carriage-mode-use-context))
-           (have-doc-new (boundp 'carriage-mode-include-doc-context))
-           (have-doc-old (boundp 'carriage-mode-context-attach-files))
-           (inc-gpt
-            (cond
-             (have-gpt-new (buffer-local-value 'carriage-mode-include-gptel-context buf))
-             (have-gpt-old (buffer-local-value 'carriage-mode-use-context buf))
-             (t nil)))
-           (inc-doc
-            (cond
-             (have-doc-new (buffer-local-value 'carriage-mode-include-doc-context buf))
-             (have-doc-old (buffer-local-value 'carriage-mode-context-attach-files buf))
-             (t t))))
+    (let* ((inc-gpt (and (boundp 'carriage-mode-include-gptel-context)
+                         (buffer-local-value 'carriage-mode-include-gptel-context buf)))
+           (inc-doc (if (boundp 'carriage-mode-include-doc-context)
+                        (buffer-local-value 'carriage-mode-include-doc-context buf)
+                      t)))
       (cons inc-gpt inc-doc))))
 
 (defun carriage-context--count-root+toggles (buf)
   "Return plist with root and inclusion toggles for BUF: (:root R :inc-gpt B :inc-doc B :inc-vis B :inc-patched B)."
   (let* ((root (carriage-context--project-root))
          (inc-gpt (with-current-buffer buf
-                    (cond
-                     ((boundp 'carriage-mode-include-gptel-context)
-                      (buffer-local-value 'carriage-mode-include-gptel-context buf))
-                     ((boundp 'carriage-mode-use-context)
-                      (buffer-local-value 'carriage-mode-use-context buf))
-                     (t nil))))
+                    (and (boundp 'carriage-mode-include-gptel-context)
+                         (buffer-local-value 'carriage-mode-include-gptel-context buf))))
          (inc-doc (with-current-buffer buf
-                    (cond
-                     ((boundp 'carriage-mode-include-doc-context)
-                      (buffer-local-value 'carriage-mode-include-doc-context buf))
-                     ((boundp 'carriage-mode-context-attach-files)
-                      (buffer-local-value 'carriage-mode-context-attach-files buf))
-                     (t t))))
+                    (if (boundp 'carriage-mode-include-doc-context)
+                        (buffer-local-value 'carriage-mode-include-doc-context buf)
+                      t)))
          (inc-vis (with-current-buffer buf
                     (and (boundp 'carriage-mode-include-visible-context)
                          (buffer-local-value 'carriage-mode-include-visible-context buf))))

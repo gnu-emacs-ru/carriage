@@ -250,6 +250,31 @@ Plist keys:
   (or carriage-ui--doc-cost-cache
       (list :known-total-u 0 :known-count 0 :unknown-count 0 :ts nil)))
 
+(defun carriage-ui--money-symbol ()
+  "Return currency symbol string for UI rendering (best-effort)."
+  (cond
+   ((and (boundp 'carriage-pricing-currency-symbol)
+         (stringp carriage-pricing-currency-symbol))
+    carriage-pricing-currency-symbol)
+   (t "₽")))
+
+(defun carriage-ui--format-money-suffix (amount-u &optional currency-symbol)
+  "Format AMOUNT-U (µ₽ integer) as \"12.34₽\" with half-up kopeck rounding.
+When AMOUNT-U is nil/non-integer, return \"—\"."
+  (if (not (integerp amount-u))
+      "—"
+    (let* ((sym (or (and (stringp currency-symbol) currency-symbol)
+                    (carriage-ui--money-symbol)))
+           (kopecks (/ (+ amount-u 5000) 10000)) ;; 1 коп. = 10_000 µ₽, half-up
+           (rub (/ kopecks 100))
+           (kop (% kopecks 100)))
+      (format "%d.%02d%s" rub kop (or sym "")))))
+
+(defun carriage-ui-doc-cost-refresh (&optional _event)
+  "Interactive wrapper: refresh doc-cost now for current buffer."
+  (interactive "e")
+  (ignore-errors (carriage-ui-doc-cost-refresh-now (current-buffer))))
+
 (defun carriage-ui-doc-cost-refresh-now (&optional buffer)
   "Recompute and cache document cost for BUFFER (or current buffer).
 May scan buffer text; must not be called from redisplay."
@@ -517,7 +542,6 @@ Disabling this eliminates periodic redisplay work during active phases."
     intent
     state
     apply-status
-    doc-cost
     abort
     all
     context
@@ -528,6 +552,7 @@ Disabling this eliminates periodic redisplay work during active phases."
     doc-scope-all
     doc-scope-last
     model
+    doc-cost
     ;; report
     ;; patch
     ;; branch
@@ -2040,6 +2065,7 @@ Uses pulse.el when available, otherwise temporary overlays."
          (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
          (ctx-ver (and (memq 'context blocks) (or carriage-ui--ctx-badge-version 0)))
          (apply-ver (and (memq 'apply-status blocks) (or carriage-ui--apply-badge-version 0)))
+         (doc-cost-ver (and (memq 'doc-cost blocks) (or carriage-ui--doc-cost-version 0)))
          ;; Avoid scanning buffers during redisplay: patch count must come from cache,
          ;; maintained asynchronously by `carriage-ui--patch-refresh-now'.
          (patch-count (and (memq 'patch blocks)
@@ -2056,7 +2082,7 @@ Uses pulse.el when available, otherwise temporary overlays."
          (abortp (and (boundp 'carriage--abort-handler) carriage--abort-handler)))
     (list uicons
           state spin
-          ctx-ver apply-ver
+          ctx-ver apply-ver doc-cost-ver
           patch-count has-last abortp blocks
           (and (boundp 'carriage-mode-intent)  carriage-mode-intent)
           (and (boundp 'carriage-mode-suite)   carriage-mode-suite)
@@ -2561,6 +2587,28 @@ Performance:
     (call-interactively 'carriage-select-doc-context-last))
   (carriage-ui--ctx-invalidate-and-refresh))
 
+(defun carriage-ui--ml-seg-doc-cost ()
+  "Build document total cost segment from cached doc-cost snapshot (O(1)).
+
+Label format:
+- \"Doc: 123.45₽\" (sum of known costs)
+If cache is empty/uninitialized, schedule an async refresh and show a placeholder."
+  (let* ((snap (carriage-ui-doc-cost-get))
+         (total-u (and (listp snap) (plist-get snap :known-total-u)))
+         (known (and (listp snap) (plist-get snap :known-count)))
+         (unknown (and (listp snap) (plist-get snap :unknown-count)))
+         (ts (and (listp snap) (plist-get snap :ts)))
+         ;; Trigger initial compute (async) when cache hasn't been filled yet.
+         (_ (when (and (not ts)
+                       (fboundp 'carriage-ui-doc-cost-schedule-refresh)
+                       (not (timerp carriage-ui--doc-cost-refresh-timer)))
+              (ignore-errors (carriage-ui-doc-cost-schedule-refresh 0.05))))
+         (money (carriage-ui--format-money-suffix total-u))
+         (lbl (format "Doc: %s" money))
+         (tip (format "Document cost (known only)\nknown=%s unknown=%s\nClick to refresh"
+                      (or known 0) (or unknown 0))))
+    (carriage-ui--ml-button lbl #'carriage-ui-doc-cost-refresh tip)))
+
 (defun carriage-ui--ml-render-block (blk)
   "Dispatch builder for a single modeline block BLK symbol."
   (pcase blk
@@ -2571,6 +2619,7 @@ Performance:
     ('intent        (carriage-ui--ml-seg-intent))
     ('state         (carriage-ui--ml-seg-state))
     ('apply-status  (carriage-ui--ml-seg-apply-status))
+    ('doc-cost      (carriage-ui--ml-seg-doc-cost))
     ('context       (carriage-ui--ml-seg-context))
     ('patch         (carriage-ui--ml-seg-patch))
     ;; 'dry removed
@@ -3448,7 +3497,7 @@ a single delayed run to honor `carriage-ui-headerline-debounce-ms'."
 ;; Integrated guards and cursor policy for inline ID and streaming cursor behavior.
 
 (defvar-local carriage--inline-id-inserted nil
-  "Non-nil when the inline CARRIAGE_ITERATION_ID has already been inserted in this buffer for the current request.")
+  "Non-nil when the inline per-request marker has already been inserted in this buffer for the current request.")
 
 (defvar-local carriage--fingerprint-inserted nil
   "Non-nil when the per-send CARRIAGE_FINGERPRINT line has already been inserted for the current request.")

@@ -94,7 +94,7 @@
                "#+title: T\n"
                "#+PROPERTY: CARRIAGE_STATE (:CAR_MODE t :CAR_INTENT Ask)\n"
                "#+CARRIAGE_FINGERPRINT: (:CAR_INTENT Code :CAR_MODEL gpt-4o-mini)\n"
-               "#+begin_carriage\ninternal\n#+end_carriage\n"
+               ""
                "* Note\nText\n"))
          (stripped (carriage-transport--strip-internal-lines raw)))
     (should (stringp stripped))

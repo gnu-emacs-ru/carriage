@@ -142,7 +142,7 @@ FRAG is STRING or function (lambda (ctx) STRING)."
                  "- Header must include :version \"1\" and only keys defined by the selected operation."
                  "- Paths must be relative to repo root. Use :file (not :path) where applicable."
                  "- For create: no delimiter markers are used; the file content is the raw body between begin/end."
-                 "- Do NOT print any CARRIAGE_ITERATION_ID markers; the tool inserts them."
+                 "- Do NOT print any internal CARRIAGE_* marker lines; the tool inserts them."
                  "- Do NOT emit stray '#+end' lines; close blocks only with an exact '#+end_patch'."
                  "- No base64 payloads; the tool will handle fallbacks itself.")))
     (when (memq 'patch ops)

@@ -90,7 +90,7 @@ Grammar/Schema
   - list of plists {:id symbol :label string :reason string :weight number}
 - Assist Context-Delta (schema):
   - plist {:add (list of strings) :remove (list of strings) :why string}
-- Carriage state fields (written under #+begin_carriage):
+- Carriage state fields (written under #+PROPERTY: CARRIAGE_STATE):
   - CAR_TEMPLATE_ID string, CAR_TEMPLATE_VER string
   - CAR_CONTEXT_PROFILE "P1"|"P3"
   - CAR_INHERITED "BEGIN"|"FLAGS"|"BOTH"|"NONE"

@@ -441,7 +441,7 @@ Behavior:
             (insert block "\n")))))))
 
 (defun carriage-task--write-carriage-provenance (buf template-id template-ver profile inherited)
-  "Write a fresh #+begin_carriage block with provenance into BUF, replacing an existing one if found."
+  "Write provenance into BUF (stored via document state; legacy begin_carriage blocks are not used)."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (save-excursion

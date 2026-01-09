@@ -46,7 +46,7 @@ Phase 2 — Branching transient, profiles, inheritance (week 2)
   - carriage-task-create-from-template TEMPLATE-ID OPTS
   - begin_context insertion by profile (P1 default; P3 opt-in)
   - Dedup inheritance: merge parent begin_context paths uniquely; annotate “inherited N paths”
-  - Write CAR_TEMPLATE_ID/VER, CAR_CONTEXT_PROFILE, CAR_INHERITED in #+begin_carriage
+  - Write CAR_TEMPLATE_ID/VER, CAR_CONTEXT_PROFILE, CAR_INHERITED into #+PROPERTY: CARRIAGE_STATE
 - lisp/carriage-ui.el
   - Transient: Template, Profile (P1/P3), Inheritance toggles
   - Badge [Ctx:N] with tooltip; overflow warnings; align with spec/ui-v2

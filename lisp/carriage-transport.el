@@ -313,28 +313,20 @@ Contract:
 
 Strips:
 - #+begin_carriage … #+end_carriage blocks
-- Org property headers for CARRIAGE_STATE / CARRIAGE_ITERATION_ID / CARRIAGE_FINGERPRINT
-- Inline CARRIAGE_FINGERPRINT / CARRIAGE_ITERATION_ID lines"
+- Org property headers for CARRIAGE_STATE / CARRIAGE_FINGERPRINT
+- Inline CARRIAGE_FINGERPRINT lines"
   (with-temp-buffer
     (insert (or text ""))
     (goto-char (point-min))
     (let ((case-fold-search t))
-      ;; Legacy/state blocks
-      (while (re-search-forward "^[ \t]*#\\+begin_carriage\\b" nil t)
-        (let ((beg (match-beginning 0)))
-          (if (re-search-forward "^[ \t]*#\\+end_carriage\\b" nil t)
-              (let ((end (line-end-position)))
-                (delete-region beg end)
-                (when (looking-at "\n") (delete-char 1)))
-            (delete-region beg (point-max)))))
       ;; Doc-state / fingerprint / iteration in Org property headers
       (goto-char (point-min))
-      (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+\\(CARRIAGE_STATE\\|CARRIAGE_ITERATION_ID\\|CARRIAGE_FINGERPRINT\\)\\b.*$" nil t)
+      (while (re-search-forward "^[ \t]*#\\+PROPERTY:[ \t]+\\(CARRIAGE_STATE\\|CARRIAGE_FINGERPRINT\\)\\b.*$" nil t)
         (delete-region (line-beginning-position)
                        (min (point-max) (1+ (line-end-position)))))
       ;; Per-send inline fingerprint/iteration
       (goto-char (point-min))
-      (while (re-search-forward "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\|CARRIAGE_ITERATION_ID\\)\\b.*$" nil t)
+      (while (re-search-forward "^[ \t]*#\\+\\(CARRIAGE_FINGERPRINT\\)\\b.*$" nil t)
         (delete-region (line-beginning-position)
                        (min (point-max) (1+ (line-end-position)))))
 

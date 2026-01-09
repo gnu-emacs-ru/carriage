@@ -32,7 +32,6 @@
 (require 'carriage-format-registry)
 
 ;; Forward declaration: buffer-local id of the "last iteration".
-;; Defined as buffer-local in carriage-iteration.el.
 (defvar carriage--last-iteration-id nil
   "Identifier of the last iteration in the current buffer (if any).")
 

@@ -31,7 +31,6 @@
 (require 'carriage-parser)
 (require 'carriage-apply)
 (require 'carriage-report)
-(require 'carriage-iteration)
 (require 'carriage-llm-registry)
 (require 'carriage-ui)
 (require 'carriage-suite)
@@ -583,20 +582,21 @@ Fallback:
           (cons construct ml)))))))
 
 (defun carriage-mode--modeline-ensure-once (&optional buffer)
-  "Ensure Carriage modeline construct is present in BUFFER's `mode-line-format'.
+  "Ensure Carriage modeline fully replaces BUFFER's `mode-line-format'.
 
-This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
+This is intentionally a one-shot, lightweight helper (no periodic watchdogs).
+
+Policy:
+- In carriage-mode buffers, Carriage modeline must be the ONLY mode-line.
+- We still save/restore the previous `mode-line-format' on enable/disable."
   (with-current-buffer (or buffer (current-buffer))
     (when (and (bound-and-true-p carriage-mode)
                (boundp 'carriage-mode-show-mode-line-ui)
                carriage-mode-show-mode-line-ui)
       (unless carriage--mode-modeline-construct
         (setq carriage--mode-modeline-construct '(:eval (carriage-ui--modeline))))
-      (let* ((ml (carriage-mode--modeline--as-list mode-line-format)))
-        (unless (memq carriage--mode-modeline-construct ml)
-          (setq-local mode-line-format
-                      (carriage-mode--modeline--insert-visible
-                       ml carriage--mode-modeline-construct))))
+      ;; Replace mode-line completely (do not append/insert into existing global mode-line).
+      (setq-local mode-line-format (list carriage--mode-modeline-construct))
       (force-mode-line-update t))))
 
 (defun carriage-mode--install-headerline ()
@@ -608,23 +608,18 @@ This is intentionally a one-shot, lightweight helper (no periodic watchdogs)."
     (add-hook 'window-scroll-functions #'carriage-ui--headerline-window-scroll nil t)))
 
 (defun carriage-mode--install-modeline ()
-  "Insert Carriage segment into the mode-line (buffer-local) and save snapshot."
-  ;; Minimal & safe policy:
-  ;; - If mode-line was disabled (mode-line-format=nil), show it for this buffer.
-  ;; - Insert Carriage segment at a likely-visible anchor (never blindly append to tail).
-  ;; - Save original mode-line-format and restore it on disable.
+  "Replace `mode-line-format' with Carriage modeline (buffer-local) and save snapshot.
+
+Policy (requested UX):
+- In carriage-mode buffers, Carriage modeline must *fully replace* the existing mode-line.
+- The previous `mode-line-format' is saved and restored on mode disable."
   (unless carriage--mode-prev-mode-line-format-saved
     (setq carriage--mode-prev-mode-line-format mode-line-format
           carriage--mode-prev-mode-line-format-was-local (local-variable-p 'mode-line-format)
           carriage--mode-prev-mode-line-format-saved t))
-  (when (null mode-line-format)
-    (setq-local mode-line-format (default-value 'mode-line-format)))
   (setq carriage--mode-modeline-construct '(:eval (carriage-ui--modeline)))
-  (let* ((ml (carriage-mode--modeline--as-list mode-line-format)))
-    (unless (memq carriage--mode-modeline-construct ml)
-      (setq-local mode-line-format
-                  (carriage-mode--modeline--insert-visible
-                   ml carriage--mode-modeline-construct))))
+  ;; Replace mode-line completely (do not append/insert into existing global mode-line).
+  (setq-local mode-line-format (list carriage--mode-modeline-construct))
   (force-mode-line-update))
 
 (defun carriage-mode--ctx-window-change ()

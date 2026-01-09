@@ -154,6 +154,19 @@ Side-effect-only; never alters REPORT (REQ-apply-010)."
                                        (line-beginning-position))))
                             (when (< beg end)
                               (delete-region beg end))))
+                        ;; Fold applied patch block using Org folding (like reasoning), even if
+                        ;; carriage-patch-fold overlays are disabled.
+                        (ignore-errors
+                          (when (derived-mode-p 'org-mode)
+                            (require 'org nil t)
+                            (save-excursion
+                              (goto-char (marker-position mb))
+                              (cond
+                               ((fboundp 'org-fold-hide-drawer-or-block)
+                                (org-fold-hide-drawer-or-block t))
+                               ((fboundp 'org-hide-block-toggle)
+                                (org-hide-block-toggle t))))))
+
                         ;; Immediately enable+refresh patch-fold overlays (hide applied content)
                         (when (and (boundp 'carriage-mode-hide-applied-patches)
                                    carriage-mode-hide-applied-patches

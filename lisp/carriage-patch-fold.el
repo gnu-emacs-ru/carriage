@@ -107,6 +107,27 @@ Plist keys:
           (org-hide-block-toggle nil))
          (t nil))))))
 
+(defun carriage-patch-fold--org-suppress-placeholders (beg end)
+  "Best-effort: keep Org folding but suppress Org's own ellipsis/placeholder overlays.
+
+When we fold applied patches we want *one* visible placeholder (Carriage's overlay).
+Org folding may also add its own ellipsis via overlay `before-string'/`display'.
+This function removes those presentation strings while keeping invisibility."
+  (when (and (numberp beg) (numberp end) (< beg end)
+             (derived-mode-p 'org-mode))
+    (ignore-errors
+      (dolist (ov (overlays-in beg end))
+        (when (overlayp ov)
+          (let ((inv (overlay-get ov 'invisible))
+                (cat (overlay-get ov 'category)))
+            (when (or (eq inv 'org-fold)
+                      (eq inv 'org-hide-block)
+                      (eq cat 'org-fold)
+                      (eq cat 'org-hide-block))
+              (overlay-put ov 'before-string nil)
+              (overlay-put ov 'after-string nil)
+              (overlay-put ov 'display nil))))))))
+
 (defun carriage-patch-fold--hover-enter (ov)
   "Enter hover-mode for applied patch overlay OV: remove placeholder and use org-fold."
   (when (overlayp ov)
@@ -234,6 +255,13 @@ Policy:
                   (push (list :beg (car rg) :end (cdr rg) :plist pl) acc))))))))
     (nreverse acc)))
 
+(defun carriage-patch-fold--toggle-keymap ()
+  "Return keymap for toggling applied-patch visibility with TAB."
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "TAB") #'carriage-patch-fold-toggle-at)
+    (define-key map [tab] #'carriage-patch-fold-toggle-at)
+    map))
+
 (defun carriage-patch-fold--placeholder (pl)
   "Build placeholder string from header PL."
   (let* ((tick (if (display-graphic-p) "✓" "OK"))
@@ -243,9 +271,7 @@ Policy:
                    "Applied"))
          (txt (format "%s %s — %s" tick path desc))
          (s (propertize txt 'face 'carriage-patch-fold-placeholder-face)))
-    (let ((map (make-sparse-keymap)))
-      (define-key map (kbd "TAB") #'carriage-patch-fold-toggle-at)
-      (define-key map [tab] #'carriage-patch-fold-toggle-at)
+    (let ((map (carriage-patch-fold--toggle-keymap)))
       (add-text-properties 0 (length s)
                            (list 'local-map map
                                  'help-echo "Toggle visibility (TAB)")
@@ -291,11 +317,15 @@ to guarantee a single placeholder per applied patch block."
 (defun carriage-patch-fold--refresh-now ()
   "Rescan buffer and (re)create overlays for applied patches.
 
+Goal: applied patch blocks should be BOTH:
+- folded by Org (org-fold), like reasoning blocks, so Org visibility state is consistent;
+- hidden by Carriage's placeholder overlay for compact display.
+
 Avoid duplicate placeholders:
 - When hover-mode is active for a block, do NOT recreate the placeholder overlay
   for that same block (otherwise we get: placeholder overlay + org-fold ellipsis).
-- Before creating a placeholder overlay for other blocks, best-effort remove any
-  org-fold at their begin line."
+- When we fold with org-fold, suppress Org's own ellipsis presentation so the
+  only visible placeholder is Carriage's overlay."
   (carriage-patch-fold--clear-overlays)
   (when (derived-mode-p 'org-mode)
     (let* ((hover-beg (and (listp carriage-patch-fold--hover-active)
@@ -306,7 +336,10 @@ Avoid duplicate placeholders:
               (pl  (plist-get cell :plist)))
           (when (and (numberp beg) (numberp end) (< beg end))
             (unless (and (numberp hover-beg) (= beg hover-beg))
-              (carriage-patch-fold--org-show-at beg)
+              ;; Keep the block folded in Org (like reasoning), even though we also
+              ;; hide the full block via our own overlay placeholder.
+              (carriage-patch-fold--org-hide-at beg)
+              (carriage-patch-fold--org-suppress-placeholders beg end)
               (carriage-patch-fold--make beg end pl))))))))
 
 (defun carriage-patch-fold--schedule-refresh (&optional delay)

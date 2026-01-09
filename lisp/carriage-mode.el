@@ -1011,17 +1011,175 @@ Choose a visible face for your theme; 'shadow can be too dim."
   "Buffer-local origin marker set at request time; first chunk will use it.")
 
 ;; Streaming performance: coalesce small chunks into a single insert using a per-buffer flush timer.
+
+(defcustom carriage-stream-flush-interval 0.03
+  "Interval (seconds) to coalesce incoming stream chunks before inserting into the buffer.
+
+Smaller values make streaming look more real-time but increase buffer edit frequency.
+Larger values reduce overhead and make streaming smoother under load."
+  :type 'number
+  :group 'carriage)
+
+(defcustom carriage-stream-flush-bytes-threshold 8192
+  "Flush pending stream queue early when accumulated bytes reach this threshold.
+Set to nil to disable early flush by size."
+  :type '(choice (const :tag "Disabled" nil) integer)
+  :group 'carriage)
+
+(defcustom carriage-stream-redisplay-interval 0.05
+  "Minimum seconds between forced redisplay calls triggered by streaming flush.
+
+Goal: make streamed text visible even without user input (no keypress), including
+when the buffer is visible but not selected."
+  :type 'number
+  :group 'carriage)
+
 (defvar-local carriage--stream-pending-events nil
-  "Pending streamed events as a reversed list of (TYPE . STRING) to be flushed into the buffer.
+  "Pending streamed events as a reversed list of (TYPE . STRING).
 
 TYPE is either 'text or 'reasoning.
-We coalesce events to avoid doing expensive buffer modifications and redisplay per chunk.")
+The queue is flushed by a timer to reduce buffer modification overhead.")
+
+(defvar-local carriage--stream-pending-bytes 0
+  "Approximate total bytes of enqueued streamed chunks waiting to be flushed.")
 
 (defvar-local carriage--stream-flush-timer nil
   "Timer object for scheduled streaming flush in this buffer.")
 
 (defvar-local carriage--stream-last-redisplay 0.0
   "Last time (float seconds) when we forced redisplay due to a streaming flush in this buffer.")
+
+(defun carriage--stream--normalize-type (type)
+  "Normalize TYPE to either 'text or 'reasoning."
+  (pcase type
+    ((or 'reasoning :reasoning) 'reasoning)
+    (_ 'text)))
+
+(defun carriage--stream--coalesce-events (events)
+  "Coalesce EVENTS (a list of (TYPE . STRING)) into a minimal list.
+
+Adjacent events with the same TYPE are merged to reduce buffer operations."
+  (let ((acc nil)
+        (cur-type nil)
+        (cur-parts nil))
+    (dolist (ev events)
+      (let ((ty (car ev))
+            (s  (cdr ev)))
+        (if (eq ty cur-type)
+            (push s cur-parts)
+          (when cur-type
+            (push (cons cur-type (apply #'concat (nreverse cur-parts))) acc))
+          (setq cur-type ty)
+          (setq cur-parts (list s)))))
+    (when cur-type
+      (push (cons cur-type (apply #'concat (nreverse cur-parts))) acc))
+    (nreverse acc)))
+
+(defun carriage--stream--buffer-visible-p (&optional buffer)
+  "Return non-nil when BUFFER (or current buffer) is visible in any window."
+  (let ((buf (or buffer (current-buffer))))
+    (and (buffer-live-p buf)
+         (get-buffer-window-list buf t t))))
+
+(defun carriage--stream--maybe-redisplay (&optional buffer)
+  "Force a throttled redisplay when BUFFER is visible in any window."
+  (let* ((buf (or buffer (current-buffer)))
+         (wins (carriage--stream--buffer-visible-p buf))
+         (now (float-time))
+         (min (max 0.0 (or carriage-stream-redisplay-interval 0.05)))
+         (last (or (and (boundp 'carriage--stream-last-redisplay)
+                        (buffer-local-value 'carriage--stream-last-redisplay buf))
+                   0.0)))
+    (when (and wins
+               (not (bound-and-true-p noninteractive))
+               (>= (- now last) min))
+      (with-current-buffer buf
+        (setq carriage--stream-last-redisplay now))
+      (redisplay t))))
+
+(defun carriage--stream--flush-now (&optional buffer)
+  "Flush any pending streamed events into BUFFER (or current buffer)."
+  (with-current-buffer (or buffer (current-buffer))
+    (when (timerp carriage--stream-flush-timer)
+      (cancel-timer carriage--stream-flush-timer))
+    (setq carriage--stream-flush-timer nil)
+    (let* ((pending (nreverse (or carriage--stream-pending-events '()))))
+      (setq carriage--stream-pending-events nil)
+      (setq carriage--stream-pending-bytes 0)
+      (when pending
+        (carriage--undo-group-start)
+        (let ((events (carriage--stream--coalesce-events pending)))
+          (dolist (ev events)
+            (pcase (car ev)
+              ('reasoning
+               (when (eq carriage-mode-include-reasoning 'block)
+                 (carriage-begin-reasoning)
+                 (let ((inhibit-read-only t)
+                       (s (or (cdr ev) "")))
+                   (save-excursion
+                     (let* ((tail (or carriage--reasoning-tail-marker carriage--stream-end-marker))
+                            (tailpos (marker-position tail)))
+                       (goto-char tailpos)
+                       (insert s)
+                       (let ((newpos (point)))
+                         ;; Advance tail; if end==tail, advance end as well
+                         (when (markerp carriage--reasoning-tail-marker)
+                           (set-marker carriage--reasoning-tail-marker newpos (current-buffer)))
+                         (when (and (markerp carriage--stream-end-marker)
+                                    (= (marker-position carriage--stream-end-marker) tailpos))
+                           (set-marker carriage--stream-end-marker newpos (current-buffer)))))))))
+              (_
+               (carriage--stream-insert-at-end (or (cdr ev) ""))))))
+        ;; Move preloader overlay to stream tail (single update per flush)
+        (when (and (boundp 'carriage--preloader-overlay)
+                   (overlayp carriage--preloader-overlay)
+                   (markerp carriage--stream-end-marker))
+          (let ((endpos (marker-position carriage--stream-end-marker)))
+            (move-overlay carriage--preloader-overlay endpos endpos)
+            (when (and (boundp 'carriage-mode-preloader-follow-point)
+                       carriage-mode-preloader-follow-point)
+              (goto-char endpos))))
+        ;; Ensure visible output even without user input (throttled)
+        (carriage--stream--maybe-redisplay (current-buffer))
+        t))))
+
+(defun carriage-stream-flush-now (&optional buffer)
+  "Public: flush pending streamed chunks into BUFFER (or current buffer).
+Best-effort; never signals."
+  (interactive)
+  (ignore-errors (carriage--stream--flush-now buffer)))
+
+(defun carriage--stream--schedule-flush (&optional delay)
+  "Schedule a one-shot flush of pending stream events after DELAY seconds."
+  (unless (timerp carriage--stream-flush-timer)
+    (let* ((buf (current-buffer))
+           (d (max 0.0 (float (or delay (or carriage-stream-flush-interval 0.03))))))
+      (setq carriage--stream-flush-timer
+            (run-at-time
+             d nil
+             (lambda ()
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (setq carriage--stream-flush-timer nil)
+                   (ignore-errors (carriage--stream--flush-now buf))))))))))
+
+(defun carriage--stream-enqueue (type s)
+  "Enqueue streamed chunk S of TYPE ('text or 'reasoning) and schedule flush."
+  (let* ((ty (carriage--stream--normalize-type type))
+         (str (or s "")))
+    (push (cons ty str) carriage--stream-pending-events)
+    (setq carriage--stream-pending-bytes
+          (+ (or carriage--stream-pending-bytes 0) (string-bytes str)))
+    ;; Early flush by size threshold (schedule ASAP; do not flush inline by default).
+    (when (and carriage-stream-flush-bytes-threshold
+               (numberp carriage-stream-flush-bytes-threshold)
+               (>= carriage--stream-pending-bytes carriage-stream-flush-bytes-threshold))
+      (when (timerp carriage--stream-flush-timer)
+        (cancel-timer carriage--stream-flush-timer)
+        (setq carriage--stream-flush-timer nil))
+      (carriage--stream--schedule-flush 0.0))
+    ;; Ensure we have at least one flush scheduled.
+    (carriage--stream--schedule-flush)))
 
 (defvar-local carriage--reasoning-open nil
   "Non-nil when a #+begin_reasoning block is currently open for streaming.")

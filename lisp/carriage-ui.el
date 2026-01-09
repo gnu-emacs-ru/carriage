@@ -540,6 +540,7 @@ Disabling this eliminates periodic redisplay work during active phases."
 (defconst carriage-ui--modeline-default-blocks
   '(
     intent
+    model
     state
     apply-status
     abort
@@ -551,7 +552,6 @@ Disabling this eliminates periodic redisplay work during active phases."
     toggle-files
     doc-scope-all
     doc-scope-last
-    model
     doc-cost
     ;; report
     ;; patch
@@ -1343,29 +1343,29 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                  ('scope-all (when (fboundp 'all-the-icons-material)
                                (all-the-icons-material "layers"
                                                        :height carriage-mode-icon-height
-                                                       :v-adjust carriage-mode-icon-v-adjust
+                                                       :v-adjust (- carriage-mode-icon-v-adjust 0.1)
                                                        :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-yellow-face)))))
                  ('scope-all-off (when (fboundp 'all-the-icons-material)
                                    (all-the-icons-material "layers"
                                                            :height carriage-mode-icon-height
-                                                           :v-adjust carriage-mode-icon-v-adjust
+                                                           :v-adjust (- carriage-mode-icon-v-adjust 0.1)
                                                            :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-muted-face)))))
                  ('scope-last (when (fboundp 'all-the-icons-material)
                                 ;; NOTE: avoid glyphs that embed dots/digits (e.g. filter_1/looks_one).
                                 ;; Use a clean arrow for "last/nearest" scope marker.
                                 (all-the-icons-material "filter_1"
                                                         :height carriage-mode-icon-height
-                                                        :v-adjust carriage-mode-icon-v-adjust
+                                                        :v-adjust (- carriage-mode-icon-v-adjust 0.1)
                                                         :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-yellow-face)))))
                  ('scope-last-off (when (fboundp 'all-the-icons-material)
                                     (all-the-icons-material "filter_1"
                                                             :height carriage-mode-icon-height
-                                                            :v-adjust (- carriage-mode-icon-v-adjust 0.2)
+                                                            :v-adjust (- carriage-mode-icon-v-adjust 0.1)
                                                             :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-muted-face)))))
                  ('scope  (when (fboundp 'all-the-icons-material)
                             (all-the-icons-material "layers"
                                                     :height carriage-mode-icon-height
-                                                    :v-adjust (- carriage-mode-icon-v-adjust 0.2)
+                                                    :v-adjust (- carriage-mode-icon-v-adjust 0.1)
                                                     :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-yellow-face)))))
                  ('profile (when (fboundp 'all-the-icons-material)
                              (all-the-icons-material "account_tree"

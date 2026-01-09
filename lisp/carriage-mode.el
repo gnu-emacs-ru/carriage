@@ -1551,8 +1551,11 @@ so preloader/streaming starts strictly below the fingerprint line."
             (delete-region (line-beginning-position)
                            (min (point-max) (1+ (line-end-position))))
             (goto-char (line-beginning-position))))
-        (insert line)
-        (setq newpos (point)))
+        (let ((beg (point)))
+          (insert line)
+          ;; Marker for two-phase fingerprint upsert (usage+cost) on completion.
+          (setq carriage--fingerprint-line-marker (copy-marker beg t))
+          (setq newpos (point))))
       (when (numberp newpos)
         ;; Stream (and preloader) must start strictly after the fingerprint.
         (setq carriage--stream-origin-marker (copy-marker newpos t))
@@ -1584,8 +1587,8 @@ so preloader/streaming starts strictly below the fingerprint line."
 
 (defun carriage-fingerprint--find-line-marker ()
   "Return a marker pointing at a fingerprint line suitable for upsert, or nil.
-Prefers `carriage--fingerprint-line-marker' when live; otherwise finds the first
-#+CARRIAGE_FINGERPRINT line in the buffer."
+Prefers `carriage--fingerprint-line-marker' when live; otherwise finds the LAST
+#+CARRIAGE_FINGERPRINT line in the buffer (to match the most recent request)."
   (cond
    ((and (markerp carriage--fingerprint-line-marker)
          (buffer-live-p (marker-buffer carriage--fingerprint-line-marker)))
@@ -1593,9 +1596,12 @@ Prefers `carriage--fingerprint-line-marker' when live; otherwise finds the first
    (t
     (save-excursion
       (goto-char (point-min))
-      (let ((case-fold-search t))
-        (when (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:" nil t)
-          (copy-marker (line-beginning-position) t)))))))
+      (let ((case-fold-search t)
+            (last nil))
+        (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:" nil t)
+          (setq last (line-beginning-position)))
+        (when (numberp last)
+          (copy-marker last t)))))))
 
 (defun carriage-fingerprint--read-plist-at (marker)
   "Read fingerprint plist at MARKER (beginning of line). Return plist or nil."
@@ -1662,6 +1668,24 @@ This function is best-effort and must never signal."
              ;; Determine known ONLY if a concrete integer total cost (in µ₽) is present.
              (known (and (listp cost) (integerp (plist-get cost :cost-total-u))))
              (pl old))
+        ;; Always write computed pricing to log (best-effort), even if fingerprint line is absent.
+        (when (fboundp 'carriage-log)
+          (ignore-errors
+            (let* ((total-u (and (listp cost) (plist-get cost :cost-total-u)))
+                   (money (cond
+                           ((fboundp 'carriage-pricing-format-money)
+                            (carriage-pricing-format-money total-u))
+                           ((integerp total-u) (format "%d" total-u))
+                           (t "—"))))
+              (carriage-log "pricing: model=%s known=%s tokens-in=%s tokens-out=%s audio-in=%s audio-out=%s total-u=%s total=%s"
+                            (or canonical (or model "") "")
+                            (if known "t" "nil")
+                            (if (integerp tin) tin "—")
+                            (if (integerp tout) tout "—")
+                            (if (integerp ain) ain "—")
+                            (if (integerp aout) aout "—")
+                            (if (integerp total-u) total-u "—")
+                            money))))
         (unless (markerp marker)
           (cl-return-from carriage-fingerprint-note-usage-and-cost nil))
         ;; Usage keys (always upsert, even if nil)

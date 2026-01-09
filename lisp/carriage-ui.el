@@ -3603,49 +3603,8 @@ Fingerprint insertion is handled by send commands (carriage-mode) to avoid dupli
   ;; Ensure any late call to insert the marker becomes a no-op when already inserted.
   (advice-add 'carriage-insert-inline-iteration-marker-now :around #'carriage--inline-id-around))
 
-;; Keep user cursor free during streaming unless explicitly enabled.
-(defvar carriage-mode-preloader-follow-point
-  (and (boundp 'carriage-mode-preloader-follow-point)
-       carriage-mode-preloader-follow-point)
-  "When non-nil, move point to the streaming tail on each chunk. Defaults to nil.")
-
-(defcustom carriage-stream-redisplay-interval 0.03
-  "Minimum seconds between forced redisplay calls during streaming chunk insertion.
-
-Goal: keep stream output visibly updating even without user input and even when the
-window is not selected, while staying cheap (throttled)."
-  :type 'number
-  :group 'carriage-ui)
-
-(defvar-local carriage--stream-last-redisplay 0.0
-  "Last (float-time) when we forced redisplay due to a streaming chunk in this buffer.")
-
-(defun carriage--stream-maybe-redisplay (&optional buffer)
-  "Force a throttled redisplay when BUFFER is visible in any window.
-This avoids the \"prints only when I move the cursor\" effect during streaming."
-  (let* ((buf (or buffer (current-buffer)))
-         (win (and (buffer-live-p buf) (get-buffer-window buf t)))
-         (now (float-time)))
-    (when (and (window-live-p win)
-               (>= (- now (or (buffer-local-value 'carriage--stream-last-redisplay buf) 0.0))
-                   (max 0.0 (or carriage-stream-redisplay-interval 0.03))))
-      (with-current-buffer buf
-        (setq carriage--stream-last-redisplay now))
-      ;; Use forced redisplay so updates are visible without user input.
-      (redisplay t))))
-
-(defun carriage--stream-chunk-save-point (orig-fun &rest args)
-  "Call ORIG-FUN without moving point unless follow-point is enabled.
-Also ensure streaming output becomes visible without requiring user input (throttled)."
-  (prog1
-      (if carriage-mode-preloader-follow-point
-          (apply orig-fun args)
-        (save-excursion
-          (apply orig-fun args)))
-    (ignore-errors (carriage--stream-maybe-redisplay (current-buffer)))))
-
-(ignore-errors
-  (advice-add 'carriage-insert-stream-chunk :around #'carriage--stream-chunk-save-point))
+;; Streaming behavior (cursor/redisplay) is handled centrally in `carriage-mode.el`
+;; via coalesced flush + throttled redisplay. UI must not advise streaming insertion.
 
 ;;; Integrated guards: single inline-id insertion and free cursor during streaming
 

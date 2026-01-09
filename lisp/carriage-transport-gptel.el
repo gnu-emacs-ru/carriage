@@ -42,6 +42,7 @@
 (declare-function carriage-begin-reasoning "carriage-mode" ())
 (declare-function carriage-end-reasoning "carriage-mode" ())
 (declare-function carriage-stream-finalize "carriage-mode" (&optional errorp mark-last-iteration))
+(declare-function carriage-stream-flush-now "carriage-mode" (&optional buffer))
 (declare-function carriage-fingerprint-note-usage-and-cost "carriage-mode" (usage &optional backend provider model))
 
 (defgroup carriage-transport-gptel nil
@@ -63,6 +64,64 @@ Default nil improves perceived streaming speed by avoiding per-chunk formatting,
 buffer growth and trimming work. Request/response summaries are still logged."
   :type 'boolean
   :group 'carriage-transport-gptel)
+
+(defcustom carriage-transport-gptel-keepalive-enabled t
+  "When non-nil, run a lightweight keepalive timer during streaming.
+
+Motivation: on some setups/process backends, process filters/callbacks may not
+run promptly while Emacs is idle with no user input, causing \"stream prints only
+after keypress\". Keepalive pumps process output via `accept-process-output'."
+  :type 'boolean
+  :group 'carriage-transport-gptel)
+
+(defcustom carriage-transport-gptel-keepalive-interval 0.05
+  "Interval (seconds) for GPTel keepalive pumping (`accept-process-output').
+
+Smaller values improve responsiveness but increase overhead."
+  :type 'number
+  :group 'carriage-transport-gptel)
+
+(defvar-local carriage--gptel-keepalive-timer nil
+  "Buffer-local keepalive timer used by GPTel transport to pump process output.")
+
+(defun carriage--gptel--keepalive-stop (&optional buffer)
+  "Stop GPTel keepalive timer in BUFFER (or current buffer). Best-effort."
+  (with-current-buffer (or buffer (current-buffer))
+    (when (timerp carriage--gptel-keepalive-timer)
+      (ignore-errors (cancel-timer carriage--gptel-keepalive-timer)))
+    (setq carriage--gptel-keepalive-timer nil)
+    t))
+
+(defun carriage--gptel--keepalive-start (&optional buffer)
+  "Start GPTel keepalive timer in BUFFER (or current buffer). Best-effort."
+  (let ((buf (or buffer (current-buffer))))
+    (with-current-buffer buf
+      (when (timerp carriage--gptel-keepalive-timer)
+        (ignore-errors (cancel-timer carriage--gptel-keepalive-timer)))
+      (setq carriage--gptel-keepalive-timer nil)
+      (when (and (not (bound-and-true-p noninteractive))
+                 (boundp 'carriage-transport-gptel-keepalive-enabled)
+                 carriage-transport-gptel-keepalive-enabled)
+        (let* ((interval (max 0.01 (float (or carriage-transport-gptel-keepalive-interval 0.05)))))
+          (setq carriage--gptel-keepalive-timer
+                (run-at-time
+                 0 interval
+                 (lambda ()
+                   (when (buffer-live-p buf)
+                     (with-current-buffer buf
+                       (condition-case _e
+                           ;; Prefer pumping known GPTel curl process(es) only.
+                           ;; Fallback to nil (any process) is avoided to reduce global overhead.
+                           (let ((procs (cl-remove-if-not
+                                         (lambda (p)
+                                           (and (processp p)
+                                                (memq (process-status p) '(run open))
+                                                (string-match-p "gptel\\|curl" (process-name p))))
+                                         (process-list))))
+                             (dolist (p procs)
+                               (ignore-errors (accept-process-output p 0))))
+                         (error nil))))))))))
+    t))
 
 (defun carriage--gptel--log@perf (orig-fn &rest args)
   "Around-advice for `gptel--log' to disable expensive logging when configured."
@@ -298,6 +357,7 @@ Robustness: must never signal even when RESPONSE is a dotted cons like (reasonin
   (with-current-buffer buffer
     (carriage--gptel--maybe-open-logs))
   (carriage--gptel--register-abort buffer)
+  (carriage--gptel--keepalive-start buffer)
   (carriage-traffic-log-request buffer
                                 :backend 'gptel
                                 :model model
@@ -360,6 +420,9 @@ Returns cons (UPDATED-SUMMARY . REMAINDER-TEXT-AFTER-HEAD)."
       (when (and (listp usage)
                  (fboundp 'carriage-fingerprint-note-usage-and-cost))
         (ignore-errors (carriage-fingerprint-note-usage-and-cost usage backend provider model)))
+      ;; Ensure all pending coalesced chunks are inserted before finalizing.
+      (when (fboundp 'carriage-stream-flush-now)
+        (ignore-errors (carriage-stream-flush-now buffer)))
       (carriage-stream-finalize nil t)
       (carriage-transport-complete nil buffer))))
 
@@ -382,6 +445,9 @@ Returns cons (UPDATED-SUMMARY . REMAINDER-TEXT-AFTER-HEAD)."
       (when (and (listp usage)
                  (fboundp 'carriage-fingerprint-note-usage-and-cost))
         (ignore-errors (carriage-fingerprint-note-usage-and-cost usage backend provider model)))
+      ;; Ensure all pending coalesced chunks are inserted before finalizing.
+      (when (fboundp 'carriage-stream-flush-now)
+        (ignore-errors (carriage-stream-flush-now buffer)))
       (carriage-stream-finalize t nil)
       (carriage-transport-complete t buffer))))
 
@@ -444,6 +510,9 @@ Returns cons (UPDATED-SUMMARY . REMAINDER-TEXT-AFTER-HEAD)."
 (defun carriage--gptel--cb-handle-reasoning-end (gptel-buffer state)
   "Handle end of reasoning. Return STATE unchanged."
   (with-current-buffer gptel-buffer
+    ;; Ensure any buffered reasoning chunks are inserted before we close the block.
+    (when (fboundp 'carriage-stream-flush-now)
+      (ignore-errors (carriage-stream-flush-now gptel-buffer)))
     (ignore-errors (carriage-end-reasoning)))
   (carriage-traffic-log 'in "[reasoning] end")
   state)

@@ -167,11 +167,10 @@ Side-effect-only; never alters REPORT (REQ-apply-010)."
                                ((fboundp 'org-hide-block-toggle)
                                 (org-hide-block-toggle t))))))
 
-                        ;; Immediately enable+refresh patch-fold overlays (hide applied content)
+                        ;; Immediately refresh patch-fold overlays (hide applied content) if enabled.
                         (when (and (boundp 'carriage-mode-hide-applied-patches)
                                    carriage-mode-hide-applied-patches
                                    (require 'carriage-patch-fold nil t))
-                          (ignore-errors (carriage-patch-fold-enable (current-buffer)))
                           (ignore-errors (carriage-patch-fold-refresh-now (current-buffer)))))))))
               ;; If point is inside the applied block, move it to the next line after it.
               (let ((pt (point)))

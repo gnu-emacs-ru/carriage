@@ -199,6 +199,41 @@ Important:
   (unless (fboundp 'carriage-transport-begin)
     (ignore-errors (require 'carriage-transport))))
 
+;; -------------------------------------------------------------------
+;; Streaming: remove legacy advice that can block/slow streaming insertion.
+;;
+;; Some older builds advised `carriage-insert-stream-chunk' (e.g. with
+;; `carriage--stream-chunk-save-point'). When such advice is loaded late
+;; (after `carriage-mode' is enabled), it can re-introduce the symptom:
+;; "stream prints only after keypress".
+;;
+;; Policy:
+;; - Best-effort: never signal.
+;; - Remove the legacy advice immediately when detected.
+;; - Keep a short-lived `after-load-functions' cleaner so late loads cannot
+;;   re-add the advice. Uninstall the cleaner once the advice is gone.
+(defvar carriage--stream-legacy-advice-cleaner-installed nil
+  "Non-nil when legacy stream advice cleaner hook was installed.")
+
+(defun carriage--stream-remove-legacy-advice (&optional _file)
+  "Best-effort remove legacy advice that can block streaming insertion."
+  (ignore-errors
+    (when (and (fboundp 'carriage--stream-chunk-save-point)
+               (advice-member-p #'carriage--stream-chunk-save-point 'carriage-insert-stream-chunk))
+      (advice-remove 'carriage-insert-stream-chunk #'carriage--stream-chunk-save-point)))
+  ;; If the bad advice is gone, we can uninstall ourselves to avoid per-load overhead.
+  (ignore-errors
+    (when (and (fboundp 'carriage--stream-chunk-save-point)
+               (not (advice-member-p #'carriage--stream-chunk-save-point 'carriage-insert-stream-chunk)))
+      (remove-hook 'after-load-functions #'carriage--stream-remove-legacy-advice)))
+  t)
+
+(defun carriage--stream-install-legacy-advice-cleaner ()
+  "Install `after-load-functions' cleaner for legacy stream advice (idempotent)."
+  (unless carriage--stream-legacy-advice-cleaner-installed
+    (setq carriage--stream-legacy-advice-cleaner-installed t)
+    (add-hook 'after-load-functions #'carriage--stream-remove-legacy-advice)))
+
 (defcustom carriage-mode-default-intent 'Ask
   "Default Intent for Carriage: 'Ask | 'Code | 'Hybrid."
   :type '(choice (const Ask) (const Code) (const Hybrid))
@@ -723,6 +758,14 @@ Debounced refresh is handled by `carriage-ui--ctx-schedule-refresh`."
   "Enable Carriage mode in the current buffer (internal)."
   (carriage-mode--init-state)
   (carriage-mode--init-ui)
+
+  ;; Defensive: remove any legacy/third-party advice that can block or delay
+  ;; `carriage-insert-stream-chunk' (symptom: stream appears only after keypress).
+  ;; This must be best-effort and never signal.
+  (ignore-errors
+    (when (and (fboundp 'carriage--stream-chunk-save-point)
+               (advice-member-p #'carriage--stream-chunk-save-point 'carriage-insert-stream-chunk))
+      (advice-remove 'carriage-insert-stream-chunk #'carriage--stream-chunk-save-point)))
 
   ;; One-shot deferred ensure: survive late `setq-local mode-line-format' rewrites during file open.
   ;; No watchdogs, no post-command hooks, no variable watchers.
@@ -1436,9 +1479,14 @@ without auto-closing; the end marker is inserted later at tail."
 TYPE is either 'text (default) or 'reasoning.
 - 'text: append to the region as-is (even if reasoning is open).
 - 'reasoning: when carriage-mode-include-reasoning='block, ensure a #+begin_reasoning
-  and append to the reasoning tail marker so that main text remains outside the block."
+  and append to the reasoning tail marker so that main text remains outside the block.
+
+Implementation note (perf/UX):
+- This function is intentionally hot-path and MUST NOT modify the buffer.
+- It enqueues chunks and schedules a coalesced flush timer that performs a small
+  number of inserts + a throttled `redisplay` so streaming remains visible even
+  without user input (and in non-selected windows)."
   (let ((s (or string "")))
-    (carriage--undo-group-start)
     ;; O(1) modeline support: detect begin_patch even when token is split across chunks.
     (when (and (not carriage--last-iteration-has-patches)
                (stringp s))
@@ -1449,38 +1497,8 @@ TYPE is either 'text (default) or 'reasoning.
               (if (> (length probe) 80)
                   (substring probe (- (length probe) 80))
                 probe))))
-    (pcase type
-      ((or 'reasoning :reasoning)
-       (when (eq carriage-mode-include-reasoning 'block)
-         (carriage-begin-reasoning)
-         (let ((inhibit-read-only t))
-           (save-excursion
-             (let* ((tail (or carriage--reasoning-tail-marker carriage--stream-end-marker))
-                    (tailpos (marker-position tail)))
-               (goto-char tailpos)
-               (insert s)
-               (let ((newpos (point)))
-                 ;; Advance tail; if end==tail, advance end as well
-                 (when (markerp carriage--reasoning-tail-marker)
-                   (set-marker carriage--reasoning-tail-marker newpos (current-buffer)))
-                 (when (and (markerp carriage--stream-end-marker)
-                            (= (marker-position carriage--stream-end-marker) tailpos))
-                   (set-marker carriage--stream-end-marker newpos (current-buffer)))))))))
-      (_
-       ;; Do not auto-close reasoning here; text is appended after all prior content.
-       (carriage--stream-insert-at-end s))))
-  ;; Move preloader overlay to stream tail so spinner stays ahead
-  (when (and (boundp 'carriage--preloader-overlay)
-             (overlayp carriage--preloader-overlay)
-             (markerp carriage--stream-end-marker))
-    (let ((endpos (marker-position carriage--stream-end-marker)))
-      (move-overlay carriage--preloader-overlay endpos endpos)
-      (when (and (boundp 'carriage-mode-preloader-follow-point)
-                 carriage-mode-preloader-follow-point)
-        (goto-char endpos))))
-  ;; Nudge redisplay for windows showing this buffer
-  (dolist (w (get-buffer-window-list (current-buffer) t t))
-    (force-window-update w))
+    ;; Enqueue and schedule a coalesced flush (buffer edits happen only in flush).
+    (carriage--stream-enqueue type s))
   (point))
 
 ;;;###autoload
@@ -1490,8 +1508,14 @@ TYPE is either 'text (default) or 'reasoning.
 - Fold the reasoning block after the full answer is printed.
 - When MARK-LAST-ITERATION and not ERRORP: insert inline marker (if configured) and mark the region as last iteration.
 - Trigger UI effects (flash/audio) on success."
+  ;; Ensure any pending coalesced stream chunks are inserted before finalizing.
+  (when (fboundp 'carriage-stream-flush-now)
+    (ignore-errors (carriage-stream-flush-now (current-buffer))))
   ;; Close reasoning if still open (end marker inserted at tail)
   (ignore-errors (carriage-end-reasoning))
+  ;; Ensure end marker and any last buffered chunks are visible.
+  (when (fboundp 'carriage-stream-flush-now)
+    (ignore-errors (carriage-stream-flush-now (current-buffer))))
   ;; Stop preloader if still running.
   (when (fboundp 'carriage--preloader-stop)
     (carriage--preloader-stop))

@@ -139,11 +139,11 @@ about the lifecycle (spawn, wait ticks, timeout/exit) to help diagnose stalls."
             (when (and found (file-directory-p found))
               (setq root (expand-file-name found))))
         (error nil)))
-    (or root
-        (let* ((res (carriage--call-git default-dir "rev-parse" "--show-toplevel")))
-          (when (and (eq (plist-get res :exit) 0)
-                     (string-match-p ".+" (plist-get res :stdout)))
-            (string-trim (plist-get res :stdout)))))))
+    ;; IMPORTANT:
+    ;; Do NOT spawn external git processes on file open / mode enable path.
+    ;; When not inside a repo (no project.el root and no .git found), return nil
+    ;; and let higher-level features operate in "limited" mode.
+    root))
 
 (defun carriage--path-looks-unsafe-p (path)
   "Return non-nil if PATH looks unsafe (absolute or has .. or starts with ~)."

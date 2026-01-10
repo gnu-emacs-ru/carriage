@@ -56,6 +56,8 @@ Normative Requirements
 - REQ-ui-007: UI SHOULD expose Swarm supervisor controls (start/stop/restart hub and agents, status, open-dashboard, cleanup-stale, tail logs) via menu or commands; these controls MUST NOT perform network operations on the main thread.
 - REQ-ui-008: UI MUST display a document total cost badge in the modeline, computed from per-request fingerprints and cached (no buffer scans on redisplay).
 - REQ-ui-009: UI MUST support a configurable currency symbol (string) used for display in modeline badges and overlays; it MUST NOT affect computation.
+- REQ-ui-010: Applied patch block bodies (#+begin_patch … :applied t …) MUST NOT be included in outgoing LLM prompts; only patch headers/metadata may remain.
+- REQ-ui-011: When the “Patched/Patch” context source is enabled, Carriage MUST include the full contents of files referenced by #+begin_patch headers in the document as external context (subject to standard context limits and security policy).
 
 Invariants
 - Anchor: INV
@@ -118,7 +120,7 @@ UI/UX
 - Stability: stable
 - Pack-Priority: P2
 - Accessibility: provide help-echo; avoid color-only distinctions.
-- Applied-patch folding: UI MUST fold #+begin_patch blocks annotated with :applied t using a compact overlay that shows only patch metadata (:description or details); clicking toggles visibility. Folding MUST take effect immediately after annotation/apply. Applied patch contents MUST NOT be sent to LLM payloads.
+- Applied-patch folding: UI MUST fold #+begin_patch blocks annotated with :applied t using a compact overlay that shows only patch metadata (:description or details); clicking toggles visibility. Folding MUST take effect immediately after annotation/apply. Applied patch contents MUST NOT be sent to LLM payloads (they MAY be summarized/omitted in the document); when the “Patched/Patch” context source is enabled, Carriage MUST include the full contents of files referenced by #+begin_patch headers in the outgoing prompt so the model sees the real resulting state.
 
 Prompt Guidance
 - Anchor: PRM

@@ -2493,11 +2493,11 @@ Performance:
                          help 'files)))
 
 (defun carriage-ui--ml-seg-toggle-patched ()
-  "Build toggle for including files referenced by #+patch_done markers."
+  "Build toggle for including files referenced by patch blocks in the current document."
   (let* ((_ (require 'carriage-i18n nil t))
          (help (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
                    (carriage-i18n :patched-tooltip)
-                 "Toggle including files from applied begin_patch blocks (:applied t)")))
+                 "Include current contents of files referenced by #+begin_patch headers (subject to limits). Patch bodies are never sent to the LLM.")))
     (carriage-ui--toggle "Patched" 'carriage-mode-include-patched-files
                          #'carriage-toggle-include-patched-files
                          help 'patched)))

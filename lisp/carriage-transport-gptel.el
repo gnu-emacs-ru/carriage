@@ -168,7 +168,11 @@ If MODEL cannot be interned meaningfully, return it unchanged."
    (t model)))
 
 (defun carriage--gptel--strip-carriage-markers (text)
-  "Return TEXT with internal Carriage marker lines stripped (centralized)."
+  "Return TEXT with internal Carriage marker lines stripped (centralized).
+
+Policy: applied patch bodies must never be sent to the LLM (only headers/metadata).
+The Patch/Patched context source controls ONLY external context collection (files),
+not whether patch bodies are kept in the payload."
   (carriage-transport--strip-internal-lines text))
 
 (defun carriage--gptel--prompt (source buffer mode)

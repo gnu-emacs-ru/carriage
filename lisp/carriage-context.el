@@ -84,7 +84,10 @@ When 'last, collect paths only from the last #+begin_context block in the buffer
 (make-variable-buffer-local 'carriage-doc-context-scope)
 
 (defcustom carriage-mode-include-patched-files nil
-  "When non-nil, include files referenced by applied begin_patch blocks (:applied t) in the current buffer into the document context."
+  "When non-nil, include files referenced by #+begin_patch blocks in the current buffer into the document context.
+
+This source is about including the *current contents of files* referenced by patch
+headers (subject to limits). Patch block bodies are never used as prompt context."
   :type 'boolean
   :group 'carriage-context)
 (make-variable-buffer-local 'carriage-mode-include-patched-files)
@@ -152,31 +155,55 @@ This function is designed to be O(1) per edit."
   (force-mode-line-update))
 
 (defun carriage-context--patched-files (buffer)
-  "Return list of file paths extracted from applied patches in BUFFER.
+  "Return list of file paths referenced by #+begin_patch headers in BUFFER.
 
-Only considers annotated begin_patch blocks with (:applied t ...):
-- op 'patch → take :path
-- op 'sre/'aibo → take :file"
+Semantics (Variant A):
+- Includes files referenced by *all* patch blocks in the document, regardless of :applied.
+- The purpose is to include the current contents of these files as external context
+  when `carriage-mode-include-patched-files' is enabled.
+
+Path extraction rules by :op:
+- patch  → :path
+- rename → :from and :to
+- other  → :file  (create/delete/sre/aibo/replace)
+
+Returns a deduplicated list of non-empty strings, in buffer order.
+Uses a lightweight cache and a dirty flag to avoid rescanning the buffer on every edit."
   (with-current-buffer buffer
-    (save-excursion
-      (goto-char (point-min))
-      (let ((case-fold-search t)
-            (acc '()))
-        (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
-          (let* ((sexp-str (match-string 1))
-                 (plist (condition-case _e
-                            (car (read-from-string sexp-str))
-                          (error nil)))
-                 (applied (and (listp plist) (plist-get plist :applied)))
-                 (op      (and (listp plist) (plist-get plist :op)))
-                 (opstr   (and op (format "%s" op))))
-            (when applied
-              (let* ((is-patch (and opstr (string= (replace-regexp-in-string "^:" "" opstr) "patch")))
-                     (key (if is-patch :path :file))
-                     (val (and (listp plist) (plist-get plist key))))
-                (when (and (stringp val) (not (string-empty-p val)))
-                  (push val acc))))))
-        (nreverse (delete-dups acc))))))
+    (if (and (not carriage-context--patched-files-dirty)
+             (listp carriage-context--patched-files-cache)
+             (listp (plist-get carriage-context--patched-files-cache :paths)))
+        (plist-get carriage-context--patched-files-cache :paths)
+      (save-excursion
+        (goto-char (point-min))
+        (let ((case-fold-search t)
+              (acc '()))
+          (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
+            (let* ((sexp-str (match-string 1))
+                   (plist (condition-case _e
+                              (car (read-from-string sexp-str))
+                            (error nil)))
+                   (op (and (listp plist) (plist-get plist :op)))
+                   (opstr (and op (replace-regexp-in-string "^:" "" (format "%s" op)))))
+              (when (listp plist)
+                (pcase opstr
+                  ("patch"
+                   (let ((p (plist-get plist :path)))
+                     (when (and (stringp p) (not (string-empty-p p)))
+                       (push p acc))))
+                  ("rename"
+                   (dolist (k '(:from :to))
+                     (let ((p (plist-get plist k)))
+                       (when (and (stringp p) (not (string-empty-p p)))
+                         (push p acc)))))
+                  (_
+                   (let ((p (plist-get plist :file)))
+                     (when (and (stringp p) (not (string-empty-p p)))
+                       (push p acc))))))))
+          (setq acc (nreverse (delete-dups acc)))
+          (setq carriage-context--patched-files-cache (list :paths acc))
+          (setq carriage-context--patched-files-dirty nil)
+          acc)))))
 
 ;; Commands to switch scope (used by UI/keyspec)
 ;;;###autoload

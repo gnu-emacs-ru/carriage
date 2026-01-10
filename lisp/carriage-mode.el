@@ -1930,62 +1930,117 @@ This must never leak into the LLM payload."
         (goto-char (line-beginning-position))))
     (buffer-substring-no-properties (point-min) (point-max))))
 
-(defun carriage--payload-summarize-applied-patches (text)
+(defun carriage--patch--read-header-plist (sexp-str)
+  "Parse SEXP-STR from a #+begin_patch header into a plist, or nil.
+Never signals."
+  (when (stringp sexp-str)
+    (condition-case _e
+        (let ((obj (car (read-from-string sexp-str))))
+          (and (listp obj) obj))
+      (error nil))))
+
+(defun carriage--patch--applied-p (plist)
+  "Return non-nil when PLIST marks the patch as applied."
+  (and (listp plist) (plist-get plist :applied)))
+
+(defun carriage--patch--applied-desc (plist)
+  "Return normalized description for an applied patch PLIST."
+  (let* ((desc (or (and (listp plist)
+                        (or (plist-get plist :description)
+                            (plist-get plist :result)))
+                   "Applied"))
+         (s (string-trim (format "%s" desc))))
+    (if (string-empty-p s) "Applied" s)))
+
+(defun carriage--patch--summary-line (desc)
+  "Build the one-line summary placeholder for applied patch body."
+  (format ";; applied: %s (content omitted)\n" desc))
+
+(defun carriage--patch--body-begin-pos (beg-line-end)
+  "Compute body start position given BEG-LINE-END (end of #+begin_patch line)."
+  (min (point-max) (1+ beg-line-end)))
+
+(defun carriage--patch--find-end-pos (from)
+  "Find #+end_patch from FROM and return match end position, or nil."
+  (save-excursion
+    (goto-char from)
+    (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)))
+
+(defun carriage--patch--end-line-begin-pos (end-pos)
+  "Return line-beginning-position for END-POS."
+  (save-excursion
+    (goto-char end-pos)
+    (line-beginning-position)))
+
+(defun carriage--patch--replace-body-with-summary (body-beg end-line-beg summary)
+  "Replace patch body between BODY-BEG and END-LINE-BEG with SUMMARY."
+  (delete-region body-beg end-line-beg)
+  (goto-char body-beg)
+  (insert summary))
+
+(defun carriage--patch--truncate-to-end-and-close (body-beg summary)
+  "Truncate buffer from BODY-BEG to end; insert SUMMARY and a synthetic #+end_patch."
+  (delete-region body-beg (point-max))
+  (goto-char body-beg)
+  (insert summary "#+end_patch\n")
+  (goto-char (point-max)))
+
+(defun carriage--patch--goto-next-line-safe ()
+  "Advance point to the next line safely and return point."
+  (goto-char (min (point-max) (1+ (line-end-position))))
+  (point))
+
+(defun carriage--patch--goto-after-end-line ()
+  "Move point to just after the next #+end_patch line; fallback to next-line."
+  (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+      (progn
+        (goto-char (min (point-max) (1+ (line-end-position))))
+        (point))
+    (carriage--patch--goto-next-line-safe)))
+
+(defun carriage--payload-summarize-applied-patches (text &optional keep-applied-bodies)
   "Replace bodies of applied #+begin_patch blocks in TEXT with a short summary.
 
-Policy:
+When KEEP-APPLIED-BODIES is non-nil, return TEXT unchanged.
+
+Policy (when summarizing):
 - Keep '#+begin_patch (...)' and '#+end_patch' lines.
 - Replace the body with one comment line:
   ;; applied: <desc> (content omitted)
 
 This lets LLM see history without sending potentially large patch bodies."
-  (with-temp-buffer
-    (insert (or text ""))
-    (goto-char (point-min))
-    (let ((case-fold-search t))
-      (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
-        (let* ((beg-line-end (line-end-position))
-               (sexp-str (match-string 1))
-               (plist (condition-case _e
-                          (car (read-from-string sexp-str))
-                        (error nil))))
-          (if (and (listp plist) (plist-get plist :applied))
-              (let* ((desc (or (plist-get plist :description)
-                               (plist-get plist :result)
-                               "Applied"))
-                     (desc (string-trim (format "%s" desc)))
-                     (desc (if (string-empty-p desc) "Applied" desc))
-                     (summary (format ";; applied: %s (content omitted)\n" desc))
-                     ;; Body starts right after the begin_patch line newline (if any).
-                     (body-beg (min (point-max) (1+ beg-line-end)))
-                     (end-pos (save-excursion
-                                (goto-char body-beg)
-                                (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t))))
+  (if keep-applied-bodies
+      (or text "")
+    (with-temp-buffer
+      (insert (or text ""))
+      (goto-char (point-min))
+      (let ((case-fold-search t))
+        (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
+          (let* ((beg-line-end (line-end-position))
+                 (sexp-str (match-string 1))
+                 (plist (carriage--patch--read-header-plist sexp-str)))
+            (if (not (carriage--patch--applied-p plist))
+                (carriage--patch--goto-next-line-safe)
+              (let* ((desc (carriage--patch--applied-desc plist))
+                     (summary (carriage--patch--summary-line desc))
+                     (body-beg (carriage--patch--body-begin-pos beg-line-end))
+                     (end-pos (carriage--patch--find-end-pos body-beg)))
                 (if end-pos
-                    (let* ((end-line-beg (save-excursion
-                                           (goto-char end-pos)
-                                           (line-beginning-position))))
-                      ;; Replace the body with the summary, keep begin/end lines.
-                      (delete-region body-beg end-line-beg)
-                      (goto-char body-beg)
-                      (insert summary)
-                      ;; Continue scanning after the end_patch line (re-find, positions may have shifted).
-                      (when (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
-                        (goto-char (min (point-max) (1+ (line-end-position))))))
-                  ;; No end marker: truncate to end, insert summary and a synthetic end marker.
-                  (delete-region body-beg (point-max))
-                  (goto-char body-beg)
-                  (insert summary "#+end_patch\n")
-                  (goto-char (point-max))))
-            ;; Not applied → continue scanning from next line to avoid infinite loops.
-            (goto-char (min (point-max) (1+ (line-end-position))))))))
-    (buffer-substring-no-properties (point-min) (point-max))))
+                    (let ((end-line-beg (carriage--patch--end-line-begin-pos end-pos)))
+                      (carriage--patch--replace-body-with-summary body-beg end-line-beg summary)
+                      ;; Continue scanning after the end_patch line (positions may have shifted).
+                      (carriage--patch--goto-after-end-line))
+                  (carriage--patch--truncate-to-end-and-close body-beg summary)))))))
+      (buffer-substring-no-properties (point-min) (point-max)))))
 
 (defun carriage--sanitize-payload-for-llm (text)
   "Return TEXT sanitized for LLM payload.
-Strips doc-state/markers and summarizes applied patch bodies."
-  (carriage--payload-summarize-applied-patches
-   (carriage--payload-strip-doc-state-and-markers text)))
+Strips doc-state/markers and summarizes applied patch bodies unless Patch/Patched source is enabled."
+  (let ((keep-applied (and (boundp 'carriage-mode-include-patched-files)
+                           carriage-mode-include-patched-files)))
+    (carriage--payload-summarize-applied-patches
+     (carriage--payload-strip-doc-state-and-markers text)
+     keep-applied)))
 
 (defun carriage--context-target ()
   "Return current buffer's context injection target ('system or 'user)."

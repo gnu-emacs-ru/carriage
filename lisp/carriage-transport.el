@@ -311,6 +311,8 @@ Contract:
 (defun carriage-transport--strip-internal-lines (text)
   "Remove internal Carriage marker lines from TEXT (best-effort, centralized).
 
+Policy: applied patch bodies must never be sent to the LLM (only headers/metadata may remain).
+
 Strips:
 - Org property headers for CARRIAGE_STATE / CARRIAGE_FINGERPRINT
 - Inline CARRIAGE_FINGERPRINT lines"
@@ -329,11 +331,11 @@ Strips:
         (delete-region (line-beginning-position)
                        (min (point-max) (1+ (line-end-position)))))
 
-      ;; Applied patch blocks must not leak full bodies into prompts, but their headers should remain
-      ;; (so the model can see what was already done). Collapse applied blocks into:
-      ;;   #+begin_patch (...)   ;; preserved
+      ;; Applied patch blocks must never leak full bodies into prompts.
+      ;; Keep the begin_patch header line so the model sees what was already applied,
+      ;; but replace the body with:
       ;;   ;; applied: <desc|result> (content omitted)
-      ;;   #+end_patch          ;; preserved or synthesized
+      ;; and preserve (or synthesize) the closing #+end_patch.
       (goto-char (point-min))
       (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
         (let* ((beg-line-beg (line-beginning-position))
@@ -368,8 +370,8 @@ Strips:
                   (insert summary "#+end_patch\n")
                   (goto-char (point-max))))
             ;; not applied → continue scanning from next line to avoid infinite loops
-            (goto-char (min (point-max) (1+ (line-end-position))))))))
-    (buffer-substring-no-properties (point-min) (point-max))))
+            (goto-char (min (point-max) (1+ (line-end-position)))))))))
+  (buffer-substring-no-properties (point-min) (point-max)))
 
 
 (provide 'carriage-transport)

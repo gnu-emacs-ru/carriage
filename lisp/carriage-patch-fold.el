@@ -35,9 +35,20 @@
 (defvar-local carriage-patch-fold--refresh-timer nil
   "Idle timer used to coalesce rescans after edits.")
 
+(defvar-local carriage-patch-fold--enabled nil
+  "Non-nil when patch folding is enabled in the current buffer.")
 
+(defvar-local carriage-patch-fold--saved-ignore-invis nil
+  "Saved value of `line-move-ignore-invisible' to restore on disable.")
 
+(defvar-local carriage-patch-fold--hover-active nil
+  "When non-nil, hover-mode is active for an applied patch block.
+Plist keys:
+  :beg begin position (beginning of #+begin_patch line)
+  :end last known end position (end of #+end_patch line).")
 
+(defvar-local carriage-patch-fold--hover-inhibit nil
+  "Internal guard to avoid re-entrancy in hover post-command handler.")
 
 (defun carriage-patch-fold--org-hide-at (beg)
   "Hide the Org block at BEG using org-fold/org-hide (best-effort)."
@@ -61,6 +72,27 @@
               (org-fold-region body-beg body-end t))))
          (t nil))))))
 
+(defun carriage-patch-fold--org-show-at (beg)
+  "Show the Org block at BEG (undo folding) best-effort."
+  (when (and (numberp beg) (derived-mode-p 'org-mode))
+    (ignore-errors
+      (require 'org)
+      (save-excursion
+        (goto-char beg)
+        (cond
+         ((fboundp 'org-fold-show-drawer-or-block)
+          (org-fold-show-drawer-or-block))
+         ((featurep 'org-fold)
+          (let ((body-beg (progn (forward-line 1) (point)))
+                (body-end (save-excursion
+                            (when (re-search-forward "^[ \t]*#\\+end_patch\\b" nil t)
+                              (forward-line -1))
+                            (line-end-position))))
+            (when (< body-beg body-end)
+              (org-fold-region body-beg body-end nil))))
+         ((fboundp 'org-hide-block-toggle)
+          (org-hide-block-toggle nil))
+         (t nil))))))
 
 (defun carriage-patch-fold--org-suppress-placeholders (beg end)
   "Best-effort: keep Org folding but suppress Org's own ellipsis/placeholder overlays.
@@ -83,7 +115,96 @@ This function removes those presentation strings while keeping invisibility."
               (overlay-put ov 'after-string nil)
               (overlay-put ov 'display nil))))))))
 
+(defun carriage-patch-fold--overlay-near (pos)
+  "Return a managed applied-patch overlay at or near POS, or nil.
 
+We inspect overlays in a small neighborhood to avoid the \"stuck at boundary\"
+behavior when approaching folded overlays from above/below."
+  (let* ((p (or pos (point)))
+         (lo (max (point-min) (1- p)))
+         (hi (min (point-max) (1+ p)))
+         (hit nil))
+    (dolist (ov (overlays-in lo hi))
+      (when (and (overlayp ov)
+                 (eq (overlay-get ov 'category) 'carriage-patch-fold))
+        (setq hit ov)))
+    hit))
+
+(defun carriage-patch-fold--parse-block-at (beg)
+  "At BEG (beginning of line), return plist (:beg :end :plist) for a patch block, or nil."
+  (save-excursion
+    (goto-char beg)
+    (let ((case-fold-search t))
+      (when (looking-at "^[ \t]*#\\+begin_patch\\b")
+        (let* ((rb (line-beginning-position))
+               (hdr-line (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+               (pl (carriage-patch-fold--parse-header-plist hdr-line)))
+          (when (re-search-forward "^[ \t]*#\\+end_patch\\b" nil t)
+            (list :beg rb :end (line-end-position) :plist pl)))))))
+
+(defun carriage-patch-fold--hover-enter (ov)
+  "Enter hover-mode for applied patch overlay OV.
+
+Policy:
+- Do NOT reveal the patch body.
+- Remove Carriage placeholder overlay so user sees normal Org-folded block header/ellipsis."
+  (when (overlayp ov)
+    (let* ((beg (overlay-start ov))
+           (cell (and (numberp beg) (carriage-patch-fold--parse-block-at beg)))
+           (end  (and (listp cell) (plist-get cell :end))))
+      (when (and (numberp beg) (numberp end) (< beg end))
+        ;; Remove placeholder overlay.
+        (setq carriage-patch-fold--overlays (delq ov carriage-patch-fold--overlays))
+        (ignore-errors (delete-overlay ov))
+        ;; Recreate Org-fold's own placeholder/ellipsis by re-folding without suppression.
+        (carriage-patch-fold--org-show-at beg)
+        (carriage-patch-fold--org-hide-at beg)
+        (setq carriage-patch-fold--hover-active (list :beg beg :end end))))))
+
+(defun carriage-patch-fold--hover-exit ()
+  "Exit hover-mode: restore Carriage placeholder overlay for the hovered applied patch."
+  (when (and (listp carriage-patch-fold--hover-active)
+             (numberp (plist-get carriage-patch-fold--hover-active :beg)))
+    (let* ((beg (plist-get carriage-patch-fold--hover-active :beg))
+           (cell (and (numberp beg) (carriage-patch-fold--parse-block-at beg)))
+           (end  (and (listp cell) (plist-get cell :end)))
+           (pl   (and (listp cell) (plist-get cell :plist))))
+      (when (and (numberp beg) (numberp end) (< beg end)
+                 (listp pl) (plist-get pl :applied))
+        ;; Keep the block folded by Org, but suppress Org's own ellipsis so only
+        ;; Carriage placeholder is visible in the steady state.
+        (carriage-patch-fold--org-hide-at beg)
+        (carriage-patch-fold--org-suppress-placeholders beg end)
+        (carriage-patch-fold--make beg end pl)))
+    (setq carriage-patch-fold--hover-active nil)))
+
+(defun carriage-patch-fold--post-command ()
+  "Hover behavior: hide placeholder overlay when point approaches it; restore on leave."
+  (when (and carriage-patch-fold--enabled
+             (derived-mode-p 'org-mode)
+             (not carriage-patch-fold--hover-inhibit))
+    (let ((carriage-patch-fold--hover-inhibit t)
+          (pos (point)))
+      (condition-case _e
+          (let* ((active carriage-patch-fold--hover-active)
+                 (abeg (and (listp active) (plist-get active :beg)))
+                 (aend (and (listp active) (plist-get active :end))))
+            (cond
+             ;; If we have an active hover block and point left it, exit hover-mode.
+             ((and (numberp abeg) (numberp aend)
+                   (or (< pos abeg) (> pos aend)))
+              (carriage-patch-fold--hover-exit)
+              ;; After exit, we may have entered another overlay at POS in the same command.
+              (let ((ov2 (carriage-patch-fold--overlay-near pos)))
+                (when (overlayp ov2)
+                  (carriage-patch-fold--hover-enter ov2))))
+             ;; No active hover block: entering an overlay activates hover-mode.
+             ((null active)
+              (let ((ov (carriage-patch-fold--overlay-near pos)))
+                (when (overlayp ov)
+                  (carriage-patch-fold--hover-enter ov)))))
+            nil)
+        (error nil)))))
 
 (defun carriage-patch-fold--parse-header-plist (line)
   "Return plist parsed from begin_patch LINE or nil."
@@ -192,17 +313,30 @@ Invariant for applied patches (like reasoning blocks):
 - The entire block is also hidden by Carriage's placeholder overlay for compact display.
 
 To avoid duplicate ellipses/placeholders, we suppress Org's own presentation
-strings inside the folded region, leaving only Carriage's placeholder visible."
+strings inside the folded region, leaving only Carriage's placeholder visible.
+
+Hover-mode:
+- When point is inside an applied patch block, we temporarily remove Carriage's
+  placeholder overlay to let user see the regular Org-folded block header/ellipsis.
+- While hover-mode is active for a block, we do not recreate the placeholder overlay
+  for that same block during refresh."
   (carriage-patch-fold--clear-overlays)
   (when (derived-mode-p 'org-mode)
-    (dolist (cell (carriage-patch-fold--scan-applied))
-      (let ((beg (plist-get cell :beg))
-            (end (plist-get cell :end))
-            (pl  (plist-get cell :plist)))
-        (when (and (numberp beg) (numberp end) (< beg end))
-          (carriage-patch-fold--org-hide-at beg)
-          (carriage-patch-fold--org-suppress-placeholders beg end)
-          (carriage-patch-fold--make beg end pl))))))
+    (let* ((hover-beg (and (listp carriage-patch-fold--hover-active)
+                           (plist-get carriage-patch-fold--hover-active :beg))))
+      (dolist (cell (carriage-patch-fold--scan-applied))
+        (let ((beg (plist-get cell :beg))
+              (end (plist-get cell :end))
+              (pl  (plist-get cell :plist)))
+          (when (and (numberp beg) (numberp end) (< beg end))
+            (cond
+             ;; Keep Org-fold placeholder visible while hovering this block.
+             ((and (numberp hover-beg) (= beg hover-beg))
+              (carriage-patch-fold--org-hide-at beg))
+             (t
+              (carriage-patch-fold--org-hide-at beg)
+              (carriage-patch-fold--org-suppress-placeholders beg end)
+              (carriage-patch-fold--make beg end pl)))))))))
 
 (defun carriage-patch-fold--schedule-refresh (&optional delay)
   "Schedule debounced refresh with optional DELAY seconds (default 0.1)."
@@ -263,6 +397,12 @@ strings inside the folded region, leaving only Carriage's placeholder visible."
 (defun carriage-patch-fold-enable (&optional buffer)
   "Enable folding of applied patch blocks in BUFFER (or current)."
   (with-current-buffer (or buffer (current-buffer))
+    (setq carriage-patch-fold--enabled t)
+    (setq carriage-patch-fold--saved-ignore-invis line-move-ignore-invisible)
+    ;; Allow point to move into invisible text so entering the folded region
+    ;; triggers our hover handler (same approach as reasoning-fold).
+    (setq-local line-move-ignore-invisible nil)
+    (add-hook 'post-command-hook #'carriage-patch-fold--post-command nil t)
     (add-hook 'after-change-functions #'carriage-patch-fold--after-change nil t)
     (carriage-patch-fold--refresh-now)
     t))
@@ -271,10 +411,15 @@ strings inside the folded region, leaving only Carriage's placeholder visible."
 (defun carriage-patch-fold-disable (&optional buffer)
   "Disable folding of applied patch blocks in BUFFER (or current)."
   (with-current-buffer (or buffer (current-buffer))
+    (setq carriage-patch-fold--enabled nil)
+    (setq carriage-patch-fold--hover-active nil)
+    (remove-hook 'post-command-hook #'carriage-patch-fold--post-command t)
     (remove-hook 'after-change-functions #'carriage-patch-fold--after-change t)
     (when (timerp carriage-patch-fold--refresh-timer)
       (cancel-timer carriage-patch-fold--refresh-timer))
     (setq carriage-patch-fold--refresh-timer nil)
+    (when (local-variable-p 'line-move-ignore-invisible)
+      (setq-local line-move-ignore-invisible carriage-patch-fold--saved-ignore-invis))
     (carriage-patch-fold--clear-overlays)
     t))
 

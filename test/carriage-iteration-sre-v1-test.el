@@ -17,25 +17,5 @@
     (should (eq (alist-get :op (car sorted)) 'create))
     (should (eq (alist-get :op (cadr sorted)) 'sre))))
 
-(ert-deftest carriage-last-iteration-mark-and-collect-v1 ()
-  "Mark two SRE blocks as last iteration and collect them."
-  (with-temp-buffer
-    (org-mode)
-    ;; Insert two SRE v1 blocks
-    (insert "#+begin_patch (:version \"1\" :op \"sre\" :file \"x.txt\")\n"
-            "#+begin_from\nfoo\n#+end_from\n#+begin_to\nbar\n#+end_to\n"
-            "#+end_patch\n\n")
-    (insert "#+begin_patch (:version \"1\" :op \"sre\" :file \"y.txt\")\n"
-            "#+begin_from\none\n#+end_from\n#+begin_to\nTWO\n#+end_to\n"
-            "#+end_patch\n")
-    (goto-char (point-min))
-    ;; Mark and collect
-    (let ((beg (point-min)) (end (point-max)))
-      (carriage-mark-last-iteration beg end))
-    (let* ((plan (carriage-collect-last-iteration-blocks default-directory)))
-      (should (listp plan))
-      (should (= (length plan) 2))
-      (should (equal (mapcar (lambda (it) (alist-get :op it)) plan)
-                     '(sre sre))))))
 (provide 'carriage-iteration-sre-v1-test)
 ;;; carriage-iteration-sre-v1-test.el ends here

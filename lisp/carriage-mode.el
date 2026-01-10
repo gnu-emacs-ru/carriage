@@ -1552,13 +1552,7 @@ Implementation note (perf/UX):
                   (org-fold-region body-beg body-end t))))
              (t nil))))
       (error nil)))
-  ;; Mark the streamed region as last iteration (text properties)
-  (when (and (not errorp) mark-last-iteration)
-    (let ((r (carriage-stream-region)))
-      (when (and (consp r)
-                 (numberp (car r)) (numberp (cdr r))
-                 (< (car r) (cdr r)))
-        (carriage-mark-last-iteration (car r) (cdr r)))))
+
   ;; Effects on success
   (when (not errorp)
     (when (and (boundp 'carriage-mode-flash-patches) carriage-mode-flash-patches
@@ -2912,7 +2906,6 @@ Return cons (BEG . END) of inserted region."
         (let* ((ins-end (point)))
           (carriage-log "accept: inserted region %d..%d (%d chars)"
                         ins-beg ins-end (- ins-end ins-beg))
-          (carriage-mark-last-iteration ins-beg ins-end)
           ;; O(1) modeline support: this acceptance inserted patch blocks.
           (when (and (stringp blocks)
                      (string-match-p "#\\+begin_patch\\b" blocks))

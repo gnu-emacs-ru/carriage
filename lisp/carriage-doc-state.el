@@ -659,6 +659,7 @@ Important: use `concat' (not `format') to preserve icon text properties."
          (ctx-gptel (plist-get imp :CAR_CTX_GPTEL))
          (ctx-vis (plist-get imp :CAR_CTX_VISIBLE))
          (ctx-patched (plist-get imp :CAR_CTX_PATCHED))
+         (ctx-map (plist-get imp :CAR_CTX_MAP))
          (scope (plist-get imp :CAR_DOC_CTX_SCOPE))
          (profile (plist-get imp :CAR_CTX_PROFILE))
          (inj (plist-get imp :CAR_CTX_INJECTION))
@@ -750,6 +751,7 @@ Also shows total request cost when present (as the last badge):
          (ctx-gptel (plist-get imp :CAR_CTX_GPTEL))
          (ctx-vis (plist-get imp :CAR_CTX_VISIBLE))
          (ctx-patched (plist-get imp :CAR_CTX_PATCHED))
+         (ctx-map (plist-get imp :CAR_CTX_MAP))
          (scope (plist-get imp :CAR_DOC_CTX_SCOPE))
          (profile (plist-get imp :CAR_CTX_PROFILE))
          ;; IMPORTANT: cost keys are not part of important-plist; read them from PL directly.

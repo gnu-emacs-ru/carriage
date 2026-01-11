@@ -1343,7 +1343,7 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                             (t nil)))
                  ('map (cond
                         ((fboundp 'all-the-icons-material)
-                         (all-the-icons-material "account_tree"
+                         (all-the-icons-material "map"
                                                  :height carriage-mode-icon-height
                                                  :v-adjust carriage-mode-icon-v-adjust
                                                  :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face))))

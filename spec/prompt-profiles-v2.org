@@ -125,6 +125,7 @@ Prompt Guidance
 - PRM-pp-001: Intent=Code: output ONLY blocks; no prose.
 - PRM-pp-002: Suite='sre: NEVER use udiff markers ("--- a/", "+++ b/").
 - PRM-pp-003: Suite='udiff: NEVER use begin_from/begin_to.
+- PRM-pp-004: Intent=Ask and Intent=Hybrid MUST enforce Org-mode formatting (never Markdown).
 - Output-Format: ONLY Org #+begin_patch ... #+end_patch blocks. No text outside blocks.
 - Forbidden-Phrases: "Here is", "As an AI", Markdown fences (```), extra commentary.
 - Determinism Window: T=0, top_p=1.0. Allowed variance: whitespace within payload only.

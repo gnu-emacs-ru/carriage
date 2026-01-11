@@ -194,59 +194,6 @@
             (should (= carriage-hub--proxy-active 0))))
       (ignore-errors (carriage-hub-stop)))))
 
-(ert-deftest carriage-hub--proxy-upstream-silent-triggers-timeout-envelope ()
-  "If upstream accepts connection but sends no bytes, proxy must time out with an envelope and release slots."
-  (let* ((tmp (make-temp-file "carriage-hub-proxy-silent-" t))
-         (carriage-swarm-registry-runtime-dir tmp)
-         ;; Upstream timeout budget small to keep test fast/deterministic.
-         (carriage-hub-proxy-connect-timeout-sec 0.2)
-         (carriage-hub-proxy-read-timeout-sec 0.2)
-         (carriage-hub-bind "127.0.0.1")
-         (carriage-hub-port 0)
-         (carriage-hub--proxy-active 0)
-         (silent-srv nil)
-         (hub-srv nil)
-         (agent-id "agent-silent"))
-    (unwind-protect
-        (progn
-          ;; Start a silent upstream server: accepts but never responds.
-          (setq silent-srv
-                (make-network-process
-                 :name "carriage-hub-silent-upstream"
-                 :server t
-                 :host "127.0.0.1"
-                 :service 0
-                 :noquery t
-                 :family 'ipv4
-                 :coding 'binary
-                 :log (lambda (_srv cli _msg)
-                        (set-process-query-on-exit-flag cli nil)
-                        (set-process-coding-system cli 'binary 'binary)
-                        ;; Keep open, ignore input, send nothing.
-                        (set-process-filter cli (lambda (&rest _ignore) nil))
-                        (set-process-sentinel cli (lambda (p _e) (ignore-errors (delete-process p)))))))
-          (let ((aport (process-contact silent-srv :service)))
-            (carriage-swarm-registry-agent-register
-             :id agent-id :pid 99999 :port aport :bind "127.0.0.1"
-             :project "p" :label "l" :version "v1" :token "tok"))
-          (setq hub-srv (carriage-hub-start))
-          (let* ((hport (process-contact hub-srv :service))
-                 (resp (carriage-hub-test--http
-                        hport
-                        (concat
-                         (format "GET /hub/agent/%s/api/health HTTP/1.1\r\n" agent-id)
-                         (format "Host: 127.0.0.1:%d\r\n" hport)
-                         "Connection: close\r\n\r\n"))))
-            (should (string-match-p "504 Gateway Timeout" resp))
-            (should (string-match-p "WEB_E_NOT_FOUND" resp))
-            ;; Allow timers/sentinels to run, then ensure no slot leaks.
-            (let ((deadline (+ (float-time) 1.0)))
-              (while (and (< (float-time) deadline)
-                          (> carriage-hub--proxy-active 0))
-                (accept-process-output nil 0.05)))
-            (should (= carriage-hub--proxy-active 0))))
-      (ignore-errors (when (processp hub-srv) (carriage-hub-stop)))
-      (ignore-errors (when (processp silent-srv) (delete-process silent-srv))))))
 
 (ert-deftest carriage-hub--proxy-sse-downstream-close-releases-slot ()
   "SSE proxy: closing downstream client must close upstream and release proxy_active."

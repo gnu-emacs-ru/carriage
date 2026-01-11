@@ -1,0 +1,367 @@
+#+title: Context Plan v1 — begin_context_plan DSL and compiler
+#+author: Carriage Team
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Meta
+- Spec-ID: carriage/context/plan/v1
+- Version: v1.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: context, mode, ui
+- Prompt-ABI: v1
+- Pack-Profiles: P1-core, P3-debug
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Anchor: PURPOSE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- LLM-Summary: Define the new Org block #+begin_context_plan as a DSL for discovering
+  repository files (globs, path, substring, regex), and the compiler that materializes
+  it into a plain #+begin_context block. Specify semantics, invariants, errors, and UI
+  binding (C-c C-c in carriage-mode).
+
+Scope
+- Anchor: SCOPE
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- In scope:
+  - DSL grammar of #+begin_context_plan
+  - Materialization rules into #+begin_context
+  - Repository file universe definition (git-aware, respects .gitignore)
+  - Deterministic ordering, de-duplication, limits, and warnings
+  - Keybinding behavior inside carriage-mode (C-c C-c)
+- Out of scope (v1):
+  - LSP-based discovery
+  - Content-based semantic search (ripgrep, embeddings)
+  - Dynamic prompts to an LLM to decide context
+  - Automatic compilation on save (must be explicit)
+
+Terms
+- Anchor: TERMS
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Context Plan: an Org block =#+begin_context_plan … #+end_context_plan= that contains DSL lines.
+- Materialized Context: the Org block =#+begin_context … #+end_context= containing only real file paths.
+- Compiler: code that parses plan DSL and updates/creates the materialized context block.
+- Repo root: project root directory returned by =carriage-project-root=, fallback to default-directory.
+- Repo file universe: set of candidate files inside repo root that are considered discoverable
+  (must respect gitignore and exclude .git).
+
+Normative Requirements
+- Anchor: REQ
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- REQ-ctxplan-001 (Explicit materialization):
+  Context plans MUST NOT be used directly by the context collector. The collector
+  reads only #+begin_context blocks. The plan MUST be compiled explicitly by user action.
+
+- REQ-ctxplan-002 (Placement and update rule):
+  When compiling a plan, the compiler MUST ensure a single materialized #+begin_context
+  block exists immediately after the plan block (allowing only blank lines between).
+  If such a begin_context exists, its body MUST be replaced (upsert). Otherwise it MUST
+  be created. The compiler MUST NOT search further down the buffer to avoid surprise edits.
+
+- REQ-ctxplan-003 (Output format):
+  The materialized begin_context block body MUST contain only file paths, one per line,
+  with no extra commentary or metadata lines.
+
+- REQ-ctxplan-004 (Only files):
+  The compiler MUST output only files (no directories). Non-existing paths MUST be omitted
+  with warnings.
+
+- REQ-ctxplan-005 (Repo-only safety):
+  Every output path MUST resolve to a file inside repo root (checked via truename).
+  Symlinks that resolve outside the repo root MUST be excluded.
+  Remote/TRAMP paths MUST be rejected.
+
+- REQ-ctxplan-006 (.gitignore compliance):
+  The repo file universe MUST respect gitignore (and exclude .git). Preferred mechanism:
+  =git ls-files -co --exclude-standard=. If git is unavailable, the compiler MUST either:
+  (a) fail with an error, or (b) run a documented fallback and emit a warning that gitignore
+  was not applied. Policy MUST be explicit in code (see REQ-ctxplan-019).
+
+- REQ-ctxplan-007 (Determinism):
+  The compiler output MUST be deterministic for a given repo state and plan:
+  - remove duplicates
+  - stable sort lexicographically by repo-relative path
+
+- REQ-ctxplan-008 (Idempotency):
+  Re-compiling without changing repo state or plan MUST produce byte-identical begin_context body.
+
+- REQ-ctxplan-009 (Diagnostics):
+  The compiler MUST report:
+  - total matched files
+  - number of excluded files (out-of-root, missing, ignored)
+  - per-rule warnings when rule has 0 matches
+  - truncation by ctxplan limits (see REQ-ctxplan-012)
+
+- REQ-ctxplan-010 (No content reads):
+  Compilation MUST NOT read file contents. It only computes paths.
+
+- REQ-ctxplan-011 (Do not weaken security):
+  Compilation MUST NOT introduce any behavior that weakens =spec/security-v2.org=
+  constraints (TRAMP ban, path normalization, out-of-root prevention).
+
+- REQ-ctxplan-012 (Compilation limits):
+  The compiler MUST enforce a max number of output files (ctxplan limit) to prevent
+  generating huge begin_context blocks. When exceeded, the output MUST be truncated
+  deterministically and a warning MUST be emitted.
+
+- REQ-ctxplan-013 (C-c C-c behavior):
+  In carriage-mode buffers, pressing C-c C-c inside a begin_context_plan block MUST compile
+  the plan. In all other contexts, C-c C-c MUST delegate to the existing behavior
+  (Org's =org-ctrl-c-ctrl-c=, or Carriage's patch-block handler, as applicable).
+
+- REQ-ctxplan-014 (Comments and blanks in DSL):
+  Inside begin_context_plan, blank lines MUST be ignored. Lines starting with "#" or ";;"
+  MUST be treated as comments and ignored.
+
+- REQ-ctxplan-015 (Default directive):
+  A DSL line that does not start with a directive keyword MUST be treated as =GLOB <line>=.
+
+- REQ-ctxplan-016 (Glob semantics for bare patterns):
+  A glob pattern without "/" MUST be treated as =**/<pattern>= (recursive in repo).
+
+- REQ-ctxplan-017 (No nested writes):
+  The compiler MUST not modify any other parts of the document besides inserting/updating
+  the immediately-following begin_context block.
+
+- REQ-ctxplan-018 (Repo-relative output preference):
+  Output paths SHOULD be repo-relative (portable). Absolute paths MUST NOT be output.
+
+- REQ-ctxplan-019 (Non-git repos policy, v1 default):
+  If repo root is not a git repository, compilation MUST fail with a user-facing error
+  (no fallback traversal). Rationale: gitignore compliance is required by this spec.
+
+Invariants
+- Anchor: INV
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- INV-ctxplan-001: begin_context_plan block MUST compile only to a begin_context block.
+- INV-ctxplan-002: begin_context block produced by the compiler contains only paths, one per line.
+- INV-ctxplan-003: Output paths are repo-relative and point to local files inside repo root.
+- INV-ctxplan-004: Repo file universe excludes ignored-by-git files and .git directory.
+- INV-ctxplan-005: Compiler must be deterministic (stable sort, stable truncation).
+
+Grammar/Schema
+- Anchor: SCHEMA
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- Org blocks:
+  - begin_context_plan:
+    - Marker lines: "#+begin_context_plan" and "#+end_context_plan"
+    - Body: DSL lines (see below)
+  - begin_context:
+    - Marker lines: "#+begin_context" and "#+end_context"
+    - Body: repo-relative file paths, 1 per line
+
+- DSL line (v1):
+  - Comment:
+    - "# ..." or ";; ..."
+  - Directive form:
+    - KEYWORD <args...>
+  - Default:
+    - <pattern>  (equivalent to "GLOB <pattern>")
+
+- Keywords (v1):
+  - GLOB <pattern>
+    - <pattern> is a glob pattern relative to repo root.
+    - If <pattern> has no "/", treat as "**/<pattern>" (REQ-ctxplan-016).
+    - Supported meta:
+      - "*" matches within a single path segment
+      - "?" matches a single char within a segment
+      - "**" matches zero or more directories
+
+  - PATH <path>
+    - <path> may be absolute or relative in the DSL.
+    - Output MUST be repo-relative. Absolute paths outside root are rejected (REQ-ctxplan-005).
+
+  - CONTAINS <substring> [IN <glob>]
+    - Match files whose repo-relative path contains <substring>.
+    - Optional IN limits candidate set to the expansion of <glob>.
+    - Matching is simple substring (case-sensitive by default; see EVO).
+
+  - REGEX <regexp> [IN <glob>]
+    - Match files whose repo-relative path matches Emacs regexp <regexp>.
+    - Optional IN limits candidate set to the expansion of <glob>.
+
+Interfaces/Contracts
+- Anchor: IFC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+Public API (planned):
+- IFC-ctxplan-001:
+  (carriage-context-plan-compile &optional buffer)
+  → result plist:
+    (:ok t|nil
+     :files (list of repo-relative strings)
+     :warnings (list of strings)
+     :stats (:matched N :excluded N :truncated N))
+
+- IFC-ctxplan-002:
+  Interactive command:
+  (carriage-context-plan-compile-at-point)
+  - Finds the context_plan block around point, compiles, upserts begin_context.
+
+- IFC-ctxplan-003:
+  Block detection:
+  (carriage-context-plan--bounds-at-point)
+  → (beg . end) or nil, where beg/end are buffer positions of the plan block.
+
+- IFC-ctxplan-004:
+  Upsert writer:
+  (carriage-context-plan--upsert-materialized-block plan-end files)
+  - Inserts/updates begin_context immediately after plan block end (REQ-ctxplan-002).
+
+- IFC-ctxplan-005:
+  Repo file universe:
+  (carriage-context-plan--repo-files root)
+  → list of repo-relative file paths, gitignore-aware.
+
+Algorithms
+- Anchor: ALG
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- ALG-ctxplan-001: Compile pipeline
+  1) Determine repo root via =carriage-project-root=. If nil → error (REQ-ctxplan-019).
+  2) Extract begin_context_plan body lines.
+  3) Parse lines to an AST of directives (unknown directive → error or warning; see ERR).
+  4) Build repo file universe using =git ls-files -co --exclude-standard= and normalize to
+     repo-relative paths. Ensure each candidate truename is inside root (symlink guard).
+  5) Evaluate directives left-to-right, accumulating a set of matched files.
+     - GLOB: filter universe by glob matcher
+     - PATH: validate and include if inside root and exists
+     - CONTAINS/REGEX: filter universe (or IN-filtered subset)
+  6) De-duplicate, stable sort lexicographically, apply ctxplan max-files truncation.
+  7) Upsert begin_context block immediately after plan block (REQ-ctxplan-002).
+  8) Emit diagnostics (Messages/log), return result plist.
+
+- ALG-ctxplan-002: Glob matching
+  - Convert glob to regexp with strict path-separator semantics:
+    - "*" does not match "/"
+    - "**" matches "(/[^/]+)*" including empty
+  - Match against repo-relative path with "/" separators.
+
+- ALG-ctxplan-003: Safety guard (out-of-root)
+  - For each candidate or PATH:
+    - compute truename
+    - ensure truename has root-tru prefix (directory)
+    - otherwise exclude and warn
+
+Errors and Diagnostics
+- Anchor: ERR
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- ERR-ctxplan-001: CTXPLAN_E_PARSE
+  - Unknown directive keyword, missing arguments, malformed IN clause.
+
+- ERR-ctxplan-002: CTXPLAN_E_NOT_GIT
+  - Repo root exists but git repo is not detected (REQ-ctxplan-019).
+
+- ERR-ctxplan-003: CTXPLAN_E_GIT
+  - git ls-files failed (non-zero exit); include stderr in message.
+
+- ERR-ctxplan-004: CTXPLAN_W_NO_MATCH
+  - Directive matched 0 files.
+
+- ERR-ctxplan-005: CTXPLAN_W_OUTSIDE_ROOT
+  - Path or match resolved outside root (symlink escape or absolute outside root).
+
+- ERR-ctxplan-006: CTXPLAN_W_LIMIT
+  - Output truncated by ctxplan max-files.
+
+Security and Limits
+- Anchor: SEC
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- Must refuse TRAMP paths in DSL and in repo candidate enumeration.
+- Must guard against symlink escapes using truenames (REQ-ctxplan-005).
+- Must not read file contents during compilation (REQ-ctxplan-010).
+- Must not generate absolute output paths (REQ-ctxplan-018).
+
+Performance and Asynchrony
+- Anchor: PERF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- Compilation is a user-triggered command; it may run synchronously but SHOULD avoid UI stalls
+  by:
+  - caching repo file universe per root with TTL
+  - using a single git command rather than filesystem recursion
+- Counting and context collection remain unchanged; only begin_context is materialized.
+
+UI/UX
+- Anchor: UI
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- UI-ctxplan-001: In carriage-mode, C-c C-c inside begin_context_plan compiles it (REQ-ctxplan-013).
+- UI-ctxplan-002: On success, show a concise message:
+  "Context plan: compiled N files (excluded K, truncated T)".
+- UI-ctxplan-003: On warnings, mention first few and show count of remaining warnings.
+
+Testing and Conformance
+- Anchor: TST
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+
+- CHK-ctxplan-001: GLOB without "/" behaves as **/<pattern> (e.g., *.js matches across repo).
+- CHK-ctxplan-002: begin_context is inserted/updated only immediately after plan block.
+- CHK-ctxplan-003: Output is repo-relative, sorted, deduped.
+- CHK-ctxplan-004: gitignored files are not included (use a test repo with .gitignore).
+- CHK-ctxplan-005: symlink escape is excluded.
+- CHK-ctxplan-006: max-files truncation is deterministic and warns.
+
+Cross-References and Anchors
+- Anchor: XREF
+- Normative: t
+- Stability: stable
+- Pack-Priority: P1
+- Related:
+  - spec/context-integration-v2.org
+  - spec/security-v2.org
+  - spec/code-style-v2.org
+- Code (planned):
+  - lisp/carriage-context-plan.el (new)
+  - lisp/carriage-mode.el (C-c C-c routing)
+  - lisp/carriage-keyspec.el (optional action registration)
+  - lisp/carriage-context.el (no direct changes required; consumes begin_context)
+
+Evolution
+- Anchor: EVO
+- Normative: t
+- Stability: stable
+- Pack-Priority: P3
+- Future directives:
+  - LSP <query> / SYMBOL <name> (via xref/lsp)
+  - RG <pattern> IN <glob> (ripgrep by content)
+  - TAG <org-tag> (org-aware selection)
+- Future options:
+  - Case-insensitive CONTAINS/REGEX
+  - Per-rule limits and priorities
+  - Multiple materialized begin_context targets (named contexts)

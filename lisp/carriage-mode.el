@@ -534,6 +534,8 @@ Do not define bindings here; all key bindings are applied via keyspec and mode s
 ;; Ensure menu command autoload is available even if keyspec isn't loaded yet.
 ;; This allows binding C-c e to open the menu immediately in carriage-mode buffers.
 (autoload 'carriage-keys-open-menu "carriage-keyspec" "Open Carriage action menu from keyspec." t)
+(autoload 'carriage-context-plan-compile-at-point "carriage-context-plan"
+  "Compile begin_context_plan at point into begin_context." t)
 
 ;; Capability probe for current engine (parity with dispatcher)
 (defun carriage--engine-supports-op-p (op)
@@ -704,6 +706,51 @@ Debounced refresh is handled by `carriage-ui--ctx-schedule-refresh`."
              (fboundp 'carriage-ui-doc-cost-schedule-refresh))
     (ignore-errors (carriage-ui-doc-cost-schedule-refresh 0.05))))
 
+(defun carriage--point-in-org-block-p (begin-re end-re)
+  "Return non-nil when point is inside an Org block defined by BEGIN-RE/END-RE.
+BEGIN-RE and END-RE are regexps matching marker lines (BOL-anchored recommended)."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let ((case-fold-search t)
+            (pt (point))
+            beg end)
+        (when (re-search-backward begin-re nil t)
+          (setq beg (match-beginning 0))
+          (goto-char beg)
+          (when (re-search-forward end-re nil t)
+            (setq end (match-end 0))
+            (and (numberp beg) (numberp end)
+                 (>= pt beg) (<= pt end))))))))
+
+(defun carriage-ctrl-c-ctrl-c ()
+  "Context-sensitive handler for C-c C-c in carriage-mode buffers.
+
+Routing:
+- Inside begin_context_plan → compile it to begin_context.
+- Inside begin_patch        → apply at point or region.
+- Otherwise                 → delegate to Org's `org-ctrl-c-ctrl-c`."
+  (interactive)
+  (cond
+   ;; 1) Context plan compilation
+   ((carriage--point-in-org-block-p
+     "^[ \t]*#\\+begin_context_plan\\b"
+     "^[ \t]*#\\+end_context_plan\\b")
+    (if (fboundp 'carriage-context-plan-compile-at-point)
+        (call-interactively #'carriage-context-plan-compile-at-point)
+      (user-error "carriage-context-plan not available")))
+   ;; 2) Patch apply (legacy convenience; keeps prior semantics)
+   ((carriage--point-in-org-block-p
+     "^[ \t]*#\\+begin_patch\\b"
+     "^[ \t]*#\\+end_patch\\b")
+    (if (fboundp 'carriage-apply-at-point-or-region)
+        (call-interactively #'carriage-apply-at-point-or-region)
+      (user-error "carriage apply commands are not available")))
+   ;; 3) Delegate to Org
+   (t
+    (require 'org)
+    (call-interactively #'org-ctrl-c-ctrl-c))))
+
 (defun carriage-mode--setup-keys-and-panels ()
   "Apply keyspec keymaps, define bindings, and open optional panels."
   (when (require 'carriage-keyspec nil t)
@@ -714,11 +761,11 @@ Debounced refresh is handled by `carriage-ui--ctx-schedule-refresh`."
     (setq carriage--mode-emulation-map nil
           carriage--emulation-map-alist nil)
     ;; Legacy bindings:
-    ;; - C-c C-c → apply at point/region ONLY on patch blocks; otherwise delegate to Org
+    ;; - C-c C-c → context router (plan→compile, patch→apply, else Org)
     ;; - C-c !   → apply last iteration (override org-time-stamp in carriage-mode buffers)
     (define-key carriage-mode-map (kbd "C-c !") #'carriage-apply-last-iteration)
-    (when (and (boundp 'carriage-enable-legacy-bindings) carriage-enable-legacy-bindings)
-      (define-key carriage-mode-map (kbd "C-c C-c") #'carriage-ctrl-c-ctrl-c))
+    ;; Always bind in carriage-mode buffers (REQ-ctxplan-013).
+    (define-key carriage-mode-map (kbd "C-c C-c") #'carriage-ctrl-c-ctrl-c)
     (when (and carriage-mode-auto-open-log (fboundp 'carriage-show-log))
       (ignore-errors (carriage-show-log)))
     (when (and carriage-mode-auto-open-traffic (fboundp 'carriage-show-traffic))

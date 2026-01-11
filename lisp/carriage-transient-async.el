@@ -35,31 +35,38 @@ STATE is an UI state symbol like 'sending, 'apply or 'dry-run."
         ;; Normal path (outside transient): call immediately.
         (apply orig-fn args)
       (let* ((carriage--transient-async--reentry t)
-             (prefix current-prefix-arg))
+             (prefix current-prefix-arg)
+             ;; Pin buffer to avoid sending/inserting into a different Carriage buffer
+             ;; if current-buffer changes between transient closing and timer firing.
+             (srcbuf (current-buffer)))
         ;; 1) Close transient now
         (carriage--transient-quit)
-        ;; 2) Early feedback: state + preloader
-        (when (fboundp 'carriage-ui-set-state)
-          (ignore-errors (carriage-ui-set-state state)))
-        (when (and (eq state 'sending) (fboundp 'carriage--preloader-start))
-          (ignore-errors (carriage--preloader-start)))
+        ;; 2) Early feedback: state + preloader (in the originating buffer)
+        (when (buffer-live-p srcbuf)
+          (with-current-buffer srcbuf
+            (when (fboundp 'carriage-ui-set-state)
+              (ignore-errors (carriage-ui-set-state state)))
+            (when (and (eq state 'sending) (fboundp 'carriage--preloader-start))
+              (ignore-errors (carriage--preloader-start)))))
         ;; Give redisplay a chance
         (sit-for 0)
-        ;; 3) Schedule the actual call on the next tick
+        ;; 3) Schedule the actual call on the next tick (in the originating buffer)
         (run-at-time
          0 nil
          (lambda ()
            (let ((current-prefix-arg prefix))
-             (condition-case e
-                 (if (commandp orig-fn)
-                     (call-interactively orig-fn)
-                   (apply orig-fn args))
-               (error
-                (when (fboundp 'carriage-ui-set-state)
-                  (ignore-errors (carriage-ui-set-state 'error)))
-                (when (require 'carriage-logging nil t)
-                  (ignore-errors
-                    (carriage-log "transient-async: %s" (error-message-string e))))))))))
+             (when (buffer-live-p srcbuf)
+               (with-current-buffer srcbuf
+                 (condition-case e
+                     (if (commandp orig-fn)
+                         (call-interactively orig-fn)
+                       (apply orig-fn args))
+                   (error
+                    (when (fboundp 'carriage-ui-set-state)
+                      (ignore-errors (carriage-ui-set-state 'error)))
+                    (when (require 'carriage-logging nil t)
+                      (ignore-errors
+                        (carriage-log "transient-async: %s" (error-message-string e))))))))))))
       ;; Return promptly to let transient disappear instantly
       nil)))
 

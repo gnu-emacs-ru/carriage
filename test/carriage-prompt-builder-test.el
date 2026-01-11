@@ -96,7 +96,8 @@
     (should (string-match-p "Formatting (Org-mode required):" sys))
     (should (string-match-p "not Markdown" sys))
     (should (string-match-p "never '#'" sys))
-    (should (string-match-p "never triple backticks" sys))))
+    (should (string-match-p "never triple backticks" sys))
+    (should (string-match-p "Default behavior: reply with Org prose only\\." sys))))
 
 (ert-deftest carriage-prompt-builder-code-does-not-include-org-formatting-fragment ()
   "Intent=Code system prompt should not include the Org prose formatting fragment."

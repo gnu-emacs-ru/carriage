@@ -56,7 +56,7 @@
   "Approximate max size (in characters) for a traffic buffer before trimming from the top."
   :type 'integer :group 'carriage-traffic)
 
-(defcustom carriage-traffic-log-to-file t
+(defcustom carriage-traffic-log-to-file nil
   "When non-nil, also append traffic log lines to a file (see `carriage-traffic-log-file')."
   :type 'boolean :group 'carriage-traffic)
 

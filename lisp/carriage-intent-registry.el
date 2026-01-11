@@ -77,6 +77,7 @@ Do NOT include any prose outside blocks. No reasoning, no commentary.
    (carriage--intent-frag-org-formatting ctx)
    "\n"
    "You MAY include brief prose, but the tool will extract and apply ONLY Org begin_patch blocks.\n"
+   "Default behavior: reply with Org prose only. Output #+begin_patch blocks ONLY when the user explicitly asks to modify files (e.g., \"Implement\", \"Fix\", \"Apply changes\", \"Реализуй\", \"Вноси правки\").\n"
    "Keep prose minimal and place it before or after the blocks. Do not insert text inside blocks."))
 
 (defun carriage--intent-frag-ask (ctx)

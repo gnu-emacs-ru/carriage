@@ -91,7 +91,8 @@ FRAG is either a STRING or a function of (CTX) returning STRING).")
     "- Links: use Org links like [[URL-or-path][label]].\n"
     "- Do not emit Markdown/HTML fences or other markup.\n"
     "\n"
-    "Hybrid mode: you MAY include prose, but the tool will apply ONLY the content of #+begin_patch ... #+end_patch blocks."))
+    "Hybrid mode: you MAY include prose, but the tool will apply ONLY the content of #+begin_patch ... #+end_patch blocks.\n"
+    "Default behavior: reply with Org prose only. Output #+begin_patch blocks ONLY when the user explicitly asks to modify files (e.g., \"Implement\", \"Fix\", \"Apply changes\", \"Реализуй\", \"Вноси правки\")."))
 
   ;; Provide the feature so (require 'carriage-intent-registry) in tests succeeds even without the separate file.
   (provide 'carriage-intent-registry))

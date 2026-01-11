@@ -78,5 +78,32 @@
     (should (stringp sys))
     (should (string-match-p "AIBO (literal-only" sys))))
 
+(ert-deftest carriage-prompt-builder-ask-includes-org-formatting ()
+  "Intent=Ask system prompt must enforce Org-only formatting (never Markdown)."
+  (let* ((ret (carriage-build-prompt 'Ask 'sre '(:payload "Q")))
+         (sys (plist-get ret :system)))
+    (should (stringp sys))
+    (should (string-match-p "Formatting (Org-mode required):" sys))
+    (should (string-match-p "not Markdown" sys))
+    (should (string-match-p "never '#'" sys))
+    (should (string-match-p "never triple backticks" sys))))
+
+(ert-deftest carriage-prompt-builder-hybrid-includes-org-formatting ()
+  "Intent=Hybrid system prompt must enforce Org-only prose formatting (never Markdown)."
+  (let* ((ret (carriage-build-prompt 'Hybrid 'sre '(:payload "Q")))
+         (sys (plist-get ret :system)))
+    (should (stringp sys))
+    (should (string-match-p "Formatting (Org-mode required):" sys))
+    (should (string-match-p "not Markdown" sys))
+    (should (string-match-p "never '#'" sys))
+    (should (string-match-p "never triple backticks" sys))))
+
+(ert-deftest carriage-prompt-builder-code-does-not-include-org-formatting-fragment ()
+  "Intent=Code system prompt should not include the Org prose formatting fragment."
+  (let* ((ret (carriage-build-prompt 'Code 'sre '(:payload "Q")))
+         (sys (plist-get ret :system)))
+    (should (stringp sys))
+    (should-not (string-match-p "Formatting (Org-mode required):" sys))))
+
 (provide 'carriage-prompt-builder-test)
 ;;; carriage-prompt-builder-test.el ends here

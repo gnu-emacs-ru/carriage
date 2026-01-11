@@ -68,12 +68,30 @@ FRAG is either a STRING or a function of (CTX) returning STRING).")
     (mapcar #'car carriage--intent-registry))
 
   ;; Defaults (English), can be overridden via carriage-intent-fragment-overrides.
-  (carriage-intent-register 'Ask
-                            "Ask mode: dialogue only. Do NOT generate any #+begin_patch blocks.")
+  (carriage-intent-register
+   'Ask
+   (concat
+    "Formatting (Org-mode required):\n"
+    "- Answer in VALID Org-mode (not Markdown).\n"
+    "- Headings: use '*' / '**' / '***' (never '#', '##', etc.).\n"
+    "- Code blocks: use '#+begin_src <lang> :results output' ... '#+end_src' (never triple backticks).\n"
+    "- Links: use Org links like [[URL-or-path][label]].\n"
+    "- Do not emit Markdown/HTML fences or other markup.\n"
+    "\n"
+    "Ask mode: dialogue only. Do NOT generate any #+begin_patch blocks."))
   (carriage-intent-register 'Code
                             "Code mode: answer ONLY with Org #+begin_patch ... #+end_patch blocks. No text outside blocks.")
-  (carriage-intent-register 'Hybrid
-                            "Hybrid mode: you MAY include prose, but the tool will apply ONLY the content of #+begin_patch ... #+end_patch blocks.")
+  (carriage-intent-register
+   'Hybrid
+   (concat
+    "Formatting (Org-mode required):\n"
+    "- Answer in VALID Org-mode (not Markdown).\n"
+    "- Headings: use '*' / '**' / '***' (never '#', '##', etc.).\n"
+    "- Code blocks: use '#+begin_src <lang> :results output' ... '#+end_src' (never triple backticks).\n"
+    "- Links: use Org links like [[URL-or-path][label]].\n"
+    "- Do not emit Markdown/HTML fences or other markup.\n"
+    "\n"
+    "Hybrid mode: you MAY include prose, but the tool will apply ONLY the content of #+begin_patch ... #+end_patch blocks."))
 
   ;; Provide the feature so (require 'carriage-intent-registry) in tests succeeds even without the separate file.
   (provide 'carriage-intent-registry))

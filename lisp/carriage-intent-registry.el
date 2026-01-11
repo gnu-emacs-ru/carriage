@@ -61,14 +61,30 @@ Do NOT include any prose outside blocks. No reasoning, no commentary.
 - Paths must be RELATIVE to project root; no absolute paths, no \"..\" segments.
 - Allowed operations depend on Suite. Do not mention formats that are not allowed by the Suite.")
 
-(defun carriage--intent-frag-hybrid (_ctx)
-  "Default fragment for Intent=Hybrid."
-  "You MAY include brief prose, but the tool will extract and apply ONLY Org begin_patch blocks.
-Keep prose minimal and place it before or after the blocks. Do not insert text inside blocks.")
+(defun carriage--intent-frag-org-formatting (_ctx)
+  "Base formatting rules for answers: Org-mode only (never Markdown)."
+  (concat
+   "Formatting (Org-mode required):\n"
+   "- Answer in VALID Org-mode (not Markdown).\n"
+   "- Headings: use '*' / '**' / '***' (never '#', '##', etc.).\n"
+   "- Code blocks: use '#+begin_src <lang> :results output' ... '#+end_src' (never triple backticks).\n"
+   "- Links: use Org links like [[URL-or-path][label]].\n"
+   "- Do not emit Markdown/HTML fences or other markup.\n"))
 
-(defun carriage--intent-frag-ask (_ctx)
+(defun carriage--intent-frag-hybrid (ctx)
+  "Default fragment for Intent=Hybrid."
+  (concat
+   (carriage--intent-frag-org-formatting ctx)
+   "\n"
+   "You MAY include brief prose, but the tool will extract and apply ONLY Org begin_patch blocks.\n"
+   "Keep prose minimal and place it before or after the blocks. Do not insert text inside blocks."))
+
+(defun carriage--intent-frag-ask (ctx)
   "Default fragment for Intent=Ask."
-  "Do NOT produce any begin_patch blocks. Provide a concise prose answer only.")
+  (concat
+   (carriage--intent-frag-org-formatting ctx)
+   "\n"
+   "Do NOT produce any begin_patch blocks. Provide a concise prose answer only."))
 
 ;; Register defaults
 (carriage-intent-register 'Code   #'carriage--intent-frag-code)

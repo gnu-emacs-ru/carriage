@@ -54,6 +54,32 @@ Normative Requirements
 - REQ-style-006: Org specs MUST follow SoS anchors and properties; no custom section names.
 - REQ-style-007: Identifiers in specs MUST use REQ/INV/IFC/ALG/ERR/TST/PRM/CHK with topic scoping.
 - REQ-style-008: Avoid ambiguous Unicode; ASCII punctuation in code and anchors only.
+- REQ-style-009: Elisp files (.el) MUST NOT exceed 800 lines of code (FREEZE). If logic requires more, it MUST be split into semantic modules named as carriage-<domain>.el.
+
+Essentials (normative)
+- Clean core + thin ports:
+  - Domain logic SHOULD be pure, composable, and testable.
+  - Effects (buffers, processes, UI) MUST be isolated at the edges.
+  - Modules MUST be minimally sufficient in size; each file MUST encapsulate a single responsibility.
+- Async-first:
+  - Do not block the UI; process filters/sentinels MUST be fast and exception-safe.
+  - Provide sync wrappers only as thin delegates to async flows.
+- Structured errors:
+  - Distinguish domain failures (structured alists) from programmer errors (signal).
+  - Do not throw from filters/sentinels; report via structured results.
+- Stable data schemas:
+  - Prefer alist with symbol keys for internal APIs; document shapes; keep types stable.
+- Logging:
+  - Cheap to disable; separate channels (log/traffic); cap buffer sizes.
+- Readability:
+  - Prefer small functions over large monoliths; add docstrings with contracts and alist schemas.
+- Tests and compatibility:
+  - ERT for pure logic/parsers; simulate process IO; keep byte-compiler warnings at zero.
+
+Checklist (minimum)
+- Lexical binding enabled; provide/require correct; public functions documented.
+- No blocking waits on main thread; timeouts and abort flows tested.
+- i18n keys present for UI strings referenced by code.
 
 Invariants
 - Anchor: INV
@@ -64,6 +90,7 @@ Invariants
 - FREEZE: indent = 2 spaces for Lisp forms where applicable; no tabs in code.
 - INV-style-001: “Specifications:” list uses relative paths (spec/*.org).
 - INV-style-002: Spec titles and anchors are stable across minor versions.
+- INV-style-003: Elisp filenames MUST reflect their primary domain function and follow the pattern carriage-<domain>.el.
 
 Grammar/Schema
 - Anchor: SCHEMA
@@ -99,6 +126,8 @@ Algorithms
   - Find “Specifications:” → validate paths exist in spec/index → pass/fail.
 - ALG-style-003: line-width-check
   - Scan code/spec lines; warn on > 100 chars except URLs/long examples (allowlist).
+- ALG-style-004: file-size-check
+  - Count non-comment, non-blank lines in .el files; fail if > 800.
 
 Errors and Diagnostics
 - Anchor: ERR
@@ -109,6 +138,7 @@ Errors and Diagnostics
 - ERR-style-002: STYLE_E_SPECS_BLOCK — missing “Specifications:” or dangling spec.
 - ERR-style-003: STYLE_E_WIDTH — line width exceeded.
 - ERR-style-004: STYLE_E_ANCHOR — missing mandatory SoS section/anchor.
+- ERR-style-005: STYLE_E_FILE_SIZE — file exceeds the 800-line limit.
 
 Security and Limits
 - Anchor: SEC
@@ -139,6 +169,7 @@ Testing and Conformance
 - CHK-style-001: Headers / “Specifications:” present and valid.
 - CHK-style-002: SoS anchors present in specs; section properties set.
 - CHK-style-003: Line width ≤ 100 except allowlisted lines.
+- CHK-style-004: Elisp files ≤ 800 lines of code; decomposition into semantic modules is enforced.
 
 Cross-References and Anchors
 - Anchor: XREF
@@ -146,7 +177,7 @@ Cross-References and Anchors
 - Stability: stable
 - Pack-Priority: P3
 - Source of Truth: spec/spec-on-specs.org
-- Related: spec/index.org, spec/file-header-format-v2.org, spec/code-style-essentials-v2.org
+- Related: spec/index.org, spec/file-header-format-v2.org
 - Code: lisp/**/*.el (headers), tools/lint/* (out of tree)
 
 Evolution

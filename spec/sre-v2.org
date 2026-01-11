@@ -139,9 +139,10 @@ Prompt Guidance (LLM Output Contract)
   - #+end_to
   - … repeat pairs …
   - #+end_patch
+- Do NOT generate patches that don't change the content (no-op patches). If no changes are needed, do not output any patch block.
 - Forbidden-Phrases: unified diff markers ("--- ", "+++ ", "diff --git").
 - Positive Example: one FROM→TO pair with :occur first; escaped "#+end_from" inside payload.
-- Negative Example: :occur all without :expect; missing #+begin_to/# +end_to; includes udiff markers.
+- Negative Example: :occur all without :expect; missing #+begin_to/# +end_to; includes udiff markers; no-op patch (TO identical to FROM).
 
 Testing and Conformance
 - Anchor: TST

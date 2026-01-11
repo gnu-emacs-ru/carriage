@@ -114,9 +114,10 @@ Prompt Guidance (LLM Output Contract)
 - Stability: stable
 - Pack-Priority: P0
 - PRM-aibo-001: Answer ONLY with an aibo block identical to SRE layout; never output udiff.
+- Do NOT generate patches that don't change the content (no-op patches). If no changes are needed, do not output any patch block.
 - Forbidden-Phrases: "--- a/", "+++ b/", "diff --git"; any :match key.
 - Positive Example: two pairs, :occur all with :expect 2, literal-only replacements, no :match key.
-- Negative Example: presence of :match regex; or :occur all without :expect.
+- Negative Example: presence of :match regex; or :occur all without :expect; no-op patch (TO identical to FROM).
 
 Testing and Conformance
 - Anchor: TST

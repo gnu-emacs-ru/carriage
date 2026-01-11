@@ -189,7 +189,8 @@ Returns a plan item alist: (:version \"1\" :op 'patch :strip N :path REL :diff B
    "+new\n"
    "#+end_patch\n"
    "- Requirements: exactly ONE file (one ---/+++ pair); a/ and b/ paths MUST match; :strip=1 for a/b.\n"
-   "- Forbidden: binary patches, rename/copy preludes, multi-file diffs.\n"))
+   "- Forbidden: binary patches, rename/copy preludes, multi-file diffs.\n"
+   "- Do NOT generate patches that don't change the content (no-op patches). If no changes are needed, do not output any patch block.\n"))
 
 ;;; Registration
 (carriage-format-register 'patch "1"

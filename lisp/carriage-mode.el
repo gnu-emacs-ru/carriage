@@ -2589,8 +2589,11 @@ Important UI rule:
             ((or 'patch 'sre 'aibo 'replace) (setq modified (1+ modified)) (push (or (plist-get it :file) (plist-get it :path) "-") files))
             (_ (push (or (plist-get it :file) (plist-get it :path) "-") files)))))
       (let* ((total (length oks))
-             (files-str (mapconcat #'identity (nreverse (delete-dups (delq nil files))) ", ")))
-        (when (> total 0)
+             (files-str (mapconcat #'identity (nreverse (delete-dups (delq nil files))) ", "))
+             ;; Count non-noop modifications (where changed-bytes > 0)
+             (non-noop (cl-count-if (lambda (it) (> (or (plist-get it :changed-bytes) 0) 0)) oks)))
+        ;; Only announce if there are actual modifications (not just no-op patches)
+        (when (and (> total 0) (> non-noop 0))
           (message "Carriage: applied OK (%d items) — created:%d modified:%d deleted:%d renamed:%d — %s"
                    total created modified deleted renamed files-str))))))
 (defun carriage--apply-async-enabled-p ()

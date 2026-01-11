@@ -63,7 +63,8 @@
    "- For :occur all, :expect is required.\n"
    "- Empty TO block is allowed (delete matched text).\n"
 "- If a line inside a block is exactly \"#+end_from\" or \"#+end_to\", add one leading space to escape it.\n"
-"- When enabled (carriage-mode-require-patch-description=t), include :description in #+begin_patch header.\n"))
+"- When enabled (carriage-mode-require-patch-description=t), include :description in #+begin_patch header.\n"
+   "- Do NOT generate patches that don't change the content (no-op patches). If no changes are needed, do not output any patch block.\n"))
 
 ;;;; Internal helpers (SRE core)
 

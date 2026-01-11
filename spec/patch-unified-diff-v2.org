@@ -130,10 +130,11 @@ Prompt Guidance (LLM Output Contract)
   - #+begin_patch (:version "1" :op "patch" :strip 1)
   - <unified diff of EXACTLY ONE file>
   - #+end_patch
+- Do NOT generate patches that don't change the content (no-op patches). If no changes are needed, do not output any patch block.
 - Forbidden-Phrases: comments outside block; stray “#+end”.
 - Determinism Window: structure fixed; diff content per change set only.
 - Positive Example: one-file diff, matching a/ and b/ paths, :strip 1, no rename/copy/binary.
-- Negative Example: multi-file diff, or binary patch, or rename/copy prelude present.
+- Negative Example: multi-file diff, or binary patch, or rename/copy prelude present, or no-op patch (content unchanged).
 
 Testing and Conformance
 - Anchor: TST

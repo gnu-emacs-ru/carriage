@@ -127,12 +127,13 @@ Prompt Guidance
 - PRM-pp-003: Suite='udiff: NEVER use begin_from/begin_to.
 - PRM-pp-004: Intent=Ask and Intent=Hybrid MUST enforce Org-mode formatting (never Markdown).
 - Output-Format: ONLY Org #+begin_patch ... #+end_patch blocks. No text outside blocks.
+- Do NOT generate patches that don't change the content (no-op patches). If no changes are needed, do not output any patch block.
 - Forbidden-Phrases: "Here is", "As an AI", Markdown fences (```), extra commentary.
 - Determinism Window: T=0, top_p=1.0. Allowed variance: whitespace within payload only.
 - Escape Policy: sentinel lines in SRE/AIBO payload equal to "#+end_from"/"# +end_to"
   MUST be prefixed by one leading space; udiff MUST escape as per patch-v2.
 - Positive Example: a single #+begin_patch with a valid header and body; no stray lines.
-- Negative Example: any prose around block; udiff markers in SRE; SRE markers in udiff.
+- Negative Example: any prose around block; udiff markers in SRE; SRE markers in udiff; no-op patches.
 
 Tool Contract
 - Anchor: TOOL

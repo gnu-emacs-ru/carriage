@@ -36,18 +36,24 @@ STATE is an UI state symbol like 'sending, 'apply or 'dry-run."
         (apply orig-fn args)
       (let* ((carriage--transient-async--reentry t)
              (prefix current-prefix-arg)
-             ;; Pin buffer to avoid sending/inserting into a different Carriage buffer
-             ;; if current-buffer changes between transient closing and timer firing.
-             (srcbuf (current-buffer)))
+             ;; Pin buffer/window to avoid sending/inserting into a different Carriage buffer
+             ;; if focus/current-buffer changes between transient closing and timer firing.
+             (srcbuf (current-buffer))
+             (srcwin (selected-window)))
         ;; 1) Close transient now
         (carriage--transient-quit)
-        ;; 2) Early feedback: state + preloader (in the originating buffer)
+        ;; 2) Early feedback: state + preloader (in the originating buffer/window)
         (when (buffer-live-p srcbuf)
           (with-current-buffer srcbuf
             (when (fboundp 'carriage-ui-set-state)
               (ignore-errors (carriage-ui-set-state state)))
+            ;; If preloader is window-local, bind it to the window where the command was invoked.
             (when (and (eq state 'sending) (fboundp 'carriage--preloader-start))
-              (ignore-errors (carriage--preloader-start)))))
+              (ignore-errors
+                (if (window-live-p srcwin)
+                    (with-selected-window srcwin
+                      (carriage--preloader-start))
+                  (carriage--preloader-start))))))
         ;; Give redisplay a chance
         (sit-for 0)
         ;; 3) Schedule the actual call on the next tick (in the originating buffer)

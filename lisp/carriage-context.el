@@ -887,17 +887,22 @@ and size limits:
       (_ "text"))))
 
 (defun carriage-context--collapse-applied-patches-in-text (text)
-  "Return TEXT with bodies of applied #+begin_patch blocks collapsed.
+  "Return TEXT with applied #+begin_patch blocks replaced by one-line history comments.
 
-Keeps the begin_patch header line so the LLM sees what was already applied,
-but replaces the body with a one-line summary comment and preserves (or
-synthesizes) the closing #+end_patch."
+Policy:
+- For blocks whose header plist contains :applied non-nil:
+  - Remove the whole begin_patch…end_patch block (including markers).
+  - Insert one comment line:
+      ;; applied patch: <target> — <description|result|Applied>
+- Non-applied patch blocks remain unchanged.
+
+This preserves history for the LLM while avoiding begin_patch markers that can bias it."
   (with-temp-buffer
     (insert (or text ""))
     (goto-char (point-min))
     (let ((case-fold-search t))
       (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
-        (let* ((beg-line-end (line-end-position))
+        (let* ((beg-line-beg (line-beginning-position))
                (sexp-str (match-string 1))
                (plist (condition-case _e
                           (car (read-from-string sexp-str))
@@ -908,26 +913,32 @@ synthesizes) the closing #+end_patch."
                                "Applied"))
                      (desc (string-trim (format "%s" desc)))
                      (desc (if (string-empty-p desc) "Applied" desc))
-                     (summary (format ";; applied: %s (content omitted)\n" desc))
-                     (body-beg (min (point-max) (1+ beg-line-end)))
-                     (end-pos (save-excursion
-                                (goto-char body-beg)
-                                (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t))))
-                (if end-pos
-                    (let ((end-line-beg (save-excursion
-                                          (goto-char end-pos)
-                                          (line-beginning-position))))
-                      (delete-region body-beg end-line-beg)
-                      (goto-char body-beg)
-                      (insert summary)
-                      ;; Continue after the real end_patch line.
-                      (when (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
-                        (goto-char (min (point-max) (1+ (line-end-position))))))
-                  ;; No end marker: truncate to end and synthesize it.
-                  (delete-region body-beg (point-max))
-                  (goto-char body-beg)
-                  (insert summary "#+end_patch\n")
-                  (goto-char (point-max))))
+                     (target
+                      (cond
+                       ((eq (plist-get plist :op) 'rename)
+                        (let ((a (plist-get plist :from))
+                              (b (plist-get plist :to)))
+                          (string-trim
+                           (format "%s → %s"
+                                   (or (and (stringp a) a) "-")
+                                   (or (and (stringp b) b) "-")))))
+                       ((stringp (plist-get plist :path)) (plist-get plist :path))
+                       ((stringp (plist-get plist :file)) (plist-get plist :file))
+                       (t "-")))
+                     (summary (format ";; applied patch: %s — %s\n"
+                                      (string-trim (format "%s" target))
+                                      desc))
+                     (block-end
+                      (save-excursion
+                        (goto-char (line-end-position))
+                        (forward-line 1)
+                        (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                            (min (point-max) (1+ (line-end-position)))
+                          (point-max)))))
+                (delete-region beg-line-beg block-end)
+                (goto-char beg-line-beg)
+                (insert summary)
+                (goto-char (min (point-max) (+ beg-line-beg (length summary)))))
             ;; Not applied: continue scanning from next line to avoid loops.
             (goto-char (min (point-max) (1+ (line-end-position))))))))
     (buffer-substring-no-properties (point-min) (point-max))))

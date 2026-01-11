@@ -338,15 +338,12 @@ Strips:
         (delete-region (line-beginning-position)
                        (min (point-max) (1+ (line-end-position)))))
 
-      ;; Applied patch blocks must never leak full bodies into prompts.
-      ;; Keep the begin_patch header line so the model sees what was already applied,
-      ;; but replace the body with:
-      ;;   ;; applied: <desc|result> (content omitted)
-      ;; and preserve (or synthesize) the closing #+end_patch.
+      ;; Applied patch blocks must never leak into prompts (neither bodies nor begin_patch headers).
+      ;; Replace each applied begin_patch…end_patch block with one history comment line:
+      ;;   ;; applied patch: <target> — <description|result|Applied>
       (goto-char (point-min))
       (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
         (let* ((beg-line-beg (line-beginning-position))
-               (beg-line-end (line-end-position))
                (sexp-str (match-string 1))
                (plist (condition-case _e
                           (car (read-from-string sexp-str))
@@ -357,25 +354,32 @@ Strips:
                                "Applied"))
                      (desc (string-trim (format "%s" desc)))
                      (desc (if (string-empty-p desc) "Applied" desc))
-                     (summary (format ";; applied: %s (content omitted)\n" desc))
-                     (body-beg (min (point-max) (1+ beg-line-end)))
-                     (end-pos (save-excursion
-                                (goto-char body-beg)
-                                (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t))))
-                (if end-pos
-                    (let* ((end-line-beg (save-excursion
-                                           (goto-char end-pos)
-                                           (line-beginning-position))))
-                      (delete-region body-beg end-line-beg)
-                      (goto-char body-beg)
-                      (insert summary)
-                      ;; Continue scanning after the end_patch line (re-find, positions may have shifted).
-                      (when (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
-                        (goto-char (min (point-max) (1+ (line-end-position))))))
-                  (delete-region body-beg (point-max))
-                  (goto-char body-beg)
-                  (insert summary "#+end_patch\n")
-                  (goto-char (point-max))))
+                     (target
+                      (cond
+                       ((eq (plist-get plist :op) 'rename)
+                        (let ((a (plist-get plist :from))
+                              (b (plist-get plist :to)))
+                          (string-trim
+                           (format "%s → %s"
+                                   (or (and (stringp a) a) "-")
+                                   (or (and (stringp b) b) "-")))))
+                       ((stringp (plist-get plist :path)) (plist-get plist :path))
+                       ((stringp (plist-get plist :file)) (plist-get plist :file))
+                       (t "-")))
+                     (summary (format ";; applied patch: %s — %s\n"
+                                      (string-trim (format "%s" target))
+                                      desc))
+                     (block-end
+                      (save-excursion
+                        (goto-char (line-end-position))
+                        (forward-line 1)
+                        (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                            (min (point-max) (1+ (line-end-position)))
+                          (point-max)))))
+                (delete-region beg-line-beg block-end)
+                (goto-char beg-line-beg)
+                (insert summary)
+                (goto-char (min (point-max) (+ beg-line-beg (length summary)))))
             ;; not applied → continue scanning from next line to avoid infinite loops
             (goto-char (min (point-max) (1+ (line-end-position)))))))))
   (buffer-substring-no-properties (point-min) (point-max)))

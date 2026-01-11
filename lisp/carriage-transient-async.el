@@ -26,6 +26,21 @@
             (transient-quit-one)))
       (error nil))))
 
+(defun carriage--transient-source-window ()
+  "Return the window associated with the current transient invocation (best-effort).
+
+In transient sessions, `current-buffer' may be the transient origin buffer (or even
+the minibuffer). For correctness, we derive the source buffer from a window:
+- Prefer `transient--original-window' when available,
+- else prefer `minibuffer-selected-window',
+- else fall back to `selected-window'."
+  (or (and (boundp 'transient--original-window)
+           (window-live-p transient--original-window)
+           transient--original-window)
+      (let ((w (ignore-errors (minibuffer-selected-window))))
+        (and (window-live-p w) w))
+      (selected-window)))
+
 (defun carriage--transient-async-around (state)
   "Return an :around advice that closes transient and runs command async.
 STATE is an UI state symbol like 'sending, 'apply or 'dry-run."

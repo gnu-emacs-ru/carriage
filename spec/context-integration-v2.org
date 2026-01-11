@@ -61,6 +61,13 @@ Normative Requirements
 - REQ-ctx-006: Redaction MUST mask secrets when configured; large files MAY be summarized.
 - REQ-ctx-007: Collector MUST return deterministic ordering (stable sort by source, then path).
 - REQ-ctx-008: Warnings MUST be aggregated and surfaced in reports/tooltips.
+- REQ-ctx-009: Project Map source MUST be supported (default=on) that adds a `#+begin_map` block containing a gitignore-aware tree of repo-relative paths.
+  - Preferred mechanism: `git ls-files -co --exclude-standard` (fast, gitignore-aware).
+  - If git is unavailable, not a repo, or fails/timeouts, the implementation MAY fall back to OS/Emacs enumeration (directory traversal) to avoid hard failure.
+    - When falling back, the implementation MUST warn that gitignore compliance may be incomplete.
+  - The map MUST be deterministic (stable sort, stable rendering) and MUST NOT read file contents.
+  - The map MUST be subject to limits (bytes/paths) and MAY be cached with TTL; overflows MUST be truncated deterministically and MUST warn.
+  - If all methods fail or result is empty, the map MUST be omitted with a warning (no hard error).
 
 Invariants
 - Anchor: INV

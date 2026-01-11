@@ -390,6 +390,15 @@ Which block(s) are used depends on `carriage-doc-context-scope' (all vs last)."
   :type 'boolean :group 'carriage)
 (make-variable-buffer-local 'carriage-mode-include-visible-context)
 
+(defcustom carriage-mode-include-project-map t
+  "When non-nil, include a gitignore-aware repository file tree as a begin_map block in the request context.
+
+The map is computed from git ls-files (no directory traversal), is deterministic,
+and is subject to standard context limits and caching."
+  :type 'boolean
+  :group 'carriage)
+(make-variable-buffer-local 'carriage-mode-include-project-map)
+
 (defcustom carriage-mode-context-injection 'system
   "Where to inject collected context: 'system (default) or 'user."
   :type '(choice (const system) (const user))
@@ -1730,6 +1739,8 @@ Important: only response/context shaping fields (no UI prefs, no secrets)."
                          carriage-mode-include-visible-context)
    :CAR_CTX_PATCHED (and (boundp 'carriage-mode-include-patched-files)
                          carriage-mode-include-patched-files)
+   :CAR_CTX_MAP (and (boundp 'carriage-mode-include-project-map)
+                     carriage-mode-include-project-map)
 
    ;; Context shaping
    :CAR_DOC_CTX_SCOPE (or (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
@@ -2105,8 +2116,46 @@ Strips doc-state/markers and summarizes applied patch bodies unless Patch/Patche
          (inc-vis (and (boundp 'carriage-mode-include-visible-context)
                        carriage-mode-include-visible-context))
          (inc-pat (and (boundp 'carriage-mode-include-patched-files)
-                       carriage-mode-include-patched-files)))
-    (or inc-doc inc-gpt inc-vis inc-pat)))
+                       carriage-mode-include-patched-files))
+         (inc-map (and (boundp 'carriage-mode-include-project-map)
+                       carriage-mode-include-project-map)))
+    (or inc-doc inc-gpt inc-vis inc-pat inc-map)))
+
+(defun carriage--context--infer-project-root-from-context (buffer)
+  "Best-effort infer git project root from BUFFER document context.
+
+Used when the Org buffer's `default-directory' is not inside the target repo,
+but the document contains absolute paths in #+begin_context blocks (or patched-files).
+
+Returns absolute directory path (with trailing slash via `expand-file-name`), or nil.
+Never signals."
+  (condition-case _e
+      (with-current-buffer buffer
+        (let ((cands '()))
+          ;; Prefer doc-context; fall back to patched-files when enabled.
+          (when (require 'carriage-context nil t)
+            (when (fboundp 'carriage-context--doc-paths)
+              (setq cands (append cands (ignore-errors (carriage-context--doc-paths buffer)))))
+            (when (and (boundp 'carriage-mode-include-patched-files)
+                       carriage-mode-include-patched-files
+                       (fboundp 'carriage-context--patched-files))
+              (setq cands (append cands (ignore-errors (carriage-context--patched-files buffer))))))
+          (setq cands (delete-dups (delq nil cands)))
+          (cl-loop
+           for p in cands
+           for abs =
+           (cond
+            ((and (stringp p) (file-name-absolute-p p)) p)
+            ((stringp p) (expand-file-name p default-directory))
+            (t nil))
+           when (and (stringp abs)
+                     (not (file-remote-p abs))
+                     (file-exists-p abs))
+           for dir = (if (file-directory-p abs) abs (file-name-directory abs))
+           for root = (and (stringp dir) (locate-dominating-file dir ".git"))
+           when (and (stringp root) (file-directory-p root))
+           return (expand-file-name root))))
+    (error nil)))
 
 (defun carriage--context-collect-and-format (buffer target)
   "Return formatted external context text for BUFFER injected at TARGET, or nil.
@@ -2115,7 +2164,8 @@ Best-effort: never signal."
       (when (and (require 'carriage-context nil t)
                  (carriage--context-sources-enabled-p))
         (let* ((root (or (carriage-project-root) default-directory))
-               (col (carriage-context-collect buffer root)))
+               (col (carriage-context-collect buffer root))
+               (ctx-text (when col (carriage-context-format col :where target))))
           (when col
             ;; Traffic: log context summary and individual elements (paths only)
             (let* ((files (plist-get col :files))
@@ -2134,8 +2184,118 @@ Best-effort: never signal."
                                         (if (stringp included)
                                             "included"
                                           (format "omitted%s"
-                                                  (if reason (format ": %s" reason) "")))))))
-            (carriage-context-format col :where target))))
+                                                  (if reason (format ": %s" reason) ""))))))))
+          ;; Append Project Map (begin_map) when enabled.
+          ;;
+          ;; IMPORTANT: Project Map computation MUST NOT run from redisplay/timers.
+          ;; It is allowed only in the send pipeline (this function).
+          ;;
+          ;; Root selection policy (important for real-world usage):
+          ;; - Prefer `carriage-project-root' (git root of buffer's default-directory).
+          ;; - If buffer is outside the repo (common for notes/org tasks), try to infer git root
+          ;;   from absolute paths listed in #+begin_context / patched-files.
+          ;; - Fallback: `default-directory' (may yield no map if not a repo).
+          (let* ((map-enabled (and (boundp 'carriage-mode-include-project-map)
+                                   carriage-mode-include-project-map))
+                 (map-build-fn (and map-enabled (fboundp 'carriage-context-project-map-build)))
+                 (proj-root (ignore-errors (carriage-project-root)))
+                 (ctx-root (and (not proj-root)
+                                (ignore-errors (carriage--context--infer-project-root-from-context buffer))))
+                 (map-root (or proj-root ctx-root root))
+                 (map-root-src (cond
+                                (proj-root "project-root")
+                                (ctx-root  "context-root")
+                                (t         "default-dir")))
+                 (ctx-bytes-before (if (stringp ctx-text) (string-bytes ctx-text) 0)))
+            (carriage-traffic-log 'out
+                                  "context: project-map preflight enabled=%s fbound=%s target=%s map-root=%s (src=%s) buf-root=%s ctx-bytes=%d"
+                                  (if map-enabled "t" "nil")
+                                  (if map-build-fn "t" "nil")
+                                  target
+                                  (or map-root "-")
+                                  map-root-src
+                                  (or root "-")
+                                  ctx-bytes-before)
+            (cond
+             ((not map-enabled)
+              (carriage-traffic-log 'out "context: project-map skipped (toggle=off)"))
+             ((not map-build-fn)
+              (carriage-traffic-log 'out "context: project-map skipped (missing build fn)"))
+             ((or (not (stringp map-root)) (string-empty-p (string-trim map-root)))
+              (carriage-traffic-log 'out "context: project-map skipped (no map-root)"))
+             ((file-remote-p map-root)
+              (carriage-traffic-log 'out "context: project-map skipped (remote map-root=%s)" map-root))
+             (t
+              (let* ((carriage-context--project-map-allow-compute t)
+                     (t0 (float-time))
+                     (res (ignore-errors (carriage-context-project-map-build map-root)))
+                     (dt (- (float-time) t0))
+                     (ok (and (listp res) (plist-get res :ok)))
+                     (reason (and (listp res) (plist-get res :reason)))
+                     (method (and (listp res) (plist-get res :method)))
+                     (elapsed (and (listp res) (plist-get res :elapsed)))
+                     (paths (and (listp res) (plist-get res :paths)))
+                     (trunc (and (listp res) (plist-get res :truncated)))
+                     (mp (and (listp res) (plist-get res :text)))
+                     (mp-bytes (if (stringp mp) (string-bytes mp) 0))
+                     (ctx-bytes-pre (if (stringp ctx-text) (string-bytes ctx-text) 0)))
+                (carriage-traffic-log 'out
+                                      "context: project-map build ok=%s reason=%s method=%s paths=%s truncated=%s elapsed=%.3fs (wall=%.3fs allow=%s) mp-bytes=%d map-root=%s"
+                                      (if ok "t" "nil")
+                                      (or reason "-")
+                                      (or method "-")
+                                      (if (integerp paths) paths (or paths "-"))
+                                      (if trunc "t" "nil")
+                                      (if (numberp elapsed) elapsed 0.0)
+                                      (if (numberp dt) dt 0.0)
+                                      (if (bound-and-true-p carriage-context--project-map-allow-compute) "t" "nil")
+                                      mp-bytes
+                                      (or map-root "-"))
+                (cond
+                 ((not ok)
+                  (carriage-traffic-log 'out "context: project-map not appended (ok=nil reason=%s root=%s)" (or reason "-") (or map-root "-"))
+                  ;; Make omission visible in the actual request payload (SYSTEM/PROMPT), not only in traffic logs.
+                  (let* ((note (format ";; Project Map omitted: reason=%s method=%s root=%s\n"
+                                       (or reason "-") (or method "-") (or map-root "-"))))
+                    (setq ctx-text
+                          (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
+                              (concat (string-trim-right ctx-text) "\n" note)
+                            note))))
+                 ((not (and (integerp paths) (> paths 0)))
+                  (carriage-traffic-log 'out "context: project-map not appended (paths=%s root=%s)" (or paths "-") (or map-root "-"))
+                  (let* ((note (format ";; Project Map omitted: paths=%s method=%s root=%s\n"
+                                       (or paths "-") (or method "-") (or map-root "-"))))
+                    (setq ctx-text
+                          (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
+                              (concat (string-trim-right ctx-text) "\n" note)
+                            note))))
+                 ((not (and (stringp mp) (not (string-empty-p (string-trim mp)))))
+                  (carriage-traffic-log 'out "context: project-map not appended (empty text; bytes=%d root=%s)" mp-bytes (or map-root "-"))
+                  (let* ((note (format ";; Project Map omitted: empty-text bytes=%d method=%s root=%s\n"
+                                       mp-bytes (or method "-") (or map-root "-"))))
+                    (setq ctx-text
+                          (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
+                              (concat (string-trim-right ctx-text) "\n" note)
+                            note))))
+                 (t
+                  (carriage-traffic-log 'out "context: project-map append into ctx-text (ctx-bytes-pre=%d root=%s)" ctx-bytes-pre (or map-root "-"))
+                  (setq ctx-text
+                        (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
+                            (concat (string-trim-right ctx-text) "\n\n" (string-trim-right mp) "\n")
+                          (concat (string-trim-right mp) "\n")))
+                  (carriage-traffic-log 'out
+                                        "context: project-map appended (ctx-bytes-post=%d has-begin_map=%s)"
+                                        (if (stringp ctx-text) (string-bytes ctx-text) 0)
+                                        (if (and (stringp ctx-text)
+                                                 (string-match-p "#\\+begin_map\\b" ctx-text))
+                                            "t" "nil"))))))))
+            (carriage-traffic-log 'out
+                                  "context: final ctx-text bytes=%d has-begin_map=%s"
+                                  (if (stringp ctx-text) (string-bytes ctx-text) 0)
+                                  (if (and (stringp ctx-text)
+                                           (string-match-p "#\\+begin_map\\b" ctx-text))
+                                      "t" "nil"))
+            ctx-text))
     (error nil)))
 
 (defun carriage--build-context (source buffer)
@@ -3170,6 +3330,23 @@ FN must be a zero-argument function that cancels the ongoing activity."
                "on" "off"))
   (force-mode-line-update t))
 
+;;;###autoload
+(defun carriage-toggle-include-project-map ()
+  "Toggle including a gitignore-aware repository file tree (begin_map) into the request context."
+  (interactive)
+  (setq-local carriage-mode-include-project-map
+              (not (and (boundp 'carriage-mode-include-project-map)
+                        carriage-mode-include-project-map)))
+  (when (fboundp 'carriage-ui--reset-context-cache)
+    (carriage-ui--reset-context-cache))
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (carriage-ui--invalidate-ml-cache))
+  (message "Include Project Map: %s"
+           (if (and (boundp 'carriage-mode-include-project-map)
+                    carriage-mode-include-project-map)
+               "on" "off"))
+  (force-mode-line-update t))
+
 ;; -------------------------------------------------------------------
 ;; Project-scoped ephemeral buffer (open-buffer) and exit prompt
 
@@ -3360,6 +3537,7 @@ If no begin_context is present, insert a minimal header and block at point-max."
       carriage-toggle-include-doc-context
       carriage-toggle-include-visible-context
       carriage-toggle-include-patched-files
+      carriage-toggle-include-project-map
 
       ;; Doc-context scope selectors (AllCtx/LastCtx/etc.)
       carriage-select-doc-context-all

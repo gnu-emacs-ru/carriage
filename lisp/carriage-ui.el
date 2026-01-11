@@ -549,6 +549,7 @@ Disabling this eliminates periodic redisplay work during active phases."
     toggle-visible
     toggle-ctx
     toggle-patched
+    toggle-map
     toggle-files
     doc-scope-all
     doc-scope-last
@@ -610,6 +611,7 @@ Recognized block symbols:
 - `report' — Report buffer shortcut.
 - `toggle-ctx' — GPT context toggle.
 - `toggle-files' — doc context toggle.
+- `toggle-map' — Project Map context toggle (begin_map).
 - `doc-scope-all' — select doc-context scope 'all.
 - `doc-scope-last' — select doc-context scope 'last.
 - `toggle-visible' — include visible buffers.
@@ -635,6 +637,7 @@ Unknown symbols are ignored."
                          (const :tag "Doc scope: all" doc-scope-all)
                          (const :tag "Doc scope: last" doc-scope-last)
                          (const :tag "Patched files toggle" toggle-patched)
+                         (const :tag "Project map toggle" toggle-map)
                          (const :tag "Visible-buffers toggle" toggle-visible)
                          (const :tag "Settings button" settings)))
   :set #'carriage-ui--set-modeline-blocks
@@ -1338,6 +1341,23 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                                                     :v-adjust carriage-mode-icon-v-adjust
                                                     :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face))))
                             (t nil)))
+                 ('map (cond
+                        ((fboundp 'all-the-icons-material)
+                         (all-the-icons-material "account_tree"
+                                                 :height carriage-mode-icon-height
+                                                 :v-adjust carriage-mode-icon-v-adjust
+                                                 :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face))))
+                        ((fboundp 'all-the-icons-faicon)
+                         (all-the-icons-faicon "map"
+                                               :height carriage-mode-icon-height
+                                               :v-adjust carriage-mode-icon-v-adjust
+                                               :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face))))
+                        ((fboundp 'all-the-icons-octicon)
+                         (all-the-icons-octicon "tree"
+                                                :height carriage-mode-icon-height
+                                                :v-adjust carriage-mode-icon-v-adjust
+                                                :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face))))
+                        (t nil)))
                  ;; Additional icons for doc-state badges (scope/profile/injection)
                  ;; Keep generic 'scope for other UI bits, and add explicit icons for modeline All/Last scope.
                  ('scope-all (when (fboundp 'all-the-icons-material)
@@ -1368,7 +1388,7 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                                                     :v-adjust (- carriage-mode-icon-v-adjust 0.1)
                                                     :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-yellow-face)))))
                  ('profile (when (fboundp 'all-the-icons-material)
-                             (all-the-icons-material "account_tree"
+                             (all-the-icons-material "account_box"
                                                      :height carriage-mode-icon-height
                                                      :v-adjust carriage-mode-icon-v-adjust
                                                      :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face)))))
@@ -1917,6 +1937,12 @@ Important: the cache key includes label's text properties to ensure visual updat
                                              :height carriage-mode-icon-height
                                              :v-adjust (- carriage-mode-icon-v-adjust 0.14)
                                              :face fplist)))
+                  ('map
+                   (when (fboundp 'all-the-icons-material)
+                     (all-the-icons-faicon "map"
+                                           :height carriage-mode-icon-height
+                                           :v-adjust carriage-mode-icon-v-adjust
+                                           :face fplist)))
                   ('patched
                    (cond
                     ((fboundp 'all-the-icons-material)
@@ -2502,6 +2528,16 @@ Performance:
                          #'carriage-toggle-include-patched-files
                          help 'patched)))
 
+(defun carriage-ui--ml-seg-toggle-map ()
+  "Build Project Map context toggle (begin_map)."
+  (let* ((_ (require 'carriage-i18n nil t))
+         (help (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
+                   (carriage-i18n :map-tooltip)
+                 "Toggle including Project Map (gitignore-aware file tree) as begin_map in request context.")))
+    (carriage-ui--toggle "Map" 'carriage-mode-include-project-map
+                         #'carriage-toggle-include-project-map
+                         help 'map)))
+
 (defun carriage-ui--ml-seg-toggle-visible ()
   "Build Visible-buffers context toggle."
   (let* ((_ (require 'carriage-i18n nil t))
@@ -2626,6 +2662,7 @@ If cache is empty/uninitialized, schedule an async refresh and show a placeholde
     ;; 'apply removed
     ('all           (carriage-ui--ml-seg-all))
     ('toggle-patched (carriage-ui--ml-seg-toggle-patched))
+    ('toggle-map     (carriage-ui--ml-seg-toggle-map))
     ('toggle-visible (carriage-ui--ml-seg-toggle-visible))
     ('abort         (carriage-ui--ml-seg-abort))
     ('report        (carriage-ui--ml-seg-report))

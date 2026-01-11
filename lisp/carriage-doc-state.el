@@ -333,6 +333,7 @@ This function must never signal."
           (put :CAR_CTX_DOC     (b 'carriage-mode-include-doc-context))
           (put :CAR_CTX_VISIBLE (b 'carriage-mode-include-visible-context))
           (put :CAR_CTX_PATCHED (b 'carriage-mode-include-patched-files))
+          (put :CAR_CTX_MAP     (b 'carriage-mode-include-project-map))
           (put :CAR_CTX_INJECTION (b 'carriage-mode-context-injection))
           (put :CAR_CTX_MAX_FILES (b 'carriage-mode-context-max-files))
           (put :CAR_CTX_MAX_BYTES (b 'carriage-mode-context-max-total-bytes))
@@ -399,6 +400,7 @@ Best-effort: invalid/unreadable state results in no changes (defaults remain)."
         (carriage-doc-state--apply-if-bound 'carriage-mode-include-doc-context   (plist-get pl :CAR_CTX_DOC))
         (carriage-doc-state--apply-if-bound 'carriage-mode-include-visible-context (plist-get pl :CAR_CTX_VISIBLE))
         (carriage-doc-state--apply-if-bound 'carriage-mode-include-patched-files (plist-get pl :CAR_CTX_PATCHED))
+        (carriage-doc-state--apply-if-bound 'carriage-mode-include-project-map (plist-get pl :CAR_CTX_MAP))
         (carriage-doc-state--apply-if-bound 'carriage-mode-context-injection (plist-get pl :CAR_CTX_INJECTION))
         (carriage-doc-state--apply-if-bound 'carriage-mode-context-max-files (plist-get pl :CAR_CTX_MAX_FILES))
         (carriage-doc-state--apply-if-bound 'carriage-mode-context-max-total-bytes (plist-get pl :CAR_CTX_MAX_BYTES))
@@ -540,6 +542,7 @@ Budgets are intentionally NOT included in the summary subset (they go to tooltip
          (ctx-gptel (carriage-doc-state--bool (plist-get pl :CAR_CTX_GPTEL)))
          (ctx-vis (carriage-doc-state--bool (plist-get pl :CAR_CTX_VISIBLE)))
          (ctx-patched (carriage-doc-state--bool (plist-get pl :CAR_CTX_PATCHED)))
+         (ctx-map (carriage-doc-state--bool (plist-get pl :CAR_CTX_MAP)))
          (scope (carriage-doc-state--as-symbol (plist-get pl :CAR_DOC_CTX_SCOPE)))
          (profile (carriage-doc-state--as-symbol (plist-get pl :CAR_CTX_PROFILE))))
     (list :CAR_INTENT intent
@@ -551,6 +554,7 @@ Budgets are intentionally NOT included in the summary subset (they go to tooltip
           :CAR_CTX_GPTEL ctx-gptel
           :CAR_CTX_VISIBLE ctx-vis
           :CAR_CTX_PATCHED ctx-patched
+          :CAR_CTX_MAP ctx-map
           :CAR_DOC_CTX_SCOPE scope
           :CAR_CTX_PROFILE profile)))
 
@@ -688,7 +692,9 @@ Important: use `concat' (not `format') to preserve icon text properties."
                         (carriage-doc-state--ctx-flag-badge "Gpt" ctx-gptel 'ctx)
                         (carriage-doc-state--ctx-flag-badge "Vis" ctx-vis 'visible)
                         (when (plist-member imp :CAR_CTX_PATCHED)
-                          (carriage-doc-state--ctx-flag-badge "Pat" ctx-patched 'patched))))
+                          (carriage-doc-state--ctx-flag-badge "Pat" ctx-patched 'patched))
+                        (when (plist-member imp :CAR_CTX_MAP)
+                          (carriage-doc-state--ctx-flag-badge "Map" ctx-map 'map))))
                  " "))
          (scope-b (when (and scope (not (eq scope nil)))
                     (carriage-doc-state--badge
@@ -784,7 +790,9 @@ Also shows total request cost when present (as the last badge):
                         (carriage-doc-state--ctx-flag-badge "Gpt" ctx-gptel 'ctx)
                         (carriage-doc-state--ctx-flag-badge "Vis" ctx-vis 'visible)
                         (when (plist-member imp :CAR_CTX_PATCHED)
-                          (carriage-doc-state--ctx-flag-badge "Pat" ctx-patched 'patched))))
+                          (carriage-doc-state--ctx-flag-badge "Pat" ctx-patched 'patched))
+                        (when (plist-member imp :CAR_CTX_MAP)
+                          (carriage-doc-state--ctx-flag-badge "Map" ctx-map 'map))))
                  " "))
          (scope-b (when (and scope (not (eq scope nil)))
                     (carriage-doc-state--badge
@@ -823,6 +831,7 @@ Also shows total request cost when present (as the last badge):
          (ctx-gptel (carriage-doc-state--bool (plist-get pl :CAR_CTX_GPTEL)))
          (ctx-vis (carriage-doc-state--bool (plist-get pl :CAR_CTX_VISIBLE)))
          (ctx-patched (carriage-doc-state--bool (plist-get pl :CAR_CTX_PATCHED)))
+         (ctx-map (carriage-doc-state--bool (plist-get pl :CAR_CTX_MAP)))
          (scope (carriage-doc-state--as-string (plist-get pl :CAR_DOC_CTX_SCOPE)))
          (profile (carriage-doc-state--as-string (plist-get pl :CAR_CTX_PROFILE)))
          (inj (carriage-doc-state--as-string (plist-get pl :CAR_CTX_INJECTION)))
@@ -835,11 +844,12 @@ Also shows total request cost when present (as the last badge):
             (format "Intent: %s" (or intent "-"))
             (format "Suite: %s" (or suite "-"))
             (format "Model: %s:%s:%s" (or backend "-") (or provider "-") (or model "-"))
-            (format "Context sources: doc=%s gptel=%s visible=%s patched=%s"
+            (format "Context sources: doc=%s gptel=%s visible=%s patched=%s map=%s"
                     (if ctx-doc "on" "off")
                     (if ctx-gptel "on" "off")
                     (if ctx-vis "on" "off")
-                    (if ctx-patched "on" "off"))
+                    (if ctx-patched "on" "off")
+                    (if ctx-map "on" "off"))
             (when (or (not (string-empty-p scope)) (not (string-empty-p profile)))
               (format "Scope/Profile: scope=%s profile=%s"
                       (if (string-empty-p scope) "-" scope)

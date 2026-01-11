@@ -52,11 +52,11 @@
   "Max bytes from the end of the response to include in summary."
   :type 'integer :group 'carriage-traffic)
 
-(defcustom carriage-traffic-max-bytes 1048576
+(defcustom carriage-traffic-max-bytes 10048576
   "Approximate max size (in characters) for a traffic buffer before trimming from the top."
   :type 'integer :group 'carriage-traffic)
 
-(defcustom carriage-traffic-log-to-file nil
+(defcustom carriage-traffic-log-to-file t
   "When non-nil, also append traffic log lines to a file (see `carriage-traffic-log-file')."
   :type 'boolean :group 'carriage-traffic)
 
@@ -145,6 +145,13 @@ PLIST keys: :backend :model :system :prompt :context (list of paths or structure
     (when (stringp prompt)
       (carriage--traffic-append origin-buffer "---- PROMPT ----")
       (carriage--traffic-append origin-buffer prompt))
+    ;; Diagnostic: make begin_map presence obvious in the request log.
+    (let* ((has-map-sys (and (stringp system) (string-match-p "#\\+begin_map\\b" system)))
+           (has-map-pr  (and (stringp prompt)  (string-match-p "#\\+begin_map\\b" prompt))))
+      (carriage--traffic-append origin-buffer
+                                (format "---- PROJECT MAP ---- begin_map: system=%s prompt=%s"
+                                        (if has-map-sys "t" "nil")
+                                        (if has-map-pr "t" "nil"))))
     (when context
       (carriage--traffic-append origin-buffer "---- CONTEXT FILES (content omitted) ----")
       (dolist (c context)

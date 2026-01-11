@@ -85,6 +85,15 @@ about the lifecycle (spawn, wait ticks, timeout/exit) to help diagnose stalls."
                 (progn
                   (while (and (not done) (< (float-time) deadline))
                     (accept-process-output proc 0.05)
+                    ;; Robustness: if the process already exited but sentinel didn't flip DONE
+                    ;; (can happen in some edge cases), stop waiting immediately.
+                    (when (and (processp proc)
+                               (not done)
+                               (memq (process-status proc) '(exit signal failed)))
+                      (setq exit-code (condition-case _
+                                          (process-exit-status proc)
+                                        (error exit-code)))
+                      (setq done t))
                     (let ((elapsed (- (float-time) start)))
                       (when (>= elapsed (1+ tick))
                         (setq tick (1+ tick))

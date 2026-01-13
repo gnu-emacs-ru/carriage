@@ -1,651 +1,536 @@
-;;; carriage-keyspec.el --- Keyspec and keymap generator  -*- lexical-binding: t; -*-
+;;; carriage-keyspec.el --- Keyspec vn3 (bindings-first, menu-agnostic)  -*- lexical-binding: t; -*-
 ;;
 ;; Copyright (C) 2025 Carriage contributors
 ;; Author: Peter Kosov <11111000000@email.com>
 ;; URL: https://gnu-emacs.ru/carriage
-;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.1
-;; Keywords: keyspec, menu
+;; Package-Requires: ((emacs "27.1") (cl-lib "0.5"))
+;; Version: 0.3
+;; Keywords: keyspec, keymaps, menu
 ;;
 ;; Specifications:
-;;   spec/code-style-v2.org
-;;   spec/index.org
-;;   spec/errors-v2.org
-;;   spec/compliance-checklist-v2.org
 ;;   spec/keyspec-v2.org
-;;   spec/ui-v2.org
+;;   spec/context-menu-keys-v2.org
 ;;   spec/i18n-v2.org
-;;   spec/document-branching-and-templates-v1.org
 ;;
 ;;; Commentary:
-;; Centralized keyspec for Carriage commands and transient/menu generation.
-;; Context column uses two-stroke keys ("t x") and reserves 't' when present.
+;;
+;; Bindings-first keyspec (universal mappings):
+;; - Key bindings are compiled into real Emacs keymaps (minor-mode maps, global-map).
+;; - The main prefix (default: "C-c e") is ALWAYS a prefix keymap (`carriage-prefix-map`).
+;; - Menu is optional UI, invoked from inside the prefix-map:
+;;   - C-c e SPC → `carriage-menu-open`
+;;   - C-c e ?   → `carriage-menu-help` (cheatsheet)
+;; - Direct bindings like "C-c C-c" / "C-c !" are also defined here and installed
+;;   into their target keymaps. They do not depend on transient/hydra/menu.
 ;;
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'carriage-transient-async nil t)
 
-(autoload 'carriage-create-task-doc "carriage-task" "Create task document from the current heading." t)
-(autoload 'carriage-branching-transient "carriage-task" "Open Branching UI: choose template and inheritance." t)
-(autoload 'carriage-ui-context-delta-assist "carriage-ui" "Suggest and apply context delta (with confirmation)." t)
+;; Optional deps
+(require 'carriage-i18n nil t)
 
-;; Swarm supervisor (main Emacs): orchestration only (no HTTP/SSE in main session).
-(autoload 'carriage-swarm-agent-start "carriage-swarm-supervisor" "Start a headless Carriage Swarm Agent." t)
-(autoload 'carriage-swarm-agent-stop "carriage-swarm-supervisor" "Stop a headless Carriage Swarm Agent (best-effort)." t)
-(autoload 'carriage-swarm-gc-stale "carriage-swarm-supervisor" "GC stale Swarm registry entries." t)
-(autoload 'carriage-swarm-hub-start "carriage-swarm-supervisor" "Start the Carriage Swarm Hub process." t)
-(autoload 'carriage-swarm-hub-stop "carriage-swarm-supervisor" "Stop the Carriage Swarm Hub process." t)
-(autoload 'carriage-swarm-open-dashboard "carriage-swarm-supervisor" "Open Swarm Hub dashboard in a browser." t)
+;; Autoloads for commands referenced by bindings/actions.
+;; This keeps keyspec usable even when the defining modules are not loaded yet
+;; (e.g. when only `carriage-global-mode' is enabled).
+(autoload 'carriage-send-buffer "carriage-mode" nil t)
+(autoload 'carriage-send-subtree "carriage-mode" nil t)
+(autoload 'carriage-dry-run-at-point "carriage-mode" nil t)
+(autoload 'carriage-apply-at-point-or-region "carriage-mode" nil t)
+(autoload 'carriage-apply-last-iteration "carriage-mode" nil t)
+(autoload 'carriage-ctrl-c-ctrl-c "carriage-mode" nil t)
+(autoload 'carriage-abort-current "carriage-mode" nil t)
+
+(autoload 'carriage-report-open "carriage-report" nil t)
+(autoload 'carriage-report-show-diff-at-point "carriage-report" nil t)
+(autoload 'carriage-report-ediff-at-point "carriage-report" nil t)
+(autoload 'carriage-report-apply-at-point "carriage-report" nil t)
+
+(autoload 'carriage-select-model "carriage-mode" nil t)
+(autoload 'carriage-select-suite "carriage-mode" nil t)
+(autoload 'carriage-toggle-intent "carriage-mode" nil t)
+(autoload 'carriage-select-apply-engine "carriage-apply-engine" nil t)
+
+(autoload 'carriage-toggle-include-gptel-context "carriage-mode" nil t)
+(autoload 'carriage-toggle-include-doc-context "carriage-mode" nil t)
+(autoload 'carriage-toggle-include-patched-files "carriage-mode" nil t)
+(autoload 'carriage-toggle-include-project-map "carriage-mode" nil t)
+(autoload 'carriage-toggle-include-visible-context "carriage-mode" nil t)
+
+(autoload 'carriage-select-doc-context-all "carriage-context" nil t)
+(autoload 'carriage-select-doc-context-last "carriage-context" nil t)
+(autoload 'carriage-toggle-doc-context-scope "carriage-context" nil t)
+(autoload 'carriage-toggle-context-profile "carriage-context" nil t)
+
+(autoload 'carriage-wip-checkout "carriage-mode" nil t)
+(autoload 'carriage-wip-reset-soft "carriage-mode" nil t)
+(autoload 'carriage-commit-changes "carriage-mode" nil t)
+(autoload 'carriage-commit-last-iteration "carriage-mode" nil t)
+
+(autoload 'carriage-show-log "carriage-logging" nil t)
+(autoload 'carriage-show-traffic "carriage-logging" nil t)
+
+(autoload 'carriage-open-buffer "carriage-mode" nil t)
+(autoload 'carriage-open-file-chat "carriage-mode" nil t)
+
+(autoload 'carriage-insert-plan-section "carriage-task" nil t)
+(autoload 'carriage-insert-step-section "carriage-task" nil t)
+(autoload 'carriage-insert-test-section "carriage-task" nil t)
+(autoload 'carriage-insert-retro-section "carriage-task" nil t)
+(autoload 'carriage-insert-transient "carriage-task" nil t)
+
+(autoload 'carriage-ui-context-delta-assist "carriage-ui" nil t)
+
+;; Commands referenced from bindings (declared to keep byte-compile clean).
+(declare-function carriage-send-buffer "carriage-mode" ())
+(declare-function carriage-send-subtree "carriage-mode" ())
+(declare-function carriage-dry-run-at-point "carriage-mode" ())
+(declare-function carriage-apply-at-point-or-region "carriage-mode" ())
+(declare-function carriage-apply-last-iteration "carriage-mode" ())
+(declare-function carriage-ctrl-c-ctrl-c "carriage-mode" ())
+(declare-function carriage-abort-current "carriage-mode" ())
+(declare-function carriage-report-open "carriage-report" (&optional report))
+(declare-function carriage-report-show-diff-at-point "carriage-report" ())
+(declare-function carriage-report-ediff-at-point "carriage-report" ())
+(declare-function carriage-report-apply-at-point "carriage-report" ())
+(declare-function carriage-select-model "carriage-mode" (&optional model))
+(declare-function carriage-select-suite "carriage-mode" (&optional suite))
+(declare-function carriage-toggle-intent "carriage-mode" ())
+(declare-function carriage-select-apply-engine "carriage-apply-engine" (&optional engine))
+(declare-function carriage-toggle-include-gptel-context "carriage-mode" ())
+(declare-function carriage-toggle-include-doc-context "carriage-mode" ())
+(declare-function carriage-toggle-include-patched-files "carriage-mode" ())
+(declare-function carriage-toggle-include-project-map "carriage-mode" ())
+(declare-function carriage-toggle-include-visible-context "carriage-mode" ())
+(declare-function carriage-select-doc-context-all "carriage-context" ())
+(declare-function carriage-select-doc-context-last "carriage-context" ())
+(declare-function carriage-toggle-doc-context-scope "carriage-context" ())
+(declare-function carriage-toggle-context-profile "carriage-context" ())
+(declare-function carriage-wip-checkout "carriage-mode" ())
+(declare-function carriage-wip-reset-soft "carriage-mode" (&optional rev))
+(declare-function carriage-commit-changes "carriage-mode" (&optional message))
+(declare-function carriage-commit-last-iteration "carriage-mode" (&optional message))
+(declare-function carriage-show-log "carriage-logging" ())
+(declare-function carriage-show-traffic "carriage-logging" ())
+(declare-function carriage-open-buffer "carriage-mode" ())
+(declare-function carriage-open-file-chat "carriage-mode" ())
+(declare-function carriage-insert-plan-section "carriage-task" ())
+(declare-function carriage-insert-step-section "carriage-task" ())
+(declare-function carriage-insert-test-section "carriage-task" ())
+(declare-function carriage-insert-retro-section "carriage-task" ())
+(declare-function carriage-ui-context-delta-assist "carriage-ui" ())
+(declare-function carriage-insert-transient "carriage-task" ())
+
+;; Swarm (Supervisor)
+(declare-function carriage-swarm-agent-start "carriage-swarm-supervisor" ())
+(declare-function carriage-swarm-agent-stop "carriage-swarm-supervisor" ())
+(declare-function carriage-swarm-gc-stale "carriage-swarm-supervisor" ())
+(declare-function carriage-swarm-hub-start "carriage-swarm-supervisor" ())
+(declare-function carriage-swarm-hub-stop "carriage-swarm-supervisor" ())
+(declare-function carriage-swarm-open-dashboard "carriage-swarm-supervisor" ())
 
 (defgroup carriage-keyspec nil
-  "Centralized key binding model for Carriage."
+  "Keyspec v3 (bindings-first) for Carriage."
   :group 'applications
   :prefix "carriage-keys-")
 
-(defcustom carriage-keys-profile 'classic
-  "Active keyspec profile (classic|vimish|custom)."
-  :type '(choice (const classic) (const vimish) (const custom))
-  :group 'carriage-keyspec)
-
 (defcustom carriage-keys-prefix "C-c e "
-  "Prefix for all Carriage mode keybindings."
+  "Primary Carriage prefix. Trailing whitespace is ignored."
   :type 'string
   :group 'carriage-keyspec)
 
 (defcustom carriage-keys-prefix-alias nil
-  "Optional additional prefix key sequence (e.g., \"C-c C-e \") as an alias for `carriage-keys-prefix'.
-Used for menu binding etc., not for all suffix bindings."
+  "Optional additional prefix key sequence(s), e.g. \"C-c C-e \".
+
+May be nil, a string, or a list of strings. Trailing whitespace is ignored."
   :type '(choice (const nil) string (repeat string))
   :group 'carriage-keyspec)
 
+(defcustom carriage-menu-provider 'auto
+  "Menu provider for `carriage-menu-open'.
+
+- auto            Prefer transient when available, else completing-read.
+- transient       Use transient when available, else completing-read.
+- completing-read Always use completing-read (no transient deps).
+- hydra           Use hydra when available, else completing-read.
+- nil             Disable menu UI (bindings still work); `carriage-menu-open' shows a message."
+  :type '(choice (const auto) (const transient) (const completing-read) (const hydra) (const nil))
+  :group 'carriage-keyspec)
+
+(defvar carriage-prefix-map (make-sparse-keymap)
+  "Carriage prefix keymap. Installed under `carriage-keys-prefix' in relevant maps.")
+
+(defvar carriage-keys--installed nil
+  "Internal registry of installed overrides in `global-map': list of (MAP KEYSTR . OLD).
+
+Used only to restore `global-map' bindings on disable of `carriage-global-mode'.
+Bindings installed into Carriage-owned mode maps are not restored (they are owned).")
+
 (defun carriage-keys-prefixes ()
-  "Return list of primary and alias prefixes without trailing whitespace."
+  "Return list of primary and alias prefixes as kbd-ready strings."
   (let* ((raw (cons carriage-keys-prefix
                     (cond
                      ((null carriage-keys-prefix-alias) nil)
                      ((listp carriage-keys-prefix-alias) carriage-keys-prefix-alias)
                      (t (list carriage-keys-prefix-alias)))))
-         (clean (cl-remove-if-not
-                 #'identity
+         (clean
+          (delete-dups
+           (delq nil
                  (mapcar (lambda (p)
                            (when (stringp p)
-                             (let ((trim (string-trim-right p "[ \t\n\r]+")))
-                               (unless (string-empty-p trim) trim))))
-                         raw))))
-    (delete-dups clean)))
+                             (let ((s (string-trim-right p "[ \t\n\r]+")))
+                               (unless (string-empty-p s) s))))
+                         raw)))))
+    clean))
 
-(defvar carriage-keys--profile-overlays
-  '((classic . nil)
-    (vimish  . nil)
-    (custom  . nil))
-  "Optional profile overlays to add/remove keys for actions.
-Each value is a plist with :add and/or :remove lists of (:id ID :keys (..)).")
+(defun carriage-keys--i18n (key &optional fallback)
+  "Return i18n(KEY) if available, otherwise FALLBACK (string) or symbol-name."
+  (cond
+   ((and (fboundp 'carriage-i18n) (symbolp key))
+    (let ((s (ignore-errors (carriage-i18n key))))
+      (if (and (stringp s) (not (string-empty-p (string-trim s))))
+          s
+        (or fallback (symbol-name key)))))
+   ((stringp fallback) fallback)
+   ((symbolp key) (symbol-name key))
+   (t (format "%s" key))))
 
-(defvar carriage-keys--spec
+(defconst carriage-keys--actions
   '(
-    ;; Tools/model/context
-    (:id model-select :cmd carriage-select-model :keys ("m") :contexts (carriage) :section tools :desc-key :model-select)
-    (:id toggle-ctx   :cmd carriage-toggle-include-gptel-context :keys ("t c") :menu-key "t g" :contexts (carriage) :section context :desc-key :toggle-ctx)
-    (:id toggle-doc   :cmd carriage-toggle-include-doc-context   :keys ("t f") :menu-key "t f" :contexts (carriage) :section context :desc-key :toggle-doc)
-    (:id toggle-patched :cmd carriage-toggle-include-patched-files :keys ("t p") :menu-key "t p" :contexts (carriage) :section context :desc-key :toggle-patched)
-    (:id toggle-visible :cmd carriage-toggle-include-visible-context :keys ("t v") :menu-key "t v" :contexts (carriage) :section context :desc-key :visible-tooltip)
-    (:id doc-scope-all  :cmd carriage-select-doc-context-all       :keys ("t a") :menu-key "t a" :contexts (carriage) :section context :desc-key :doc-scope-all)
-    (:id doc-scope-last :cmd carriage-select-doc-context-last      :keys ("t l") :menu-key "t l" :contexts (carriage) :section context :desc-key :doc-scope-last)
-    (:id doc-scope-cycle :cmd carriage-toggle-doc-context-scope    :keys ("t s") :menu-key "t s" :contexts (carriage) :section context :desc-key :doc-scope-cycle :label "Cycle Doc Scope")
-    (:id toggle-profile :cmd carriage-toggle-context-profile        :keys ("t P") :menu-key "t P" :contexts (carriage) :section context :desc-key :toggle-profile :label "Toggle P1/P3")
-    ;; Suite/Intent (tools)
-    (:id select-suite :cmd carriage-select-suite                 :keys ("S")   :contexts (carriage) :section tools :desc-key :select-suite)
-    (:id toggle-intent :cmd carriage-toggle-intent               :keys ("i")   :contexts (carriage) :section tools :desc-key :toggle-intent)
-    ;; Actions
-    (:id dry-run      :cmd carriage-menu-dry-run            :keys ("d")     :contexts (carriage) :section act :desc-key :dry-run)
-    (:id apply        :cmd carriage-menu-apply              :keys ("a")     :contexts (carriage) :section act :desc-key :apply)
-    (:id apply-all    :cmd carriage-menu-apply-all         :keys ("A")     :contexts (carriage) :section act :desc-key :apply-all)
-    (:id abort        :cmd carriage-abort-current           :keys ("k")     :contexts (carriage) :section act :desc-key :abort)
-    (:id send-buffer  :cmd carriage-menu-send-buffer        :keys ("RET")   :menu-key "RET" :contexts (carriage) :section act :desc-key :send-buffer)
-    (:id send-subtree :cmd carriage-menu-send-subtree       :keys ("M-RET") :menu-key "M-RET" :contexts (carriage) :section act :desc-key :send-subtree)
-    (:id report       :cmd carriage-report-open             :keys ("r")     :contexts (carriage) :section tools :desc-key :report)
-    (:id clean        :cmd carriage-clear-patch-blocks     :keys ("D")     :contexts (carriage) :section act :desc-key :clean)
-    ;; Report context actions (available in report buffers under the configured prefix)
-    (:id report-diff  :cmd carriage-report-show-diff-at-point :keys ("d")   :contexts (report)   :section act   :desc-key :report-diff)
-    (:id report-ediff :cmd carriage-report-ediff-at-point     :keys ("e")   :contexts (report)   :section act   :desc-key :report-ediff)
-    (:id report-apply :cmd carriage-report-apply-at-point     :keys ("a")   :contexts (report)   :section act   :desc-key :report-apply)
+    ;; Menu / Help (provider-agnostic)
+    (:id menu-open :cmd carriage-menu-open :section tools :desc-key :menu-open :label "Menu")
+    (:id menu-help :cmd carriage-menu-help :section tools :desc-key :menu-help :label "Help")
+
+    ;; Core send/apply
+    (:id send-buffer  :cmd carriage-send-buffer  :section act :desc-key :send-buffer)
+    (:id send-subtree :cmd carriage-send-subtree :section act :desc-key :send-subtree)
+    (:id dry-run      :cmd carriage-dry-run-at-point :section act :desc-key :dry-run)
+    (:id apply        :cmd carriage-apply-at-point-or-region :section act :desc-key :apply)
+    (:id apply-all    :cmd carriage-apply-last-iteration :section act :desc-key :apply-all)
+    (:id abort        :cmd carriage-abort-current :section act :desc-key :abort)
+    (:id report       :cmd carriage-report-open  :section logs :desc-key :report)
+
+    ;; Model / Suite / Intent / Engine
+    (:id model-select :cmd carriage-select-model :section tools :desc-key :model-select)
+    (:id select-suite :cmd carriage-select-suite :section tools :desc-key :select-suite)
+    (:id toggle-intent :cmd carriage-toggle-intent :section tools :desc-key :toggle-intent)
+    (:id engine       :cmd carriage-select-apply-engine :section tools :desc-key :engine)
+
+    ;; Context controls (mnemonics frozen by spec/context-menu-keys-v2.org)
+    (:id toggle-gptel   :cmd carriage-toggle-include-gptel-context :section context :desc-key :toggle-ctx)
+    (:id toggle-doc     :cmd carriage-toggle-include-doc-context   :section context :desc-key :toggle-doc)
+    (:id toggle-patched :cmd carriage-toggle-include-patched-files :section context :desc-key :toggle-patched)
+    (:id toggle-map     :cmd carriage-toggle-include-project-map   :section context :desc-key :toggle-map)
+    (:id toggle-visible :cmd carriage-toggle-include-visible-context :section context :desc-key :visible-tooltip)
+    (:id doc-scope-all  :cmd carriage-select-doc-context-all       :section context :desc-key :doc-scope-all)
+    (:id doc-scope-last :cmd carriage-select-doc-context-last      :section context :desc-key :doc-scope-last)
+    (:id doc-scope-cycle :cmd carriage-toggle-doc-context-scope    :section context :desc-key :doc-scope-cycle :label "Cycle Scope")
+    (:id toggle-profile :cmd carriage-toggle-context-profile       :section context :desc-key :toggle-profile :label "Toggle P1/P3")
+
     ;; Git/WIP
-    (:id wip          :cmd carriage-wip-checkout            :keys ("w")  :contexts (carriage) :section session :desc-key :wip)
-    (:id reset        :cmd carriage-wip-reset-soft          :keys ("R")  :contexts (carriage) :section session :desc-key :reset)
-    (:id commit-all   :cmd carriage-commit-changes          :keys ("cc")  :contexts (carriage) :section session :desc-key :commit-all)
-    (:id commit-last  :cmd carriage-commit-last-iteration   :keys ("cl")     :contexts (carriage) :section session :desc-key :commit-last)
-    ;; Global
-    (:id show-log     :cmd carriage-show-log                :keys ("L")     :contexts (carriage report global) :section logs :desc-key :show-log)
-    (:id show-traffic :cmd carriage-show-traffic            :keys ("T")     :contexts (carriage report global) :section logs :desc-key :show-traffic)
-    (:id aux-quit     :cmd quit-window                      :keys ("q")     :contexts (report log traffic)     :section navigate :desc-key :quit)
-    (:id open-buffer  :cmd carriage-open-buffer             :keys ("e")     :contexts (global)                 :section session :desc-key :open-buffer)
+    (:id wip          :cmd carriage-wip-checkout      :section session :desc-key :wip)
+    (:id reset        :cmd carriage-wip-reset-soft    :section session :desc-key :reset)
+    (:id commit-all   :cmd carriage-commit-changes    :section session :desc-key :commit-all)
+    (:id commit-last  :cmd carriage-commit-last-iteration :section session :desc-key :commit-last)
 
-    ;; Swarm (Supervisor) — orchestration commands from main Emacs (no blocking network).
-    (:id swarm-agent-start :cmd carriage-swarm-agent-start   :keys ("z a")  :contexts (carriage org global) :section session :desc-key :swarm-agent-start :label "Swarm: start agent")
-    (:id swarm-agent-stop  :cmd carriage-swarm-agent-stop    :keys ("z k")  :contexts (carriage org global) :section session :desc-key :swarm-agent-stop  :label "Swarm: stop agent…")
-    (:id swarm-gc-stale    :cmd carriage-swarm-gc-stale      :keys ("z g")  :contexts (carriage org global) :section session :desc-key :swarm-gc-stale    :label "Swarm: cleanup stale")
-    (:id swarm-hub-start   :cmd carriage-swarm-hub-start     :keys ("z h")  :contexts (carriage org global) :section session :desc-key :swarm-hub-start   :label "Swarm: start hub")
-    (:id swarm-hub-stop    :cmd carriage-swarm-hub-stop      :keys ("z H")  :contexts (carriage org global) :section session :desc-key :swarm-hub-stop    :label "Swarm: stop hub")
-    (:id swarm-dashboard   :cmd carriage-swarm-open-dashboard :keys ("z o") :contexts (carriage org global) :section session :desc-key :swarm-dashboard   :label "Swarm: open dashboard")
+    ;; Tools / buffers
+    (:id open-buffer  :cmd carriage-open-buffer       :section session :desc-key :open-buffer)
+    (:id file-chat    :cmd carriage-open-file-chat    :section tools   :desc-key :file-chat)
 
-    (:id task-new     :cmd carriage-create-task-doc         :keys ("n")     :contexts (carriage org global) :section tools :desc-key :task-new :label "Create task doc")
-    (:id branch-doc   :cmd carriage-branching-transient     :keys ("N")     :contexts (carriage org global) :section tools :desc-key :branch-doc :label "Branch from template")
-    (:id file-chat    :cmd carriage-open-file-chat          :keys ("f")     :contexts (carriage org global) :section tools :desc-key :file-chat :label "File chat")
-    ;; Palette insert actions (minimal v1)
-    (:id insert-plan  :cmd carriage-insert-plan-section     :keys ("x p")   :contexts (carriage org) :section act :desc-key :insert-plan)
-    (:id insert-step  :cmd carriage-insert-step-section     :keys ("x s")   :contexts (carriage org) :section act :desc-key :insert-step)
-    (:id insert-test  :cmd carriage-insert-test-section     :keys ("x t")   :contexts (carriage org) :section act :desc-key :insert-test)
-    (:id insert-retro :cmd carriage-insert-retro-section    :keys ("x r")   :contexts (carriage org) :section act :desc-key :insert-retro)
-    (:id assist-context-delta :cmd carriage-ui-context-delta-assist :keys ("x c") :contexts (carriage org) :section act :desc-key :assist-context-delta)
-    (:id insert-menu  :cmd carriage-insert-transient        :keys ("x x")   :contexts (carriage org) :section act :desc-key :insert-assist-menu)
-    ;; Engine
-    (:id engine       :cmd carriage-select-apply-engine     :keys ("E")  :contexts (carriage) :section tools :desc-key :engine)
-    (:id save-settings :cmd carriage-save-settings          :keys ("s")  :contexts (carriage org global) :section tools :desc-key :save-settings :label "Save settings"))
-  "Keyspec: list of action plists with :id :cmd :keys :contexts :section :desc-key.
-All keys are relative to carriage-keys-prefix (default \"C-c e \").")
+    ;; Logs
+    (:id show-log     :cmd carriage-show-log          :section logs :desc-key :show-log)
+    (:id show-traffic :cmd carriage-show-traffic      :section logs :desc-key :show-traffic)
 
-;; Transient UX: close instantly and run the chosen action asynchronously.
-(defun carriage-keys--menu-run-async (cmd &optional state)
-  "Quit transient immediately and schedule CMD on the next tick.
-If STATE is non-nil, set UI state right away and start preloader when available."
-  (interactive)
-  ;; Close transient ASAP (prefer quit-all if available for nested stacks)
-  (ignore-errors
-    (when (featurep 'transient)
-      (if (fboundp 'transient-quit-all)
-          (transient-quit-all)
-        (transient-quit-one))))
-  ;; Early UI feedback (sending/apply/dry-run)
-  (when (and state (fboundp 'carriage-ui-set-state))
-    (ignore-errors (carriage-ui-set-state state)))
-  ;; Start preloader for streaming sends only (best-effort), then give redisplay a chance.
-  (when (and (eq state 'sending) (fboundp 'carriage--preloader-start))
-    (ignore-errors (carriage--preloader-start)))
-  (sit-for 0)
-  ;; Preserve current-prefix-arg for the scheduled interactive call.
-  (let ((prefix current-prefix-arg))
-    (run-at-time 0 nil
-                 (lambda ()
-                   (let ((current-prefix-arg prefix))
-                     (when (commandp cmd)
-                       (call-interactively cmd))))))
-  t)
+    ;; Insert / Assist
+    (:id insert-plan  :cmd carriage-insert-plan-section  :section act :desc-key :insert-plan)
+    (:id insert-step  :cmd carriage-insert-step-section  :section act :desc-key :insert-step)
+    (:id insert-test  :cmd carriage-insert-test-section  :section act :desc-key :insert-test)
+    (:id insert-retro :cmd carriage-insert-retro-section :section act :desc-key :insert-retro)
+    (:id assist-context-delta :cmd carriage-ui-context-delta-assist :section act :desc-key :assist-context-delta)
+    (:id insert-menu  :cmd carriage-insert-transient     :section act :desc-key :insert-assist-menu)
 
-;;;###autoload
-(defun carriage-menu-send-buffer ()
-  "Wrapper for transient: close menu immediately and send buffer asynchronously."
-  (interactive)
-  (carriage-keys--menu-run-async #'carriage-send-buffer 'sending))
+    ;; Swarm supervisor (optional)
+    (:id swarm-agent-start :cmd carriage-swarm-agent-start :section session :label "Swarm: start agent")
+    (:id swarm-agent-stop  :cmd carriage-swarm-agent-stop  :section session :label "Swarm: stop agent…")
+    (:id swarm-gc-stale    :cmd carriage-swarm-gc-stale    :section session :label "Swarm: cleanup stale")
+    (:id swarm-hub-start   :cmd carriage-swarm-hub-start   :section session :label "Swarm: start hub")
+    (:id swarm-hub-stop    :cmd carriage-swarm-hub-stop    :section session :label "Swarm: stop hub")
+    (:id swarm-dashboard   :cmd carriage-swarm-open-dashboard :section session :label "Swarm: open dashboard")
+    )
+  "Action catalog used by menu/help providers.")
 
-;;;###autoload
-(defun carriage-menu-send-subtree ()
-  "Wrapper for transient: close menu immediately and send subtree asynchronously."
-  (interactive)
-  (carriage-keys--menu-run-async #'carriage-send-subtree 'sending))
+(defconst carriage-keys--prefix-bindings
+  '(
+    ;; Menu / help
+    (:key "SPC" :cmd carriage-menu-open)
+    (:key "?"   :cmd carriage-menu-help)
 
-;;;###autoload
-(defun carriage-menu-dry-run ()
-  "Wrapper for transient: close menu immediately and start dry-run asynchronously."
-  (interactive)
-  (carriage-keys--menu-run-async #'carriage-dry-run-at-point 'dry-run))
+    ;; Send/apply
+    (:key "RET"   :cmd carriage-send-buffer)
+    (:key "M-RET" :cmd carriage-send-subtree)
+    (:key "d"     :cmd carriage-dry-run-at-point)
+    (:key "a"     :cmd carriage-apply-at-point-or-region)
+    (:key "A"     :cmd carriage-apply-last-iteration)
+    (:key "k"     :cmd carriage-abort-current)
+    (:key "r"     :cmd carriage-report-open)
 
-;;;###autoload
-(defun carriage-menu-apply ()
-  "Wrapper for transient: close menu immediately and apply asynchronously."
-  (interactive)
-  (carriage-keys--menu-run-async #'carriage-apply-at-point-or-region 'apply))
+    ;; Model / suite / intent / engine
+    (:key "m" :cmd carriage-select-model)
+    (:key "S" :cmd carriage-select-suite)
+    (:key "i" :cmd carriage-toggle-intent)
+    (:key "E" :cmd carriage-select-apply-engine)
 
-;;;###autoload
-(defun carriage-menu-apply-all ()
-  "Wrapper for transient: close menu immediately and apply-all asynchronously."
-  (interactive)
-  (carriage-keys--menu-run-async #'carriage-apply-last-iteration 'apply))
+    ;; Context (two-stroke, stable mnemonics)
+    (:key "t g" :cmd carriage-toggle-include-gptel-context)
+    (:key "t f" :cmd carriage-toggle-include-doc-context)
+    (:key "t p" :cmd carriage-toggle-include-patched-files)
+    (:key "t m" :cmd carriage-toggle-include-project-map)
+    (:key "t v" :cmd carriage-toggle-include-visible-context)
+    (:key "t a" :cmd carriage-select-doc-context-all)
+    (:key "t l" :cmd carriage-select-doc-context-last)
+    (:key "t s" :cmd carriage-toggle-doc-context-scope)
+    (:key "t P" :cmd carriage-toggle-context-profile)
 
-;;;###autoload
-(defun carriage-keys-register-actions (actions)
-  "Register or override keyspec actions.
+    ;; Git/WIP
+    (:key "w"  :cmd carriage-wip-checkout)
+    (:key "R"  :cmd carriage-wip-reset-soft)
+    (:key "cc" :cmd carriage-commit-changes)
+    (:key "cl" :cmd carriage-commit-last-iteration)
 
-ACTIONS is a list of plists. Each plist should contain at least:
-  :id SYMBOL     Unique action identifier.
-  :cmd SYMBOL    Interactive command symbol.
+    ;; Logs / buffers / tools
+    (:key "L" :cmd carriage-show-log)
+    (:key "T" :cmd carriage-show-traffic)
+    (:key "e" :cmd carriage-open-buffer)
+    (:key "f" :cmd carriage-open-file-chat)
 
-Optional keys:
-  :keys (LIST OF STR)   Keys relative to `carriage-keys-prefix' (e.g., (\"n\") not full prefix).
-  :contexts (LIST)      Contexts like (carriage report global org).
-  :section SYMBOL       Grouping for menu (navigate act session tools logs).
-  :desc-key SYMBOL      i18n key for labels/tooltips.
+    ;; Insert/Assist
+    (:key "x p" :cmd carriage-insert-plan-section)
+    (:key "x s" :cmd carriage-insert-step-section)
+    (:key "x t" :cmd carriage-insert-test-section)
+    (:key "x r" :cmd carriage-insert-retro-section)
+    (:key "x c" :cmd carriage-ui-context-delta-assist)
+    (:key "x x" :cmd carriage-insert-transient)
 
-If an :id already exists, its entry is replaced. Otherwise, a new entry is appended."
-  (dolist (pl actions)
-    (let ((id (plist-get pl :id)))
-      (when id
-        (setq carriage-keys--spec
-              (nconc
-               (cl-remove-if (lambda (el) (eq (plist-get el :id) id))
-                             carriage-keys--spec)
-               (list pl))))))
-  t)
+    ;; Swarm
+    (:key "z a" :cmd carriage-swarm-agent-start)
+    (:key "z k" :cmd carriage-swarm-agent-stop)
+    (:key "z g" :cmd carriage-swarm-gc-stale)
+    (:key "z h" :cmd carriage-swarm-hub-start)
+    (:key "z H" :cmd carriage-swarm-hub-stop)
+    (:key "z o" :cmd carriage-swarm-open-dashboard)
+    )
+  "Bindings inside `carriage-prefix-map' (suffixes relative to prefix).")
 
-(defun carriage-keys--ensure-kbd (key)
-  "Return a kbd string for KEY under `carriage-keys-prefix'.
-KEY may be a single token (\"m\") or a space-separated sequence (\"t c\")."
-  (let* ((prefix (or carriage-keys-prefix "C-c e "))
-         (ks (string-trim key)))
-    (kbd (concat prefix ks))))
+(defconst carriage-keys--direct-bindings
+  '(
+    ;; carriage-mode local convenience bindings (must not depend on menu provider)
+    (:target carriage-mode-map :key "C-c C-c" :cmd carriage-ctrl-c-ctrl-c)
+    (:target carriage-mode-map :key "C-c !"   :cmd carriage-apply-last-iteration)
 
-(defun carriage-keys--actions-for-context (context)
-  "Return actions from keyspec applicable to CONTEXT."
-  (cl-remove-if-not
-   (lambda (pl)
-     (let ((cs (plist-get pl :contexts)))
-       (or (null cs) (memq context cs))))
-   carriage-keys--spec))
+    ;; Report-mode convenience (installed when report map exists)
+    (:target carriage-report-mode-map :key "RET" :cmd carriage-report-show-diff-at-point)
+    (:target carriage-report-mode-map :key "d"   :cmd carriage-report-show-diff-at-point)
+    (:target carriage-report-mode-map :key "e"   :cmd carriage-report-ediff-at-point)
+    (:target carriage-report-mode-map :key "a"   :cmd carriage-report-apply-at-point)
+    )
+  "Direct bindings installed into concrete keymaps (outside prefix-map).")
 
-(defun carriage-keys--actions-for-contexts (contexts)
-  "Return merged action list for CONTEXTS with left-to-right priority.
-Earlier contexts in CONTEXTS take precedence over later ones by :id."
-  (let ((seen (make-hash-table :test 'eq))
-        (acc '()))
-    (dolist (ctx contexts)
-      (dolist (pl (carriage-keys--actions-for-context ctx))
-        (let ((id (plist-get pl :id)))
-          (unless (gethash id seen)
-            (puthash id t seen)
-            (push pl acc)))))
-    (nreverse acc)))
+(defun carriage-keys-actions ()
+  "Return keyspec action catalog."
+  carriage-keys--actions)
 
-(defun carriage-keys--current-contexts ()
-  "Detect active contexts in current buffer with priority order.
-- In carriage buffers: (carriage [report|log|traffic?] org global)
-- In report/log/traffic buffers: (that-context org global)
-- Else: include `org' when in Org buffers; add `global' only if `carriage-global-mode' is on."
-  (let* ((in-carriage (and (boundp 'carriage-mode) carriage-mode))
-         (is-report  (derived-mode-p 'carriage-report-mode))
-         (is-log     (string= (buffer-name) "*carriage-log*"))
-         (is-traffic (string= (buffer-name) "*carriage-traffic*"))
-         (is-org     (derived-mode-p 'org-mode))
-         (ctxs '()))
-    (when in-carriage (push 'carriage ctxs))
-    (when is-report   (push 'report ctxs))
-    (when is-log      (push 'log ctxs))
-    (when is-traffic  (push 'traffic ctxs))
-    (when is-org      (push 'org ctxs))
-    ;; Global is available always inside carriage-mode; outside only if carriage-global-mode is enabled.
-    (when (or in-carriage (bound-and-true-p carriage-global-mode))
-      (setq ctxs (append ctxs (list 'global))))
-    (or ctxs (when (bound-and-true-p carriage-global-mode) '(global)))))
+(defun carriage-keys-action-label (action)
+  "Return non-empty label for ACTION plist (id/cmd/desc-key/label fallbacks)."
+  (let* ((id (plist-get action :id))
+         (cmd (plist-get action :cmd))
+         (dk  (plist-get action :desc-key))
+         (raw (or (and (symbolp dk) (carriage-keys--i18n dk nil))
+                  (plist-get action :label)
+                  (and (symbolp cmd) (symbol-name cmd))
+                  (and (symbolp id) (symbol-name id))
+                  (format "%s" id)))
+         (lbl (if (and (stringp raw) (not (string-empty-p (string-trim raw))))
+                  raw
+                (if (symbolp id) (symbol-name id) (format "%s" id)))))
+    ;; Do not append bracket hints; tests assert this.
+    (if (and (stringp lbl) (string-empty-p (string-trim lbl)))
+        "?"
+      lbl)))
 
-(defun carriage-keys--apply-action (map action)
-  "Apply ACTION binding(s) to MAP according to keyspec + profile overlays."
-  (let* ((id   (plist-get action :id))
-         (cmd  (plist-get action :cmd))
-         (keys (copy-sequence (or (plist-get action :keys) '()))))
-    (when (symbolp cmd)
-      ;; Apply profile overlays: remove/add
-      (let* ((ov (alist-get carriage-keys-profile carriage-keys--profile-overlays))
-             (rm (plist-get ov :remove))
-             (ad (plist-get ov :add))
-             (rm-keys (cl-loop for el in rm
-                               when (eq (plist-get el :id) id)
-                               append (or (plist-get el :keys) '())))
-             (ad-keys (cl-loop for el in ad
-                               when (eq (plist-get el :id) id)
-                               append (or (plist-get el :keys) '()))))
-        (dolist (rk rm-keys)
-          (setq keys (delete rk keys)))
-        (dolist (ak ad-keys)
-          (push ak keys)))
-      ;; Bind all effective keys
-      (dolist (k (delete-dups (delq nil keys)))
-        (let* ((seq (carriage-keys--ensure-kbd k))
-               (ok t)
-               (i 0))
-          ;; Skip binding if any prefix of seq is already bound to a non-prefix command in MAP.
-          (while (and ok (< i (1- (length seq))))
-            (let* ((sub (cl-subseq seq 0 (1+ i)))
-                   (binding (lookup-key map sub)))
-              (when (and binding (not (keymapp binding)))
-                (setq ok nil)))
-            (setq i (1+ i)))
-          (when ok
-            (define-key map seq cmd)))))))
+(defun carriage-keys--ensure-prefix-map ()
+  "Ensure `carriage-prefix-map' is a keymap."
+  (unless (keymapp carriage-prefix-map)
+    (setq carriage-prefix-map (make-sparse-keymap)))
+  carriage-prefix-map)
 
-(defun carriage-keys-apply-to (map context)
-  "Apply keyspec to MAP for CONTEXT."
-  (dolist (act (carriage-keys--actions-for-context context))
-    (carriage-keys--apply-action map act))
-  map)
+(defun carriage-keys--reset-prefix-map ()
+  "Clear all bindings in `carriage-prefix-map' (preserving the keymap object)."
+  (carriage-keys--ensure-prefix-map)
+  (setcdr carriage-prefix-map nil)
+  carriage-prefix-map)
 
-(defun carriage-keys-apply-prefix-suffixes (map context)
-  "Apply keyspec of CONTEXT to prefix MAP by binding suffix keys relative to MAP.
+(defun carriage-keys-build-prefix-map ()
+  "Rebuild `carriage-prefix-map' from `carriage-keys--prefix-bindings'."
+  (carriage-keys--reset-prefix-map)
+  (dolist (pl carriage-keys--prefix-bindings)
+    (let ((k (plist-get pl :key))
+          (cmd (plist-get pl :cmd)))
+      (when (and (stringp k) (symbolp cmd))
+        (define-key carriage-prefix-map (kbd (string-trim k)) cmd))))
+  carriage-prefix-map)
 
-This is intended for true prefix maps already assigned to a leading prefix
-derived from =carriage-keys-prefix'. The keys from keyspec are bound WITHOUT the =carriage-keys-prefix'
-added. For example:
-- \"t c\" in keyspec becomes (kbd \"t c\") inside MAP,
-- \"RET\" becomes (kbd \"RET\") inside MAP.
+(defun carriage-keys--map-value (sym)
+  "Return keymap value of SYM, or nil."
+  (when (and (symbolp sym) (boundp sym))
+    (let ((v (symbol-value sym)))
+      (when (keymapp v) v))))
 
-Profile overlays (:add/:remove) are respected similar to =carriage-keys--apply-action'."
-  (dolist (act (carriage-keys--actions-for-context context))
-    (let* ((id   (plist-get act :id))
-           (cmd  (plist-get act :cmd))
-           (keys (copy-sequence (or (plist-get act :keys) '()))))
-      (when (and (symbolp cmd) keys)
-        (let* ((ov (alist-get carriage-keys-profile carriage-keys--profile-overlays))
-               (rm (plist-get ov :remove))
-               (ad (plist-get ov :add))
-               (rm-keys (cl-loop for el in rm
-                                 when (eq (plist-get el :id) id)
-                                 append (or (plist-get el :keys) '())))
-               (ad-keys (cl-loop for el in ad
-                                 when (eq (plist-get el :id) id)
-                                 append (or (plist-get el :keys) '()))))
-          (dolist (rk rm-keys)
-            (setq keys (delete rk keys)))
-          (dolist (ak ad-keys)
-            (push ak keys)))
-        (dolist (k (delete-dups (delq nil keys)))
-          (define-key map (kbd (string-trim k)) cmd)))))
-  map)
+(defun carriage-keys--define-key-owned (map keystr cmd)
+  "Define KEYSTR in MAP to CMD. Return t when applied."
+  (when (and (keymapp map) (stringp keystr) (symbolp cmd))
+    (define-key map (kbd keystr) cmd)
+    t))
 
-(defun carriage-keys-apply-multi (map contexts)
-  "Apply keyspec for CONTEXTS to MAP in order; later contexts override earlier.
-Example: (global carriage) → локальные биндинги перекрывают глобальные."
-  (dolist (ctx contexts)
-    (carriage-keys-apply-to map ctx))
-  map)
+(defun carriage-keys-install-known-keymaps ()
+  "Install Carriage bindings into known Carriage-owned keymaps (idempotent).
 
-(defun carriage-keys-apply-known-keymaps ()
-  "Apply keyspec to known Carriage keymaps ensuring all prefixes open the menu.
-Installs bindings for the primary prefix and any aliases in Carriage and auxiliary maps."
+Installs:
+- `carriage-prefix-map' under configured prefixes in `carriage-mode-map' and
+  `carriage-report-mode-map' (when those maps exist).
+- direct bindings listed in `carriage-keys--direct-bindings'."
+  (carriage-keys-build-prefix-map)
   (let ((prefixes (carriage-keys-prefixes)))
-    (when (and (boundp 'carriage-mode-map) (keymapp carriage-mode-map))
-      (dolist (pref prefixes)
-        (define-key carriage-mode-map (kbd pref) #'carriage-keys-open-menu)))
-    (dolist (mp '(carriage-report-mode-map carriage-aux-mode-map org-mode-map))
-      (let ((map (when (boundp mp) (symbol-value mp))))
-        (when (keymapp map)
+    ;; Prefix binding in owned mode maps
+    (dolist (msym '(carriage-mode-map carriage-report-mode-map))
+      (let ((m (carriage-keys--map-value msym)))
+        (when m
           (dolist (pref prefixes)
-            (define-key map (kbd pref) #'carriage-keys-open-menu))))))
-  ;; Legacy alias: C-c ! applies last iteration (UI v1 legacy)
-  (ignore-errors
-    (global-set-key (kbd "C-c !") #'carriage-apply-last-iteration))
+            (define-key m (kbd pref) carriage-prefix-map))))))
+  ;; Direct bindings in owned maps
+  (dolist (pl carriage-keys--direct-bindings)
+    (let* ((msym (plist-get pl :target))
+           (m (carriage-keys--map-value msym))
+           (k (plist-get pl :key))
+           (cmd (plist-get pl :cmd)))
+      (when m
+        (carriage-keys--define-key-owned m k cmd))))
   t)
 
-(defun carriage-keys-first-key (id)
-  "Return the first effective key (kbd string) for action ID in current profile."
-  (let* ((act (cl-find id carriage-keys--spec :key (lambda (pl) (plist-get pl :id))))
-         (keys (and act (plist-get act :keys))))
-    (when (and act keys)
-      (carriage-keys--ensure-kbd (car keys)))))
+(defun carriage-keys-global-enable ()
+  "Enable Carriage prefix in `global-map', saving overwritten bindings for restoration."
+  (carriage-keys-build-prefix-map)
+  (let ((prefixes (carriage-keys-prefixes)))
+    (dolist (pref prefixes)
+      (let* ((keystr pref)
+             (seq (kbd keystr))
+             (old (lookup-key global-map seq)))
+        (push (cons global-map (cons keystr old)) carriage-keys--installed)
+        (define-key global-map seq carriage-prefix-map))))
+  t)
 
-(defun carriage-keys-lint-collisions ()
-  "Return a list of (key . (ID1 ID2 ...)) for collisions inside keyspec."
-  (let ((table (make-hash-table :test 'equal)))
-    (dolist (act carriage-keys--spec)
-      (let* ((id (plist-get act :id))
-             (keys (plist-get act :keys)))
-        (dolist (k keys)
-          (let* ((kbd (key-description (carriage-keys--ensure-kbd k)))
-                 (cur (gethash kbd table '())))
-            (puthash kbd (cons id cur) table)))))
-    (cl-loop for k being the hash-keys of table
-             for v = (gethash k table)
-             when (> (length v) 1)
-             collect (cons k (nreverse v)))))
+(defun carriage-keys-global-disable ()
+  "Disable Carriage prefix in `global-map', restoring overwritten bindings (best-effort)."
+  (let ((rest carriage-keys--installed))
+    (setq carriage-keys--installed nil)
+    (dolist (rec rest)
+      (let ((map (car rec))
+            (keystr (cadr rec))
+            (old (cddr rec)))
+        (when (and (eq map global-map) (stringp keystr))
+          (define-key global-map (kbd keystr) old)))))
+  t)
 
+(defun carriage-keys--menu-actions-for-current-buffer ()
+  "Return list of action plists suitable for menu selection in current buffer."
+  (cl-remove-if-not
+   (lambda (a)
+     (let ((cmd (plist-get a :cmd)))
+       (and (symbolp cmd) (commandp cmd))))
+   (carriage-keys-actions)))
 
-(defun carriage-keys-lint-menu ()
-  "Lint transient-menu invariants.
+(defun carriage--menu-open-completing-read ()
+  "Fallback menu provider: completing-read over known actions."
+  (let* ((acts (carriage-keys--menu-actions-for-current-buffer))
+         (pairs (mapcar (lambda (a)
+                          (cons (carriage-keys-action-label a) (plist-get a :cmd)))
+                        acts))
+         (choice (completing-read "Carriage: " (mapcar #'car pairs) nil t)))
+    (let ((cmd (cdr (assoc choice pairs))))
+      (when (commandp cmd)
+        (call-interactively cmd)))))
 
-Returns a plist:
-  :duplicate-menu-keys ((KEY . (ID1 ID2 ...)) ...)
-  :has-single-t-when-t-prefix BOOL
-  :empty-label-ids (ID ...)
+(defun carriage-menu-open ()
+  "Open Carriage menu according to `carriage-menu-provider'.
 
-Menu-keys are derived similarly to `carriage-keys-open-menu':
-- explicit :menu-key wins;
-- \"tc\" form becomes \"t c\";
-- keys with spaces are kept as-is;
-- otherwise last token of full binding is used.
+Bindings (by keyspec, inside prefix-map):
+- C-c e SPC → this command.
 
-Labels are computed as: i18n(:desc-key) → :label → symbol-name(:cmd) → symbol-name(:id)."
-  (let* ((dups (make-hash-table :test 'equal))
-         (seen (make-hash-table :test 'equal))
-         (empty-label-ids '())
-         (has-t-prefix nil)
-         (has-single-t nil)
-         (_ (require 'carriage-i18n nil t)))
-    (dolist (pl carriage-keys--spec)
-      (let* ((id (plist-get pl :id))
-             (cmd (plist-get pl :cmd))
-             (k   (car (plist-get pl :keys)))
-             (mkey (plist-get pl :menu-key))
-             (desc (and (stringp k)
-                        (ignore-errors
-                          (key-description (carriage-keys--ensure-kbd k)))))
-             (lasttok (and (stringp desc)
-                           (car (last (split-string desc " " t)))))
-             (menu-key
-              (let ((mk (and (stringp mkey) (string-trim mkey))))
-                (if (and mk (> (length mk) 0))
-                    mk
-                  (cond
-                   ((and (stringp k)
-                         (string-match-p "\\`t[[:alnum:]]\\'" k))
-                    (format "t %s" (substring k 1 2)))
-                   ((and (stringp k) (string-match-p " " k))
-                    (string-trim k))
-                   (t lasttok)))))
-             (desc-key (plist-get pl :desc-key))
-             (raw-label (or (and (fboundp 'carriage-i18n) (carriage-i18n desc-key))
-                            (plist-get pl :label)
-                            (and (symbolp cmd) (symbol-name cmd))
-                            (and (symbolp id) (symbol-name id))
-                            (format "%s" id)))
-             (lbl (if (and (stringp raw-label)
-                           (string-match-p "\\`[ \t]*\\'" raw-label))
-                      (symbol-name id)
-                    raw-label)))
-        (when (and (stringp menu-key) (string-prefix-p "t " menu-key))
-          (setq has-t-prefix t))
-        (when (and (stringp menu-key) (string= menu-key "t"))
-          (setq has-single-t t))
-        (when (or (null lbl)
-                  (and (stringp lbl)
-                       (string-match-p "\\`[ \t]*\\'" lbl)))
-          (push id empty-label-ids))
-        (when (stringp menu-key)
-          (let ((cur (gethash menu-key seen)))
-            (if cur
-                (puthash menu-key (cons id cur) dups)
-              (puthash menu-key (list id) seen))))))
-    (let ((dup-list
-           (cl-loop for k being the hash-keys of dups
-                    for v = (gethash k dups)
-                    when (> (length v) 1)
-                    collect (cons k (nreverse v)))))
-      (list :duplicate-menu-keys dup-list
-            :has-single-t-when-t-prefix (and has-t-prefix has-single-t)
-            :empty-label-ids (nreverse (delete-dups empty-label-ids))))))
-
-;;;###autoload
-(defun carriage-keys-open-menu ()
-  "Open Carriage action menu from keyspec.
-If transient is available, show multi-column grouped menu with i18n headers.
-Fallback: completing-read (group prefix in labels)."
+Provider policy:
+- nil: menu disabled (bindings still work)
+- completing-read: always use completing-read
+- transient/hydra: best-effort, fallback to completing-read when unavailable."
   (interactive)
-  (let* ((ctxs (carriage-keys--current-contexts))
-         (all-acts (carriage-keys--actions-for-contexts ctxs))
-         ;; exclude :menu itself
-         (acts (cl-remove-if (lambda (pl) (eq (plist-get pl :id) 'menu)) all-acts))
-         ;; Optional Assist-based ranking of fixed actions (no new actions are added)
-         (_rank (ignore-errors
-                  (when (and (require 'carriage-ui nil t)
-                             (boundp 'carriage-ui-enable-assist-ranking)
-                             carriage-ui-enable-assist-ranking
-                             (fboundp 'carriage-ui-rank-actions-with-assist))
-                    (setq acts (carriage-ui-rank-actions-with-assist acts)))))
-         (sections '(navigate act context session tools logs)))
-    (if (and (require 'transient nil t) (fboundp 'transient-define-prefix))
-        (let* ((_ (require 'carriage-i18n nil t))
-               ;; Build data per section: each element -> (menu-key label cmd id section)
-               (per-sec
-                (cl-loop for sec in sections
-                         collect
-                         (cl-loop for pl in acts
-                                  for s = (plist-get pl :section)
-                                  when (eq s sec)
-                                  collect
-                                  (let* ((cmd (plist-get pl :cmd))
-                                         (id  (plist-get pl :id))
-                                         (k   (car (plist-get pl :keys)))
-                                         (mkey (plist-get pl :menu-key))
-                                         ;; Compute menu key:
-                                         ;; 1) Respect explicit :menu-key when provided (e.g., "t g").
-                                         ;; 2) For two-stroke like "tc"/"tf"/..., show "t c"/"t f"/...
-                                         ;; 3) If K already contains a space, keep as-is.
-                                         ;; 4) Else fall back to the last token of full binding.
-                                         (desc (and (stringp k)
-                                                    (ignore-errors
-                                                      (key-description (carriage-keys--ensure-kbd k)))))
-                                         (lasttok (and (stringp desc)
-                                                       (car (last (split-string desc " " t)))))
-                                         (menu-key
-                                          (let ((mk (and (stringp mkey) (string-trim mkey))))
-                                            (if (and mk (> (length mk) 0))
-                                                mk
-                                              (cond
-                                               ((and (stringp k)
-                                                     (string-match-p "\\`t[[:alnum:]]\\'" k))
-                                                (format "t %s" (substring k 1 2)))
-                                               ((and (stringp k) (string-match-p " " k))
-                                                (string-trim k))
-                                               (t lasttok)))))
-                                         (desc-key (plist-get pl :desc-key))
-                                         (fallback-label (plist-get pl :label))
-                                         (raw-label (or (and (fboundp 'carriage-i18n) (carriage-i18n desc-key))
-                                                        fallback-label
-                                                        (and (symbolp cmd) (symbol-name cmd))
-                                                        (format "%s" id)))
-                                         (lbl (let ((s (if (and (stringp raw-label)
-                                                                (not (string-match-p "\\`[ \t]*\\'" raw-label)))
-                                                           raw-label
-                                                         (if (symbolp id) (symbol-name id) (format "%s" id)))))
-                                                (if (or (null s)
-                                                        (and (stringp s)
-                                                             (string-match-p "\\`[ \t]*\\'" s)))
-                                                    (if (symbolp id) (symbol-name id) (format "%s" id))
-                                                  s))))
-                                    (list menu-key lbl cmd id sec)))))
-               ;; Flatten to resolve unique keys globally; uniqueness by full sequence ("t c" vs "c")
-               (flat (apply #'append per-sec))
-               (used (make-hash-table :test 'equal))
-               ;; Reserve plain "t" if any multi-stroke key starts with "t ".
-               ;; This prevents assigning single-key 't' to an item which would shadow
-               ;; sequences like "t c"/"t f"/… inside the transient keymap.
-               (_ (when (cl-some (lambda (it)
-                                   (let ((b (nth 0 it)))
-                                     (and (stringp b)
-                                          (string-prefix-p "t " b))))
-                                 flat)
-                    (puthash "t" t used)))
-               (unique
-                (cl-loop for it in flat
-                         for base = (nth 0 it)          ;; may be "t c" or "c" or "RET"
-                         for lbl  = (nth 1 it)
-                         for cmd  = (nth 2 it)
-                         for id   = (nth 3 it)
-                         for sec  = (nth 4 it)
-                         for idc  = (substring (symbol-name id) 0 1)
-                         ;; Fallback candidates:
-                         ;; 1) full sequence ("t c"), 2) last token ("c"),
-                         ;; 3) UPPER(last token), 4..) digits.
-                         ;; Special keys (RET, M-RET, TAB, SPC, DEL, BACKSPACE) are preserved as-is.
-                         for lastonly = (and (stringp base)
-                                             (car (last (split-string base " " t))))
-                         for special-keys = '("RET" "M-RET" "TAB" "SPC" "DEL" "BACKSPACE")
-                         for cand = (if (and (stringp base) (member base special-keys))
-                                        (list base)
-                                      (delq nil (list base lastonly (and lastonly (upcase lastonly))
-                                                      idc "1" "2" "3" "4" "5" "6" "7" "8" "9")))
-                         for final = (if (and (stringp base) (member base special-keys))
-                                         base
-                                       (cl-loop for c in cand
-                                                when (and (stringp c) (not (gethash c used)))
-                                                return c))
-                         do (puthash (or final base "x") t used)
-                         collect (list (or final base "x") lbl cmd id sec)))
-               ;; Build transient spec: a vector per section (column) with i18n title
-               (build-col
-                (lambda (sec)
-                  (let* ((title (pcase sec
-                                  ('navigate (if (fboundp 'carriage-i18n) (carriage-i18n :navigate-title) "Navigate"))
-                                  ('act      (if (fboundp 'carriage-i18n) (carriage-i18n :act-title) "Actions"))
-                                  ('context  (if (fboundp 'carriage-i18n) (carriage-i18n :context-title) "Context"))
-                                  ('session  (if (fboundp 'carriage-i18n) (carriage-i18n :session-title) "Session/Git"))
-                                  ('tools    (if (fboundp 'carriage-i18n) (carriage-i18n :tools-title) "Tools"))
-                                  ('logs     (if (fboundp 'carriage-i18n) (carriage-i18n :logs-title) "Logs"))
-                                  (_ "Carriage")))
-                         ;; Add a small help-echo for the Context column to explain two-stroke keys.
-                         (title* (if (eq sec 'context)
-                                     (propertize title 'help-echo (if (fboundp 'carriage-i18n)
-                                                                      (carriage-i18n :context-help)
-                                                                    "Press t, then letter (g,f,p,v,a,l,s,P)"))
-                                   title))
-                         (items (cl-loop for it in unique
-                                         for ukey = (nth 0 it)
-                                         for lbl  = (nth 1 it)
-                                         for cmd  = (nth 2 it)
-                                         for s    = (nth 4 it)
-                                         when (and (eq s sec) (commandp cmd))
-                                         collect `(,ukey ,lbl ,cmd))))
-                    (vconcat (list title*) items))))
-               (cols (cl-loop for sec in sections
-                              for col = (funcall build-col sec)
-                              when (> (length col) 1)
-                              collect col))
-               (menu-title (if (and (require 'carriage-i18n nil t)
-                                    (fboundp 'carriage-i18n))
-                               (carriage-i18n :carriage-menu)
-                             "Carriage Menu")))
-          ;; Redefine transient prefix dynamically
-          (when (fboundp 'carriage-keys--menu)
-            (fset 'carriage-keys--menu nil))
-          ;; Build multi-column layout: top-level vector with title and nested column vectors.
-          (let ((layout (apply #'vector (cons menu-title cols))))
-            (eval
-             `(transient-define-prefix carriage-keys--menu ()
-                ,layout)))
-          (call-interactively #'carriage-keys--menu))
-      ;; Fallback: completing-read with section prefix in label
-      (let* ((_ (require 'carriage-i18n nil t))
-             (pairs
-              (mapcar
-               (lambda (pl)
-                 (let* ((id  (plist-get pl :id))
-                        (cmd (plist-get pl :cmd))
-                        (sec (plist-get pl :section))
-                        (desc-key (plist-get pl :desc-key))
-                        (sec-name (pcase sec
-                                    ('navigate (if (fboundp 'carriage-i18n) (carriage-i18n :navigate-title) "Navigate"))
-                                    ('act      (if (fboundp 'carriage-i18n) (carriage-i18n :act-title) "Actions"))
-                                    ('session  (if (fboundp 'carriage-i18n) (carriage-i18n :session-title) "Session/Git"))
-                                    ('tools    (if (fboundp 'carriage-i18n) (carriage-i18n :tools-title) "Tools"))
-                                    ('logs     (if (fboundp 'carriage-i18n) (carriage-i18n :logs-title) "Logs"))
-                                    (_ "Other")))
-                        (lbl (or (and (fboundp 'carriage-i18n) (carriage-i18n desc-key))
-                                 (and (symbolp cmd) (symbol-name cmd))
-                                 (format "%s" id)))
-                        (label (format "[%s] %s" sec-name lbl)))
-                   (cons label cmd)))
-               acts))
-             (choice (completing-read "Carriage action: " (mapcar #'car pairs) nil t)))
-        (let ((cmd (cdr (assoc choice pairs))))
-          (when (commandp cmd)
-            (call-interactively cmd)))))))
+  (pcase carriage-menu-provider
+    ((or 'nil 'disabled)
+     (message "%s" (carriage-keys--i18n :menu-open-tooltip "Menu disabled (provider=nil)")))
+    ('completing-read
+     (carriage--menu-open-completing-read))
+    ('hydra
+     (if (require 'hydra nil t)
+         ;; TODO: hydra provider (future). For now, fallback.
+         (carriage--menu-open-completing-read)
+       (carriage--menu-open-completing-read)))
+    ((or 'auto 'transient)
+     ;; Best-effort transient; fallback always works.
+     (if (require 'transient nil t)
+         ;; TODO: transient provider (future). For now, fallback.
+         (carriage--menu-open-completing-read)
+       (carriage--menu-open-completing-read)))
+    (_
+     (carriage--menu-open-completing-read))))
+
+(defun carriage-menu-help ()
+  "Show Carriage key cheatsheet for the current configuration.
+
+Bindings (by keyspec, inside prefix-map):
+- C-c e ? → this command."
+  (interactive)
+  (let* ((buf (get-buffer-create "*carriage-keys*"))
+         (prefixes (carriage-keys-prefixes)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (read-only-mode -1)
+        (erase-buffer)
+        (insert "Carriage keys (bindings-first)\n\n")
+        (insert (format "Prefix(es): %s\n\n" (mapconcat #'identity prefixes ", ")))
+        (insert "Inside prefix map (suffix → command):\n")
+        (dolist (pl carriage-keys--prefix-bindings)
+          (let ((k (plist-get pl :key))
+                (cmd (plist-get pl :cmd)))
+            (when (and (stringp k) (symbolp cmd))
+              (insert (format "  %-8s → %s\n" k cmd)))))
+        (insert "\nDirect bindings:\n")
+        (dolist (pl carriage-keys--direct-bindings)
+          (let ((tgt (plist-get pl :target))
+                (k (plist-get pl :key))
+                (cmd (plist-get pl :cmd)))
+            (when (and (symbolp tgt) (stringp k) (symbolp cmd))
+              (insert (format "  [%s] %-8s → %s\n" tgt k cmd)))))
+        (goto-char (point-min))
+        (view-mode 1)))
+    (pop-to-buffer buf)))
+
+;; Late-load support: ensure bindings are installed once optional maps appear.
+(defun carriage-keys--after-load-install (&optional file)
+  "After-load hook: re-install keyspec bindings when Carriage maps become available.
+FILE is the loaded file name as passed by `after-load-functions'."
+  (when (and (stringp file)
+             (string-match-p "carriage-\\(mode\\|report\\)\\.elc?\\'" file))
+    (ignore-errors (carriage-keys-install-known-keymaps)))
+  t)
+
+(add-hook 'after-load-functions #'carriage-keys--after-load-install)
 
 (provide 'carriage-keyspec)
 ;;; carriage-keyspec.el ends here

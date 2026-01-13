@@ -1,12 +1,12 @@
-#+title: Context Menu Keys v2 — Two-stroke transient keys and invariants
+#+title: Context Menu Keys v3 — Stable mnemonics (bindings + UI)
 #+author: Carriage Team
 #+language: en
 #+options: toc:2 num:t
 #+property: header-args :results silent
 
 Meta
-- Spec-ID: carriage/ui/context-menu-keys/v2
-- Version: v2.0
+- Spec-ID: carriage/ui/context-menu-keys/v3
+- Version: v3.0
 - Status: draft
 - Normativity: RFC 2119 applies
 - Ownership: ui, keyspec
@@ -17,54 +17,60 @@ Meta
 - Fingerprint: <auto>
 
 Purpose
-- Define the dedicated Context column in the transient menu and mandate two-stroke keys for its actions.
-- Freeze mnemonic two-stroke mappings for context controls and outline UI/which-key invariants.
+- Define stable mnemonic suffix sequences for context controls inside the Carriage prefix-map.
+- Define UI expectations for menu providers (transient/hydra) without making UI keys the source of bindings.
 
 Scope
-- In scope: transient Context column, two-stroke keys, labels policy, which-key hints (base and aliases).
-- Out of scope: transport/engine internals, non-UI bindings.
-
-Terms
-- Two-stroke key: a transient menu key like "t g" (press t, then g inside the menu).
-- Context column: a dedicated transient column grouping context-related actions.
+- In scope:
+  - stable suffix key sequences under the Carriage prefix-map
+  - grouping/labels expectations for menus (Context section/column)
+- Out of scope:
+  - how context is collected and applied in requests (see context specs)
 
 Normative Requirements
-- REQ-cm-001: Context controls MUST be grouped in a dedicated "Context" column in the transient.
-- REQ-cm-002: Two-stroke keys MUST be used for the Context column. The leading stroke "t" MUST be reserved (no single-key "t" items when any "t x" exists).
-- REQ-cm-003: Labels MUST be non-empty after i18n/label fallbacks; labels MUST NOT append bracketed key hints (transient already renders keys before labels).
-- REQ-cm-004: Which-key registrations for toggles MUST be installed for the base prefix and duplicated for all configured prefix aliases.
-- REQ-cm-005: The Context column title SHOULD provide help-echo guiding two-stroke usage (“Press t, then letter: g,f,p,v,a,l,s,P”).
+- REQ-cm-001 (Bindings-first):
+  - The following mnemonics MUST be available as real bindings in `carriage-prefix-map`
+    (i.e., they work without any menu UI).
 
-Context Actions and Two-stroke Mapping (frozen mnemonics)
+- REQ-cm-002 (Menu is optional):
+  - A menu provider MAY render these actions as a dedicated Context group/column.
+  - Disabling the menu provider MUST NOT affect these bindings.
+
+- REQ-cm-003 (No postfix key hints in labels):
+  - Labels must not append bracketed key hints like "[t g]" (UI already shows keys).
+
+Frozen mnemonic mapping (real bindings inside prefix-map)
 - t g — Toggle gptel context (gptel)
 - t f — Toggle document files (files)
 - t p — Toggle applied patch files (patched)
+- t m — Toggle Project Map (map)
 - t v — Toggle visible buffers (visible)
 - t a — Doc scope: All begin_context (all)
 - t l — Doc scope: Last/nearest begin_context (last)
 - t s — Doc scope: Cycle All ↔ Last (scope)
 - t P — Context profile P1/P3 (profile)
 
-Invariants
-- INV-cm-001: Keys uniqueness is enforced by the full sequence (e.g., "t g" does not collide with "g"); "t" is reserved whenever any "t x" is present.
-- INV-cm-002: No single "t" item is allowed in the same transient when any "t x" exists.
-- INV-cm-003: Labels are never empty or "nil" after fallbacks; no postfix hints like "[tc]" are appended to labels.
+Additional prefix-map invariants
+- INV-cm-001:
+  - "t" MUST be a prefix key within `carriage-prefix-map` (not a command).
+- INV-cm-002:
+  - The full key sequence is the uniqueness key ("t g" distinct from "g").
 
-Interfaces/Contracts
-- IFC-cm-001: Keyspec entries for the listed actions MUST declare :section context; :menu-key SHOULD reflect the two-stroke mapping above.
-- IFC-cm-002: Which-key registrar MUST install base and alias entries for all "t g/f/p/v/a/l/s/P" with localized tooltips.
-- IFC-cm-003: Menu builder MUST reserve "t" and treat the entire sequence string as the uniqueness key.
+Menu UI expectations (provider-dependent, non-binding)
+- UI-cm-001:
+  - A menu provider SHOULD group context actions into a dedicated group/column named "Context".
+- UI-cm-002:
+  - A menu provider MAY implement a two-stroke interaction model for Context actions.
+  - This is UI-only and MUST NOT replace/override the real prefix-map bindings.
 
 Testing and Conformance
-- TST-cm-001: Transient shows a dedicated Context column; "t g/f/p/v/a/l/s/P" appear and work; no single "t".
-- TST-cm-002: Which-key shows localized hints for base prefix and all aliases for "t g/f/p/v/a/l/s/P".
-- TST-cm-003: Lint reports no duplicate menu keys, no single "t" when "t x" exists, and no empty labels.
+- TST-cm-001:
+  - `carriage-prefix-map` binds all sequences listed above.
+  - `lookup-key` for "t" returns a keymap.
+- TST-cm-002:
+  - keyspec action labels for these actions are non-empty and contain no trailing bracket hints.
 
 Cross-References
-- Related specs:
-  - spec/ui-v2.org (UI v2 — modeline/header-line/badges/actions)
-  - spec/keyspec-v2.org (Keyspec v2 — schema and generation rules)
-  - spec/testing-v2.org (Testing v2 — UI/menu invariants)
-
-Evolution
-- Minor updates may extend the Context set; the "t" reservation and two-stroke policy remain stable.
+- spec/keyspec-v2.org (Keyspec v3 in this repo)
+- spec/ui-v2.org
+- Code: lisp/carriage-keyspec.el

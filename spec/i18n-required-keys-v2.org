@@ -1,33 +1,45 @@
-#+title: i18n v2 — Required UI keys (minimal set used in code)
+#+title: i18n v3 — Required UI keys (minimal set used in code)
 #+author: Carriage Team
 #+language: en
 #+options: toc:2 num:t
 #+property: header-args :results silent
 
 Purpose
-- Enumerate i18n keys that MUST be provided by locales to avoid nil labels/tooltips in UI.
+- Enumerate i18n keys that MUST be provided by locales to avoid nil/empty labels/tooltips in UI and menus.
 
-Required keys (currently used by UI code)
+Required keys (currently used by UI/keyspec code)
 - :suite
 - :suite-tooltip
 - :engine-label
 - :engine-tooltip
 - :engine-tooltip-branch
+
+;; Menu / help (bindings-first keyspec)
+- :menu-open
+- :menu-open-tooltip
+- :menu-help
+- :menu-help-tooltip
+
+;; State tooltips (request state)
 - :state-tt-streaming
 - :state-tt-reasoning
 - :state-tt-apply
 - :state-tt-dry
 - :state-tt-error
+
+;; Context toggles (tooltips)
 - :ctx-tooltip
 - :files-tooltip
 - :patched-tooltip
+- :map-tooltip
 - :visible-tooltip
 - :doc-scope-all-tip
 - :doc-scope-last-tip
+- :doc-scope-cycle-tip
 
 Testing
-- REQ: spec/testing-v2.org MUST include a locale coverage test that asserts all keys above resolve to non-empty strings for the selected locale (and fallbacks if applicable).
+- REQ: spec/testing-v2.org SHOULD include a locale coverage test that asserts all keys above
+  resolve to non-empty strings for the selected locale (and fallbacks if applicable).
 
 Notes
-- The list may expand; keep this file synchronized with carriage-ui.el usages.
-
+- Keep this file synchronized with actual `carriage-ui.el`, `carriage-keyspec.el` and menu providers.

@@ -73,6 +73,11 @@
     (:commit-last        . ((ru . "Коммит последней итерации") (en . "Commit last iteration")))
     (:engine             . ((ru . "Выбор движка")              (en . "Select engine")))
     (:menu               . ((ru . "Меню")                      (en . "Menu")))
+    ;; Keyspec v3: prefix-map menu/help actions
+    (:menu-open          . ((ru . "Меню")                      (en . "Menu")))
+    (:menu-open-tooltip  . ((ru . "Открыть меню Carriage (C-c e SPC)") (en . "Open Carriage menu (C-c e SPC)")))
+    (:menu-help          . ((ru . "Справка")                   (en . "Help")))
+    (:menu-help-tooltip  . ((ru . "Показать шпаргалку биндингов (C-c e ?)") (en . "Show key cheatsheet (C-c e ?)")))
     (:send-buffer        . ((ru . "Отправить буфер")           (en . "Send buffer")))
     (:send-subtree       . ((ru . "Отправить поддерево")       (en . "Send subtree")))
     (:open-buffer        . ((ru . "Открыть буфер Carriage")    (en . "Open Carriage buffer")))

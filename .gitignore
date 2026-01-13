@@ -22,3 +22,6 @@ dist/
 org/
 doc/
 TODO.org
+
+.stfolder/
+.stignore

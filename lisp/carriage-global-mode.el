@@ -12,25 +12,19 @@
 ;;   spec/index.org
 ;;   spec/errors-v2.org
 ;;   spec/compliance-checklist-v2.org
-;;   spec/keyspec-v2.org
 ;;   spec/ui-v2.org
+;;   spec/keyspec-v2.org
+;;   spec/i18n-v2.org
 ;;
 ;;; Commentary:
 ;; Global minor mode that installs the Carriage prefix/menu (C-c e) when
 ;; enabled. Integrates with keyspec/which-key and exposes a fallback prefix.
 ;;
 ;;; Code:
-;; Specifications:
-;;   spec/code-style-v2.org
-;;   spec/index.org
-;;   spec/errors-v2.org
-;;   spec/compliance-checklist-v2.org
-;;   spec/ui-v2.org
-;;   spec/keyspec-v2.org
-;;   spec/i18n-v2.org
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'carriage-ui nil t)
 (require 'carriage-keyspec)
 
 (defgroup carriage-global nil
@@ -38,41 +32,33 @@
   :group 'applications
   :prefix "carriage-global-")
 
-(defcustom carriage-global-use-transient t
-  "When non-nil, the global Carriage prefix opens the Carriage menu (transient or fallback).
-When nil, the global Carriage prefix acts as a prefix key with suffixes from :contexts (global)."
-  :type 'boolean
-  :group 'carriage-global)
-
-(defvar carriage-global--prefix-map nil
-  "Global prefix keymap installed by carriage-global-mode when
-carriage-global-use-transient is nil. Holds suffixes from :contexts (global).")
-
 ;;;###autoload
 (define-minor-mode carriage-global-mode
-  "Global minor mode enabling the Carriage prefix/menu for :contexts (global).
-When enabled:
-- If =carriage-global-use-transient' is non-nil, bind the base prefix (from =carriage-keys-prefix') globally to =carriage-keys-open-menu'.
-- If nil, install a global prefix keymap under the base prefix and populate suffixes from :contexts (global) via keyspec.
-which-key hints are registered if available."
+  "Global minor mode enabling the Carriage prefix keymap globally.
+
+Policy (keyspec v3):
+- `carriage-keys-prefix' is ALWAYS a prefix keymap (never a menu command).
+- Menu/help live under the prefix:
+  - C-c e SPC → `carriage-menu-open'
+  - C-c e ?   → `carriage-menu-help'
+- When enabled, this mode binds the prefix(es) globally to `carriage-prefix-map'
+  via `carriage-keys-global-enable'. When disabled, restores prior bindings."
   :global t
   :group 'carriage-global
-  (let* ((prefixes (carriage-keys-prefixes)))
-    (dolist (pref prefixes)
-      (define-key global-map (kbd pref) nil))
-    (when (keymapp carriage-global--prefix-map)
-      (setq carriage-global--prefix-map nil))
-    (if carriage-global-mode
-        (progn
-          (dolist (pref prefixes)
-            (define-key global-map (kbd pref) #'carriage-keys-open-menu))
-          ;; Auto-enable carriage-mode on visiting Org files when CAR_MODE=t
-          (when (require 'carriage-doc-state nil t)
-            (add-hook 'find-file-hook #'carriage-doc-state-auto-enable))
-          (message "carriage-global-mode enabled (menu)"))
-      (when (featurep 'carriage-doc-state)
-        (remove-hook 'find-file-hook #'carriage-doc-state-auto-enable))
-      (message "carriage-global-mode disabled"))))
+  (if carriage-global-mode
+      (progn
+        (when (require 'carriage-keyspec nil t)
+          (ignore-errors (carriage-keys-install-known-keymaps))
+          (ignore-errors (carriage-keys-global-enable)))
+        ;; Auto-enable carriage-mode on visiting Org files when CAR_MODE=t
+        (when (require 'carriage-doc-state nil t)
+          (add-hook 'find-file-hook #'carriage-doc-state-auto-enable))
+        (message "carriage-global-mode enabled"))
+    (when (featurep 'carriage-doc-state)
+      (remove-hook 'find-file-hook #'carriage-doc-state-auto-enable))
+    (when (require 'carriage-keyspec nil t)
+      (ignore-errors (carriage-keys-global-disable)))
+    (message "carriage-global-mode disabled")))
 
 ;; Auto-enable carriage-mode and fold CARRIAGE_STATE summary on open (best-effort).
 ;;

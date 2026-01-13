@@ -2023,7 +2023,11 @@ reflects toggle state (muted when off, bright when on)."
                   (all-the-icons-octicon "gear" :height carriage-mode-icon-height :v-adjust carriage-mode-icon-v-adjust
                                          :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-cyan-face)))))
          (label (or ic "Menu"))
-         (btn (carriage-ui--ml-button label #'carriage-keys-open-menu "Открыть меню Carriage (C-c e)")))
+         (_ (require 'carriage-i18n nil t))
+         (tip (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
+                  (carriage-i18n :menu-open-tooltip)
+                "Open Carriage menu (C-c e SPC)"))
+         (btn (carriage-ui--ml-button label #'carriage-menu-open tip)))
     btn))
 (defalias 'settings-btn 'carriage-ui--settings-btn)
 

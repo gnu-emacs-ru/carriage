@@ -399,15 +399,12 @@ In batch mode runs non-interactively and refreshes report."
   (defvar carriage-report-mode-map
     (let* ((map (make-sparse-keymap)))
       (set-keymap-parent map special-mode-map)
-      ;; Keep RET for accessibility; action aliases under C-c e are provided via keyspec.
-      (define-key map (kbd "RET") #'carriage-report-show-diff-at-point)
-      (define-key map (kbd "q")   #'quit-window)
-      ;; Fallbacks: bind report context actions under C-c e directly as well.
-      (define-key map (kbd "C-c e d") #'carriage-report-show-diff-at-point)
-      (define-key map (kbd "C-c e e") #'carriage-report-ediff-at-point)
-      (define-key map (kbd "C-c e a") #'carriage-report-apply-at-point)
       map)
-    "Keymap for Carriage report buffers."))
+    "Keymap for Carriage report buffers.
+
+All report bindings are provided by `carriage-keyspec' (bindings-first):
+- report-local: RET/d/e/a (see keyspec)
+- prefix-map: C-c e → `carriage-prefix-map' (see keyspec/global-mode)."))
 
 (defun carriage-report-mode (&optional _arg)
   "Major mode for Carriage report buffers."
@@ -420,48 +417,11 @@ In batch mode runs non-interactively and refreshes report."
   (setq buffer-read-only t)
   (setq truncate-lines t)
   (run-mode-hooks 'carriage-report-mode-hook)
-  ;; Ensure keyspec bindings (e.g., C-c e d/e/a) are present when the mode is enabled.
-  (when (fboundp 'carriage-keys-apply-known-keymaps)
-    (ignore-errors (carriage-keys-apply-known-keymaps))))
+  ;; Ensure keyspec bindings and prefix-map are installed.
+  (when (require 'carriage-keyspec nil t)
+    (ignore-errors (carriage-keys-install-known-keymaps))))
 
 ;; Report buffer mode is now set inside carriage-report-render; no advice needed.
-
-;; Ensure keyspec bindings are applied to carriage-report-mode-map (report context + global).
-;; Apply immediately if keyspec is loaded, and also after it loads.
-(when (fboundp 'carriage-keys-apply-known-keymaps)
-  (ignore-errors (carriage-keys-apply-known-keymaps)))
-(with-eval-after-load 'carriage-keyspec
-  (when (fboundp 'carriage-keys-apply-known-keymaps)
-    (ignore-errors (carriage-keys-apply-known-keymaps))))
-
-;; Basic success announcer (batch-friendly): emit a concise message whenever
-;; report has :fail==0 and at least one item (replicable with other announcers).
-(defun carriage--announce--basic (_report &rest _ignore)
-  (condition-case _e
-      (let* ((buf (carriage-report-buffer))
-             ;; When called via :after advice, `this-command' may be nil; that's fine.
-             ;; Try to read last rendered report from buffer-local text, but we also
-             ;; accept the function arg (ignored here) since many tests pass a plist.
-             ;; We conservatively parse the last rendered summary from buffer text is costly;
-             ;; instead, rely on the call site always passing REPORT argument and keep this
-             ;; announcer simple: do nothing when :summary isn't available.
-             nil)
-        ;; No-op; this function exists only to be present for advice-member-p.
-        )
-    (error nil))
-
-  (unless (advice-member-p #'carriage--announce--basic 'carriage-report-open)
-    (advice-add
-     'carriage-report-open :after
-     (lambda (report &rest _)
-       (condition-case _e
-           (let* ((sum (and (listp report) (plist-get report :summary)))
-                  (ok  (and sum (plist-get sum :ok)))
-                  (fail (and sum (plist-get sum :fail))))
-             (when (and (numberp ok) (> ok 0)
-                        (numberp fail) (zerop fail)))
-             (message "Carriage: applied OK")))
-       (error nil)))))
 
 (provide 'carriage-report)
 ;;; carriage-report.el ends here

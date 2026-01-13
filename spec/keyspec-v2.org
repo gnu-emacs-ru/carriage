@@ -1,12 +1,12 @@
-#+title: Keyspec v2 — Centralized bindings and menu generation
-#+author: Peter Kosov <11111000000@email.com>
+#+title: Keyspec v3 — Bindings-first (universal keymaps + optional menu)
+#+author: Carriage Team
 #+language: en
 #+options: toc:2 num:t
 #+property: header-args :results silent
 
 Meta
-- Spec-ID: carriage/ui/keyspec/v2
-- Version: v2.0
+- Spec-ID: carriage/ui/keyspec/v3
+- Version: v3.0
 - Status: draft
 - Normativity: RFC 2119 applies
 - Ownership: ui, keyspec
@@ -20,206 +20,174 @@ Purpose
 - Anchor: PURPOSE
 - Normative: t
 - Stability: stable
-- Pack-Priority: P2
-- LLM-Summary: Define bindings model, contexts, and which-key/transient generation rules.
-  - Context-aware maps (carriage/report/global/org)
-  - Deterministic menu layout
-  - Collision linting policy
-  - Profile overlays and aliases
-  - Which-key/transient integration
+- Pack-Priority: P1
+- LLM-Summary:
+  - Keyspec is the single source of truth for key bindings.
+  - Bindings are compiled into real Emacs keymaps (prefix maps, minor-mode maps, global-map).
+  - Menu UI (transient/hydra/completing-read) is optional and must not affect bindings.
 
 Scope
 - Anchor: SCOPE
 - Normative: t
 - Stability: stable
-- Pack-Priority: P2
-- In scope: keyspec schema, generation of keymaps/menus, collisions policy, which-key labels.
-- Out of scope: non-Carriage global key remaps, third-party package keymaps.
+- Pack-Priority: P1
+- In scope:
+  - keyspec data model (actions/bindings/prefixes)
+  - compilation into keymaps
+  - menu provider abstraction (UI layer)
+  - invariants for prefix vs menu
+- Out of scope:
+  - transport/engine internals
+  - non-Carriage global key remaps outside Carriage prefixes
 
 Terms
 - Anchor: TERMS
 - Normative: t
 - Stability: stable
-- Pack-Priority: P3
-- Keyspec: list of action plists that define Carriage bindings and menus.
-- Context: usage scope (carriage, report, log, traffic, org, global).
-- Section: logical group in menu (navigate, act, session, tools, logs).
+- Pack-Priority: P2
+- Action: named command entry (id → interactive function) with label/section metadata.
+- Binding: mapping from a concrete key sequence to an Action, in a target keymap.
+- Prefix map: a keymap bound under a prefix key sequence (e.g., "C-c e") to host suffixes.
+- Menu provider: UI backend that shows a palette of Actions and invokes the chosen command.
 
 Normative Requirements
 - Anchor: REQ
 - Normative: t
 - Stability: stable
 - Pack-Priority: P0
-- REQ-keys-001: Bindings MUST be derived from keyspec; no ad-hoc define-key in modules.
-- REQ-keys-002: Collisions MUST be detected, reported, and resolved by policy.
-- REQ-keys-003: Prefix(es) MUST be configurable via Customize; defaults: "C-c e " (+ alias).
-- REQ-keys-004: Which-key labels and transient menu entries MUST reflect the keyspec.
-- REQ-keys-005: Context precedence MUST be deterministic; later contexts override earlier.
-- REQ-keys-006: Global mode MUST install only the prefix invoker by default (menu or prefix-map).
-- REQ-keys-007: Menu builder MUST support multi-stroke menu keys (e.g., "t g") and reserve the leading key (‘t’) when any "t x" sequences are present (no single-key "t" item).
-- REQ-keys-008: Which-key registrations for toggle sequences ("t g/f/p/v/a/l/s/P") MUST be installed for the base prefix and duplicated for all configured prefix aliases.
 
-Invariants
-- Anchor: INV
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- FREEZE: base-prefix = "C-c e "
-- FREEZE: sections = (navigate act session tools logs)
-- FREEZE: default-profile = classic
-- INV-keys-001: Keys are stable across sessions given identical keyspec and profile.
-- INV-keys-002: Menu layout is stable for the same keyspec and profile overlays.
+REQ-keys-001 (Single source):
+- All user-visible key bindings MUST be declared in keyspec and compiled from it.
+- Other modules MUST NOT define ad-hoc `define-key` bindings for user-visible keys.
 
-Grammar/Schema
+REQ-keys-002 (Bindings-first):
+- Key bindings MUST be expressed as keymap bindings (not as transient-only keys).
+
+REQ-keys-003 (Prefix map invariant):
+- The primary prefix (default "C-c e") MUST be bound to a prefix keymap (never a menu command).
+
+REQ-keys-004 (Menu is optional):
+- Menu UI MUST be callable from the prefix map, but MUST be fully optional.
+- Disabling menu UI MUST NOT affect any bindings.
+
+REQ-keys-005 (Canonical menu/help keys):
+- The prefix map MUST include:
+  - "SPC" → open menu
+  - "?"   → show help/cheatsheet
+
+REQ-keys-006 (Direct bindings independent of menu):
+- Direct bindings (example: "C-c C-c", "C-c !") MUST work regardless of menu provider state.
+
+REQ-keys-007 (Provider abstraction):
+- Keyspect MUST allow switching menu provider (transient/hydra/completing-read/disabled)
+  without changing bindings and without changing keyspec data.
+
+Data Model
 - Anchor: SCHEMA
 - Normative: t
 - Stability: stable
 - Pack-Priority: P1
-- Action (plist):
-  - :id (symbol) unique
-  - :cmd (symbol) interactive command
-  - :keys (list of string) suffix sequences relative to prefix (e.g., "d", "M-RET")
-  - :contexts (list of symbol) e.g., (carriage report global org)
-  - :section (symbol) one of sections (navigate act session tools logs)
-  - :desc-key (symbol) i18n key for label; optional :label string fallback
-- Profile overlays (alist):
-  - profile → plist with :add (list) and :remove (list) of (:id ID :keys (..))
-- Positive example (valid):
-  - (:id dry-run :cmd carriage-dry-run-at-point :keys ("d")
-     :contexts (carriage) :section act :desc-key :dry-run)
-- Negative example (invalid):
-  - (:id dry-run :cmd "not-a-symbol" :keys "d") ; wrong :cmd type, :keys shape
 
-Interfaces/Contracts
+Action (plist):
+- :id (symbol) unique
+- :cmd (symbol) interactive command
+- :section (symbol) optional, for menu grouping (navigate/act/session/tools/logs/context)
+- :desc-key (symbol) optional i18n key for label
+- :label (string) optional label fallback
+- :contexts (list of symbol) optional, context filtering for menu/installation
+
+Binding (plist):
+- :key (string) key sequence in `kbd` syntax
+- :cmd (symbol) interactive command
+- :target (symbol) keymap variable (e.g., carriage-mode-map) or `global-map`
+- :contexts (list of symbol) optional, for install-time filtering (e.g., global-only)
+- :when (function) optional predicate for conditional installs (discouraged; use contexts)
+
+Prefix binding:
+- Primary prefix key sequence(s) (base + aliases) MUST be configurable.
+- Prefixes are always installed as keymap bindings:
+  prefix-seq → carriage-prefix-map
+
+Interfaces / Contracts
 - Anchor: IFC
 - Normative: t
 - Stability: stable
 - Pack-Priority: P1
-- IFC-keys-001: carriage-keys-apply-known-keymaps
-  - Input: none. Effect: bind prefixes and install menu invokers across known maps.
-  - Errors: KEYS_E_COLLISION (warn/error by policy).
-- IFC-keys-002: carriage-keys-open-menu
-  - Opens transient-based or fallback completing-read menu, grouped by :section.
-- IFC-keys-003: carriage-keys-lint-collisions
-  - Output: list of (key . (ID1 ID2 ...)). Empty list means no collisions.
-- IFC-keys-004: carriage-keys-which-key-register
-  - Registers which-key hints for the base prefix and major subsections.
-- IFC-keys-005: carriage-keys-apply-to MAP CONTEXT
-  - Apply actions for context to a keymap; respects overlays and collisions policy.
-- IFC-keys-006: carriage-keys-apply-prefix-suffixes MAP CONTEXT
-  - Apply actions for context to an existing prefix keymap (already bound to the base
-    prefix) by installing suffix sequences relative to that map; respects profile
-    overlays and collisions policy.
+
+IFC-keys-001: carriage-keys-install-known-keymaps
+- Effect:
+  - build/update `carriage-prefix-map`
+  - bind configured prefixes in Carriage-owned mode maps (carriage-mode-map, report-mode-map, …)
+  - install direct bindings in those maps
+
+IFC-keys-002: carriage-keys-global-enable / carriage-keys-global-disable
+- Effect:
+  - bind/unbind configured prefixes in `global-map`
+  - MUST restore overwritten bindings on disable
+
+IFC-keys-003: carriage-menu-open / carriage-menu-help
+- Menu/help commands are normal Actions, bound inside prefix-map.
+- When menu provider is disabled/unavailable, MUST fallback gracefully or show a message.
+
+IFC-keys-004: Menu provider API (internal, abstract)
+- Input: a list of Action objects (id/cmd/label/section).
+- Output: invoke selected Action command, or return selection.
+- Implementations: transient/hydra/completing-read/disabled.
 
 Algorithms
 - Anchor: ALG
 - Normative: t
 - Stability: stable
 - Pack-Priority: P2
-- ALG-keys-001: Build menu
-  - Collect actions for contexts in priority order → apply overlays → dedupe by :id
-  - Partition by :section → allocate unique quick keys per section → render transient spec.
-- ALG-keys-002: Bind maps
-  - For each action → for each effective key suffix → bind under configured prefix
-  - Skip when conflicting with an already bound non-prefix key; record as collision.
+
+ALG-keys-001 (Compile prefix map):
+- Clear prefix map bindings.
+- Install suffix bindings into `carriage-prefix-map`.
+
+ALG-keys-002 (Install bindings):
+- For each target keymap:
+  - bind each configured prefix to the prefix map
+  - bind direct bindings (outside prefix map)
+
+ALG-keys-003 (Menu dispatch):
+- Based on menu provider:
+  - transient/hydra if available
+  - fallback to completing-read
+  - disabled → message
 
 Errors and Diagnostics
 - Anchor: ERR
 - Normative: t
 - Stability: stable
 - Pack-Priority: P2
-- KEYS_E_COLLISION: two or more actions resolve to the same final key; severity=warn|error.
-- KEYS_E_BAD_ACTION: malformed action plist; severity=error; remediation: fix schema.
+- KEYS_E_BAD_SPEC: malformed action/binding definition; MUST NOT break unrelated bindings.
+- Menu provider errors MUST NOT affect keymap bindings.
 
-Security and Limits
-- Anchor: SEC
-- Normative: t
-- Stability: stable
-- Pack-Priority: P2
-- Do not remap security-sensitive global keys outside Carriage prefixes.
-- No file writes; diagnostics go to *Messages* or Carriage log buffer.
-
-LLM Security
-- Anchor: LSEC
-- Normative: t
-- Stability: stable
-- Pack-Priority: P3
-- Not applicable to prompt outputs; no PRM generation here.
-
-Performance and Asynchrony
+Performance
 - Anchor: PERF
 - Normative: t
 - Stability: stable
-- Pack-Priority: P3
-- Binding application SHOULD be O(n) in number of actions; menu render amortized.
-
-UI/UX
-- Anchor: UI
-- Normative: t
-- Stability: stable
 - Pack-Priority: P2
-- Which-key hints MUST match menu grouping; fallback completing-read MUST list section first.
-
-Prompt Guidance (LLM Output Contract)
-- Anchor: PRM
-- Normative: t
-- Stability: stable
-- Pack-Priority: P3
-- Not applicable (no model outputs defined here).
-
-Context Packaging
-- Anchor: PACK
-- Normative: t
-- Stability: stable
-- Pack-Priority: P2
-- Profile: P2-full
-  - include: carriage/ui/keyspec/v2#REQ priority=P2 max-tokens=300 summarize=0.6
-  - include: carriage/ui/keyspec/v2#IFC priority=P2 max-tokens=300 summarize=0.6
-
-Retrieval and Indexing
-- Anchor: RAG
-- Normative: t
-- Stability: stable
-- Pack-Priority: P3
-- Index REQ/IFC anchors; chunk ids CHK-carriage/ui/keyspec/v2-REQ-01..NN.
-
-Precedence Rules
-- Anchor: PREC
-- Normative: t
-- Stability: stable
-- Pack-Priority: P2
-- UI follows Formats/Interfaces precedence; cannot override Security/Errors.
+- Keymap installation SHOULD be O(n) in number of bindings/actions.
+- Menu UI MUST NOT affect redisplay performance.
 
 Testing and Conformance
 - Anchor: TST
 - Normative: t
 - Stability: stable
 - Pack-Priority: P2
-- CHK-keys-001: All actions valid per schema; collisions lint clean or resolved by policy.
-- CHK-keys-002: Which-key registrations present for base prefix and toggles.
-- CHK-keys-003: When any "t x" multi-stroke is present, no single-key "t" item exists in the same menu.
-- TST-keys-001: collisions lint passes; menu opens
-- TST-keys-002: fallback menu works without transient; grouping matches :section
-- TST-keys-003: aliases (prefix-alias) invoke the same menu
-- TST-keys-004: multi-stroke "t x" menu keys are rendered; "t" is not bound as a single key.
-- TST-keys-005: no empty or "nil" labels appear in menus after fallbacks.
-- TST-keys-006: which-key duplicates are installed for aliases for "t g/f/p/v/a/l/s/P".
 
-Cross-References and Anchors
-- Anchor: XREF
-- Normative: t
-- Stability: stable
-- Pack-Priority: P2
-- Source of Truth: spec/spec-on-specs.org#IFC
-- Related: spec/ui-v2.org, spec/i18n-v2.org, spec/context-menu-keys-v2.org
-- Code:
-  - lisp/carriage-keyspec.el
+TST-keys-001:
+- prefix map is present and contains SPC/? bindings.
 
-Evolution
-- Anchor: EVO
-- Normative: t
-- Stability: stable
-- Pack-Priority: P3
-- Affects-Prompt: none
-- Minor changes may extend sections; anchors remain stable.
+TST-keys-002:
+- direct bindings (C-c C-c, C-c !) are present in `carriage-mode-map`.
 
+TST-keys-003:
+- with menu provider disabled, direct/prefix bindings still work; menu-open shows message/fallback.
+
+Cross-References
+- spec/context-menu-keys-v2.org
+- spec/i18n-required-keys-v2.org
+- spec/ui-v2.org
+- Code: lisp/carriage-keyspec.el

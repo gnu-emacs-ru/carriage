@@ -540,9 +540,8 @@ without turning =carriage-mode-map' into a real prefix.")
   "Keymap for carriage-mode.
 Do not define bindings here; all key bindings are applied via keyspec and mode setup.")
 
-;; Ensure menu command autoload is available even if keyspec isn't loaded yet.
-;; This allows binding C-c e to open the menu immediately in carriage-mode buffers.
-(autoload 'carriage-keys-open-menu "carriage-keyspec" "Open Carriage action menu from keyspec." t)
+;; Key bindings are managed centrally by `carriage-keyspec' (bindings-first).
+(require 'carriage-keyspec)
 (autoload 'carriage-context-plan-compile-at-point "carriage-context-plan"
   "Compile begin_context_plan at point into begin_context." t)
 
@@ -761,20 +760,15 @@ Routing:
     (call-interactively #'org-ctrl-c-ctrl-c))))
 
 (defun carriage-mode--setup-keys-and-panels ()
-  "Apply keyspec keymaps, define bindings, and open optional panels."
+  "Install keyspec-managed bindings and open optional panels.
+
+Policy:
+- All bindings (prefix-map and direct keys like C-c C-c, C-c !) are defined by keyspec.
+- carriage-mode does not define user-visible keys directly."
   (when (require 'carriage-keyspec nil t)
-    (carriage-keys-apply-known-keymaps)
-    (let ((prefixes (carriage-keys-prefixes)))
-      (dolist (pref prefixes)
-        (define-key carriage-mode-map (kbd pref) #'carriage-keys-open-menu)))
+    (ignore-errors (carriage-keys-install-known-keymaps))
     (setq carriage--mode-emulation-map nil
           carriage--emulation-map-alist nil)
-    ;; Legacy bindings:
-    ;; - C-c C-c → context router (plan→compile, patch→apply, else Org)
-    ;; - C-c !   → apply last iteration (override org-time-stamp in carriage-mode buffers)
-    (define-key carriage-mode-map (kbd "C-c !") #'carriage-apply-last-iteration)
-    ;; Always bind in carriage-mode buffers (REQ-ctxplan-013).
-    (define-key carriage-mode-map (kbd "C-c C-c") #'carriage-ctrl-c-ctrl-c)
     (when (and carriage-mode-auto-open-log (fboundp 'carriage-show-log))
       (ignore-errors (carriage-show-log)))
     (when (and carriage-mode-auto-open-traffic (fboundp 'carriage-show-traffic))

@@ -1,4 +1,4 @@
-;;; carriage-keyspec.el --- Keyspec vn3 (bindings-first, menu-agnostic)  -*- lexical-binding: t; -*-
+;;; carriage-keyspec.el --- Keyspec v3 (bindings-first, menu-agnostic)  -*- lexical-binding: t; -*-
 ;;
 ;; Copyright (C) 2025 Carriage contributors
 ;; Author: Peter Kosov <11111000000@email.com>
@@ -14,14 +14,14 @@
 ;;
 ;;; Commentary:
 ;;
-;; Bindings-first keyspec (universal mappings):
-;; - Key bindings are compiled into real Emacs keymaps (minor-mode maps, global-map).
-;; - The main prefix (default: "C-c e") is ALWAYS a prefix keymap (`carriage-prefix-map`).
-;; - Menu is optional UI, invoked from inside the prefix-map:
+;; Bindings-first keyspec:
+;; - All user-visible bindings are declared here and compiled into real Emacs keymaps.
+;; - Primary prefix (default: "C-c e") is ALWAYS a prefix keymap (`carriage-prefix-map`).
+;; - Menu UI is optional, invoked from inside the prefix-map:
 ;;   - C-c e SPC → `carriage-menu-open`
-;;   - C-c e ?   → `carriage-menu-help` (cheatsheet)
-;; - Direct bindings like "C-c C-c" / "C-c !" are also defined here and installed
-;;   into their target keymaps. They do not depend on transient/hydra/menu.
+;;   - C-c e ?   → `carriage-menu-help`
+;; - Menu provider is pluggable (transient/hydra/completing-read/disabled) and MUST NOT
+;;   affect bindings.
 ;;
 ;;; Code:
 
@@ -31,9 +31,9 @@
 ;; Optional deps
 (require 'carriage-i18n nil t)
 
+;; ---------------------------------------------------------------------------
 ;; Autoloads for commands referenced by bindings/actions.
-;; This keeps keyspec usable even when the defining modules are not loaded yet
-;; (e.g. when only `carriage-global-mode' is enabled).
+;; Keep keyspec usable even when defining modules are not loaded yet.
 (autoload 'carriage-send-buffer "carriage-mode" nil t)
 (autoload 'carriage-send-subtree "carriage-mode" nil t)
 (autoload 'carriage-dry-run-at-point "carriage-mode" nil t)
@@ -82,7 +82,18 @@
 
 (autoload 'carriage-ui-context-delta-assist "carriage-ui" nil t)
 
-;; Commands referenced from bindings (declared to keep byte-compile clean).
+;; Swarm (Supervisor) — optional
+(autoload 'carriage-swarm-agent-start "carriage-swarm-supervisor" nil t)
+(autoload 'carriage-swarm-agent-stop "carriage-swarm-supervisor" nil t)
+(autoload 'carriage-swarm-gc-stale "carriage-swarm-supervisor" nil t)
+(autoload 'carriage-swarm-hub-start "carriage-swarm-supervisor" nil t)
+(autoload 'carriage-swarm-hub-stop "carriage-swarm-supervisor" nil t)
+(autoload 'carriage-swarm-open-dashboard "carriage-swarm-supervisor" nil t)
+
+;; ---------------------------------------------------------------------------
+;; Declarations (byte-compile hygiene)
+(declare-function carriage-i18n "carriage-i18n" (key &rest args))
+
 (declare-function carriage-send-buffer "carriage-mode" ())
 (declare-function carriage-send-subtree "carriage-mode" ())
 (declare-function carriage-dry-run-at-point "carriage-mode" ())
@@ -98,6 +109,7 @@
 (declare-function carriage-select-suite "carriage-mode" (&optional suite))
 (declare-function carriage-toggle-intent "carriage-mode" ())
 (declare-function carriage-select-apply-engine "carriage-apply-engine" (&optional engine))
+
 (declare-function carriage-toggle-include-gptel-context "carriage-mode" ())
 (declare-function carriage-toggle-include-doc-context "carriage-mode" ())
 (declare-function carriage-toggle-include-patched-files "carriage-mode" ())
@@ -107,28 +119,32 @@
 (declare-function carriage-select-doc-context-last "carriage-context" ())
 (declare-function carriage-toggle-doc-context-scope "carriage-context" ())
 (declare-function carriage-toggle-context-profile "carriage-context" ())
+
 (declare-function carriage-wip-checkout "carriage-mode" ())
 (declare-function carriage-wip-reset-soft "carriage-mode" (&optional rev))
 (declare-function carriage-commit-changes "carriage-mode" (&optional message))
 (declare-function carriage-commit-last-iteration "carriage-mode" (&optional message))
+
 (declare-function carriage-show-log "carriage-logging" ())
 (declare-function carriage-show-traffic "carriage-logging" ())
 (declare-function carriage-open-buffer "carriage-mode" ())
 (declare-function carriage-open-file-chat "carriage-mode" ())
+
 (declare-function carriage-insert-plan-section "carriage-task" ())
 (declare-function carriage-insert-step-section "carriage-task" ())
 (declare-function carriage-insert-test-section "carriage-task" ())
 (declare-function carriage-insert-retro-section "carriage-task" ())
-(declare-function carriage-ui-context-delta-assist "carriage-ui" ())
 (declare-function carriage-insert-transient "carriage-task" ())
+(declare-function carriage-ui-context-delta-assist "carriage-ui" ())
 
-;; Swarm (Supervisor)
 (declare-function carriage-swarm-agent-start "carriage-swarm-supervisor" ())
 (declare-function carriage-swarm-agent-stop "carriage-swarm-supervisor" ())
 (declare-function carriage-swarm-gc-stale "carriage-swarm-supervisor" ())
 (declare-function carriage-swarm-hub-start "carriage-swarm-supervisor" ())
 (declare-function carriage-swarm-hub-stop "carriage-swarm-supervisor" ())
 (declare-function carriage-swarm-open-dashboard "carriage-swarm-supervisor" ())
+
+;; ---------------------------------------------------------------------------
 
 (defgroup carriage-keyspec nil
   "Keyspec v3 (bindings-first) for Carriage."
@@ -195,6 +211,9 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
    ((stringp fallback) fallback)
    ((symbolp key) (symbol-name key))
    (t (format "%s" key))))
+
+;; ---------------------------------------------------------------------------
+;; Action catalog (menu/help provider input)
 
 (defconst carriage-keys--actions
   '(
@@ -441,6 +460,9 @@ Installs:
           (define-key global-map (kbd keystr) old)))))
   t)
 
+;; ---------------------------------------------------------------------------
+;; Menu providers
+
 (defun carriage-keys--menu-actions-for-current-buffer ()
   "Return list of action plists suitable for menu selection in current buffer."
   (cl-remove-if-not
@@ -460,6 +482,156 @@ Installs:
       (when (commandp cmd)
         (call-interactively cmd)))))
 
+;; ---------------------------------------------------------------------------
+;; Transient provider (generated from keyspec data at runtime, no hardcoded layouts)
+
+(defvar carriage--keyspec-transient-defined nil
+  "Non-nil when transient menus were defined for this session.")
+
+(defun carriage--keyspec-transient--section-title (sec)
+  "Return UI title string for SEC (best-effort, i18n-aware)."
+  (pcase sec
+    ('act     (if (fboundp 'carriage-i18n) (carriage-i18n :act-title) "Actions"))
+    ('tools   (if (fboundp 'carriage-i18n) (carriage-i18n :tools-title) "Tools"))
+    ('session (if (fboundp 'carriage-i18n) (carriage-i18n :session-title) "Session/Git"))
+    ('logs    (if (fboundp 'carriage-i18n) (carriage-i18n :logs-title) "Logs/Reports"))
+    ('navigate (if (fboundp 'carriage-i18n) (carriage-i18n :navigate-title) "Navigate"))
+    ('context (if (fboundp 'carriage-i18n) (carriage-i18n :context-title) "Context"))
+    (_        "Other")))
+
+(defun carriage--keyspec-transient--group (title items)
+  "Return a transient group vector with TITLE and ITEMS."
+  (apply #'vector (cons title items)))
+
+(defun carriage--keyspec-transient--make-runner (cmd)
+  "Return an interactive command that closes transient and runs CMD asynchronously."
+  (lambda ()
+    (interactive)
+    (ignore-errors
+      (when (featurep 'transient)
+        (if (fboundp 'transient-quit-all)
+            (transient-quit-all)
+          (transient-quit-one))))
+    (let ((prefix current-prefix-arg))
+      (run-at-time
+       0 nil
+       (lambda ()
+         (let ((current-prefix-arg prefix))
+           (when (commandp cmd)
+             (call-interactively cmd))))))))
+
+(defun carriage--keyspec-transient--index-actions (acts)
+  "Return hash table mapping command symbols to action plists from ACTS."
+  (let ((cmd->act (make-hash-table :test 'eq)))
+    (dolist (a acts)
+      (let ((cmd (plist-get a :cmd)))
+        (when (symbolp cmd)
+          (puthash cmd a cmd->act))))
+    cmd->act))
+
+(defun carriage--keyspec-transient--derive-items (cmd->act)
+  "Derive transient heads from keyspec bindings using CMD->ACT index.
+
+Return a cons cell (SEC->ITEMS . CTX-ITEMS) where:
+- SEC->ITEMS is a hash table: section symbol -> list of transient items
+- CTX-ITEMS is a list of transient items for Context menu."
+  (let ((sec->items (make-hash-table :test 'eq))
+        (ctx-items '()))
+    ;; Derive transient heads from the *real* prefix bindings.
+    (dolist (pl carriage-keys--prefix-bindings)
+      (let* ((k (plist-get pl :key))
+             (cmd (plist-get pl :cmd)))
+        ;; Skip menu/help: transient is opened by `carriage-menu-open` already.
+        (unless (member k '("SPC" "?"))
+          (let* ((a (and (symbolp cmd) (gethash cmd cmd->act)))
+                 (sec (or (and a (plist-get a :section)) 'tools))
+                 (lbl (if a
+                          (carriage-keys-action-label a)
+                        (if (symbolp cmd) (symbol-name cmd) (format "%s" cmd))))
+                 (runner (carriage--keyspec-transient--make-runner cmd)))
+            (cond
+             ;; Context actions: "t g" etc → appear in a dedicated Context transient under key "t".
+             ((and (stringp k) (string-prefix-p "t " k))
+              (let ((k2 (string-trim (substring k 2))))
+                (when (and (stringp k2) (not (string-empty-p k2)))
+                  (push (list k2 lbl runner) ctx-items))))
+             ;; Regular actions: grouped by :section.
+             (t
+              (let ((lst (gethash sec sec->items)))
+                (puthash sec (append lst (list (list k lbl runner))) sec->items))))))))
+    (cons sec->items (nreverse ctx-items))))
+
+(defun carriage--keyspec-transient--build-groups (sec->items)
+  "Build transient groups from SEC->ITEMS hash in a stable order."
+  (let ((groups '()))
+    (dolist (sec '(act tools session logs navigate))
+      (let ((items (gethash sec sec->items)))
+        (when (and (listp items) items)
+          (push (carriage--keyspec-transient--group
+                 (carriage--keyspec-transient--section-title sec)
+                 items)
+                groups))))
+    (nreverse groups)))
+
+(defun carriage--keyspec-transient--define-menus (main-title ctx-title groups ctx-items)
+  "Define transient menus from MAIN-TITLE/CTX-TITLE/GROUPS/CTX-ITEMS."
+  (let* ((ctx-group
+          (when (and (listp ctx-items) ctx-items)
+            (carriage--keyspec-transient--group
+             ctx-title
+             (append ctx-items
+                     (list (list "q" "Quit" #'transient-quit-one))))))
+         ;; Main menu always contains an entry to open Context transient when present.
+         (main-groups
+          (append
+           groups
+           (when ctx-group
+             (list
+              (carriage--keyspec-transient--group
+               ctx-title
+               (list (list "t" (format "%s…" ctx-title) #'carriage--transient-context)))))
+           (list (carriage--keyspec-transient--group "" (list (list "q" "Quit" #'transient-quit-one)))))))
+    ;; Define transient prefixes dynamically (byte-compile safe).
+    (eval
+     `(progn
+        (transient-define-prefix carriage--transient-context ()
+          ,(format "%s: %s" main-title ctx-title)
+          ,ctx-group)
+        (transient-define-prefix carriage--transient-menu ()
+          ,main-title
+          ,@main-groups)))))
+
+(defun carriage--keyspec--ensure-transient-defined ()
+  "Define transient menus lazily (runtime) when transient is available.
+
+Important:
+- menus are GENERATED from keyspec (actions + prefix-bindings)
+- bindings remain real keymaps compiled from keyspec."
+  (unless carriage--keyspec-transient-defined
+    (when (require 'transient nil t)
+      (ignore-errors (require 'carriage-i18n nil t))
+      (let* ((acts (carriage-keys-actions))
+             (cmd->act (carriage--keyspec-transient--index-actions acts))
+             (derived (carriage--keyspec-transient--derive-items cmd->act))
+             (sec->items (car derived))
+             (ctx-items (cdr derived))
+             (groups (carriage--keyspec-transient--build-groups sec->items))
+             (ctx-title (carriage--keyspec-transient--section-title 'context))
+             (main-title (if (fboundp 'carriage-i18n) (carriage-i18n :carriage-menu) "Carriage")))
+        (carriage--keyspec-transient--define-menus main-title ctx-title groups ctx-items)
+        (setq carriage--keyspec-transient-defined t)))))
+
+(defun carriage--menu-open-transient ()
+  "Menu provider: transient (when available), otherwise fallback to completing-read."
+  (interactive)
+  (if (require 'transient nil t)
+      (progn
+        (carriage--keyspec--ensure-transient-defined)
+        (if (fboundp 'carriage--transient-menu)
+            (call-interactively #'carriage--transient-menu)
+          (carriage--menu-open-completing-read)))
+    (carriage--menu-open-completing-read)))
+
 (defun carriage-menu-open ()
   "Open Carriage menu according to `carriage-menu-provider'.
 
@@ -478,14 +650,13 @@ Provider policy:
      (carriage--menu-open-completing-read))
     ('hydra
      (if (require 'hydra nil t)
-         ;; TODO: hydra provider (future). For now, fallback.
+         ;; Hydra provider can be added later; for now fallback (bindings are still real).
          (carriage--menu-open-completing-read)
        (carriage--menu-open-completing-read)))
     ((or 'auto 'transient)
      ;; Best-effort transient; fallback always works.
      (if (require 'transient nil t)
-         ;; TODO: transient provider (future). For now, fallback.
-         (carriage--menu-open-completing-read)
+         (carriage--menu-open-transient)
        (carriage--menu-open-completing-read)))
     (_
      (carriage--menu-open-completing-read))))

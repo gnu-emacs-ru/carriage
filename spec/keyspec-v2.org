@@ -186,6 +186,25 @@ TST-keys-002:
 TST-keys-003:
 - with menu provider disabled, direct/prefix bindings still work; menu-open shows message/fallback.
 
+Implementation checklist (post-merge sanity)
+- Verify transient is actually selected when configured:
+  - Set `carriage-menu-provider` to 'transient (or 'auto when transient is available).
+  - In interactive Emacs (not batch), run `C-c e SPC` and confirm a transient UI appears (not `completing-read`).
+- Verify menu is generated from keyspec (single source of truth):
+  - Change a suffix in keyspec data and confirm:
+    - the real binding in `carriage-prefix-map` changes,
+    - the transient menu reflects the same key/label/command.
+- Verify Context UX is stable:
+  - `t` is a prefix in the real `carriage-prefix-map`.
+  - Menu UI may expose Context as a dedicated submenu/group; no single-key item must shadow `t ...`.
+- Add/keep an ERT guard for provider selection:
+  - `(skip-unless (require 'transient nil t))`
+  - Assert that `carriage-menu-open` dispatches to the transient provider path when `carriage-menu-provider` is 'transient.
+- Run in a setup without transient/hydra installed:
+  - bindings still work,
+  - menu falls back to completing-read,
+  - no eager macro-expansion failures.
+
 Cross-References
 - spec/context-menu-keys-v2.org
 - spec/i18n-required-keys-v2.org

@@ -276,6 +276,7 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
     (:id swarm-hub-start   :cmd carriage-swarm-hub-start   :section session :label "Swarm: start hub")
     (:id swarm-hub-stop    :cmd carriage-swarm-hub-stop    :section session :label "Swarm: stop hub")
     (:id swarm-dashboard   :cmd carriage-swarm-open-dashboard :section session :label "Swarm: open dashboard")
+    (:id task-new          :cmd carriage-create-task-doc       :section tools   :desc-key :task-new :label "Create task doc")
     )
   "Action catalog used by menu/help providers.")
 
@@ -346,6 +347,7 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
     ;; carriage-mode local convenience bindings (must not depend on menu provider)
     (:target carriage-mode-map :key "C-c C-c" :cmd carriage-ctrl-c-ctrl-c)
     (:target carriage-mode-map :key "C-c !"   :cmd carriage-apply-last-iteration)
+    (:target carriage-mode-map :key "C-c RET" :cmd carriage-send-buffer)
 
     ;; Report-mode convenience (installed when report map exists)
     (:target carriage-report-mode-map :key "RET" :cmd carriage-report-show-diff-at-point)
@@ -574,7 +576,17 @@ Return a cons cell (SEC->ITEMS . CTX-ITEMS) where:
     (nreverse groups)))
 
 (defun carriage--keyspec-transient--define-menus (main-title ctx-title groups ctx-items)
-  "Define transient menus from MAIN-TITLE/CTX-TITLE/GROUPS/CTX-ITEMS."
+  "Define transient menus from MAIN-TITLE/CTX-TITLE/GROUPS/CTX-ITEMS.
+
+This generates a horizontal/multi-column transient layout:
+
+- `groups' is a list of column groups (each produced by
+  `carriage--keyspec-transient--group').
+- If context items exist, a dedicated Context column is added and a
+  top-level \"t\" head is inserted to open the context transient.
+
+The transient spec is constructed as a vector: [TITLE COL1 COL2 ...]
+which yields a horizontal (multi-column) display in transient."
   (let* ((ctx-group
           (when (and (listp ctx-items) ctx-items)
             (carriage--keyspec-transient--group
@@ -592,14 +604,15 @@ Return a cons cell (SEC->ITEMS . CTX-ITEMS) where:
                (list (list "t" (format "%s…" ctx-title) #'carriage--transient-context)))))
            (list (carriage--keyspec-transient--group "" (list (list "q" "Quit" #'transient-quit-one)))))))
     ;; Define transient prefixes dynamically (byte-compile safe).
+    ;; Build a vector layout: [TITLE COL1 COL2 ...] so transient renders columns.
     (eval
      `(progn
         (transient-define-prefix carriage--transient-context ()
           ,(format "%s: %s" main-title ctx-title)
           ,ctx-group)
+        ;; Build a literal vector combining the title and columns for a horizontal layout.
         (transient-define-prefix carriage--transient-menu ()
-          ,main-title
-          ,@main-groups)))))
+          ,(apply #'vector (cons main-title main-groups)))))))
 
 (defun carriage--keyspec--ensure-transient-defined ()
   "Define transient menus lazily (runtime) when transient is available.

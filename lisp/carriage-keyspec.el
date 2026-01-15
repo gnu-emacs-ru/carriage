@@ -366,7 +366,7 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
   (let* ((id (plist-get action :id))
          (cmd (plist-get action :cmd))
          (dk  (plist-get action :desc-key))
-         (raw (or (and (symbolp dk) (carriage-keys--i18n dk nil))
+         (raw (or (and (symbolp dk) dk (carriage-keys--i18n dk nil))
                   (plist-get action :label)
                   (and (symbolp cmd) (symbol-name cmd))
                   (and (symbolp id) (symbol-name id))

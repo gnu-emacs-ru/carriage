@@ -650,7 +650,10 @@ Policy:
     (setq carriage--mode-prev-header-line-format header-line-format)
     (setq-local header-line-format '(:eval (carriage-ui--header-line-for (selected-window))))
     (add-hook 'post-command-hook #'carriage-ui--headerline-post-command nil t)
-    (add-hook 'window-scroll-functions #'carriage-ui--headerline-window-scroll nil t)))
+    ;; Scrolling generates very frequent events; keep this off by default.
+    (when (and (boundp 'carriage-mode-headerline-refresh-on-scroll)
+               carriage-mode-headerline-refresh-on-scroll)
+      (add-hook 'window-scroll-functions #'carriage-ui--headerline-window-scroll nil t))))
 
 (defun carriage-mode--install-modeline ()
   "Replace `mode-line-format' with Carriage modeline (buffer-local) and save snapshot.

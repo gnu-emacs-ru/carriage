@@ -1065,12 +1065,35 @@ Keeps the previous badge visible until the scheduled refresh completes."
              (right (substring s (- len keep))))
         (concat left "…" right)))))
 
+(defun carriage-ui--project-root-fast (&optional dir)
+  "Return a best-effort project root for DIR using cheap heuristics.
+
+Used by header-line rendering and MUST NOT call `project-current' or Projectile.
+
+Returns an absolute directory name with trailing slash, or nil."
+  (condition-case _e
+      (let* ((d (file-name-as-directory (expand-file-name (or dir default-directory)))))
+        (cond
+         ;; Don't try to resolve project roots for remote dirs from UI code.
+         ((file-remote-p d) nil)
+         ;; Fast git root check (no external processes).
+         (t
+          (let ((root (locate-dominating-file d ".git")))
+            (when (stringp root)
+              (file-name-as-directory (expand-file-name root)))))))
+    (error nil)))
+
 (defun carriage-ui--project-name ()
-  "Return cached project name (directory name of project root) or \"-\"."
+  "Return cached project name (directory name of project root) or \"-\".
+
+Important (perf):
+- Must be cheap for header-line render path.
+- MUST NOT call `project-current' / Projectile from here."
   (or carriage-ui--project-name-cached
-      (let* ((root (or (carriage-project-root) default-directory))
-             (dir  (file-name-nondirectory (directory-file-name root)))
-             (name (or (and dir (not (string-empty-p dir)) dir) "-")))
+      (let* ((root (or (carriage-ui--project-root-fast default-directory)
+                       default-directory))
+             (dir  (file-name-nondirectory (directory-file-name (or root default-directory))))
+             (name (or (and (stringp dir) (not (string-empty-p dir)) dir) "-")))
         (setq carriage-ui--project-name-cached name)
         name)))
 
@@ -1796,6 +1819,15 @@ Performance invariant:
   :type 'boolean
   :group 'carriage-ui)
 
+(defcustom carriage-mode-headerline-refresh-on-scroll nil
+  "When non-nil, refresh Carriage header-line on `window-scroll-functions'.
+
+Scrolling can generate very frequent events; enabling this may noticeably increase
+CPU usage. Usually Carriage header-line depends on point (not window start), so
+the default is nil."
+  :type 'boolean
+  :group 'carriage-ui)
+
 (defcustom carriage-mode-headerline-idle-interval 0.2
   "Idle interval in seconds before refreshing header-line after cursor/scroll changes."
   :type 'number
@@ -1803,6 +1835,12 @@ Performance invariant:
 
 (defvar-local carriage-ui--headerline-idle-timer nil
   "Idle timer used to coalesce frequent header-line refreshes.")
+
+(defun carriage-ui--headerline-idle-refresh-run-for-buffer (buf)
+  "Timer entry point to refresh Carriage header-line in BUF (best-effort)."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (ignore-errors (carriage-ui--headerline-idle-refresh-run)))))
 
 (defun carriage-ui--headerline-queue-refresh ()
   "Schedule a header-line refresh on idle to reduce churn.
@@ -1814,10 +1852,8 @@ Avoid rescheduling when a timer is already pending."
                          0.12)))
       (setq carriage-ui--headerline-idle-timer
             (run-with-idle-timer interval nil
-                                 (lambda ()
-                                   (when (buffer-live-p buf)
-                                     (with-current-buffer buf
-                                       (carriage-ui--headerline-idle-refresh-run))))))))
+                                 #'carriage-ui--headerline-idle-refresh-run-for-buffer
+                                 buf))))
   t)
 
 (defun carriage-ui--headerline-post-command ()

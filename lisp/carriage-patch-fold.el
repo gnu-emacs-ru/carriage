@@ -118,16 +118,30 @@ This function removes those presentation strings while keeping invisibility."
 (defun carriage-patch-fold--overlay-near (pos)
   "Return a managed applied-patch overlay at or near POS, or nil.
 
-We inspect overlays in a small neighborhood to avoid the \"stuck at boundary\"
-behavior when approaching folded overlays from above/below."
+We first check overlays exactly at POS and one char to the right to avoid the
+\"stuck at boundary\" case when an overlay starts exactly at POS+1. As a
+fallback, scan a tiny neighborhood."
   (let* ((p (or pos (point)))
-         (lo (max (point-min) (1- p)))
-         (hi (min (point-max) (1+ p)))
          (hit nil))
-    (dolist (ov (overlays-in lo hi))
+    ;; 1) Exact position
+    (dolist (ov (overlays-at p))
       (when (and (overlayp ov)
                  (eq (overlay-get ov 'category) 'carriage-patch-fold))
         (setq hit ov)))
+    ;; 2) Right-adjacent position (overlay starting at POS+1)
+    (when (and (null hit) (< p (point-max)))
+      (dolist (ov (overlays-at (1+ p)))
+        (when (and (overlayp ov)
+                   (eq (overlay-get ov 'category) 'carriage-patch-fold))
+          (setq hit ov))))
+    ;; 3) Small neighborhood scan with a right edge strictly beyond start.
+    (when (null hit)
+      (let* ((lo (max (point-min) (1- p)))
+             (hi (min (point-max) (+ p 2))))
+        (dolist (ov (overlays-in lo hi))
+          (when (and (overlayp ov)
+                     (eq (overlay-get ov 'category) 'carriage-patch-fold))
+            (setq hit ov)))))
     hit))
 
 (defun carriage-patch-fold--parse-block-at (beg)

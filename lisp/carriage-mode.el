@@ -2655,7 +2655,8 @@ Important UI rule:
            (epref (or (and (boundp 'carriage-git-ephemeral-prefix)
                            carriage-git-ephemeral-prefix)
                       "carriage/tmp"))
-           (wip (string= cur-br "carriage/WIP"))
+           (wip (string= cur-br (or (and (boundp 'carriage-mode-wip-branch) carriage-mode-wip-branch)
+                                    "carriage/WIP")))
            (eph (and (stringp cur-br) (string-prefix-p epref cur-br))))
       (when (and (or wip eph)
                  (not (and (boundp 'carriage-allow-apply-on-wip) carriage-allow-apply-on-wip)))
@@ -2708,7 +2709,8 @@ Important UI rule:
                (epref (or (and (boundp 'carriage-git-ephemeral-prefix)
                                carriage-git-ephemeral-prefix)
                           "carriage/tmp"))
-               (wip (string= cur-br "carriage/WIP"))
+               (wip (string= cur-br (or (and (boundp 'carriage-mode-wip-branch) carriage-mode-wip-branch)
+                                    "carriage/WIP")))
                (eph (and (stringp cur-br) (string-prefix-p epref cur-br))))
           (when (and (or wip eph)
                      (not (and (boundp 'carriage-allow-apply-on-wip) carriage-allow-apply-on-wip)))
@@ -3685,9 +3687,6 @@ Idempotent:
             (insert "-----\n")
             (setq carriage--separator-inserted t)))))))
 
-(defun carriage--after-insert-fingerprint-advice (&rest _)
-  "Advice: run after fingerprint insertion to add visual separator."
-  (ignore-errors (carriage-insert-send-separator)))
 
 ;; Wire the advice when function is present (defined earlier in this file).
 

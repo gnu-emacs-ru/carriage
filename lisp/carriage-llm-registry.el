@@ -203,11 +203,11 @@ Returns:
   "Return VALUE coerced to a non-empty string when possible."
   (cond
    ((stringp value) (unless (string-empty-p value) value))
-   (symbolp value) (symbol-name value))
-  ((numberp value) (number-to-string value))
-  ((null value) nil)
-  (t (let ((s (ignore-errors (format "%s" value))))
-       (unless (or (null s) (string-empty-p s)) s))))
+   ((symbolp value) (symbol-name value))
+   ((numberp value) (number-to-string value))
+   ((null value) nil)
+   (t (let ((s (ignore-errors (format "%s" value))))
+        (unless (or (null s) (string-empty-p s)) s)))))
 
 (defun carriage-llm--first-model-string (value)
   "Extract the first non-empty model string from VALUE."

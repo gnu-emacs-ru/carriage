@@ -43,8 +43,8 @@ Example: '(:apply (\"--reject\" \"--whitespace=nowarn\") :check (\"--verbose\"))
   :type '(repeat sexp)
   :group 'carriage-engines)
 
-(defcustom carriage-apply-timeout-seconds nil
-  "Per-step timeout in seconds for apply engines.
+(defcustom carriage-apply-engine-timeout-seconds nil
+  "Per-step timeout in seconds for apply engines (engine-level).
 When non-nil, takes precedence over engine-specific timeouts."
   :type '(choice (const :tag "Engine default" nil) integer)
   :group 'carriage-engines)

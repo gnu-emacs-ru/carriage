@@ -248,6 +248,13 @@ When BUFFER is non-nil, operate in that buffer (default is current buffer)."
       ;; Ensure preloader is stopped on finalize.
       (when (fboundp 'carriage--preloader-stop)
         (ignore-errors (carriage--preloader-stop)))
+      ;; Last-resort: when GPTel request ends in error, force an emergency cleanup of gptel/curl
+      ;; to avoid \"stuck until Emacs restart\" due to lingering gptel-curl processes.
+      (when errorp
+        (ignore-errors
+          (when (require 'carriage-transport-gptel nil t)
+            (when (fboundp 'carriage-transport-gptel-emergency-cleanup)
+              (carriage-transport-gptel-emergency-cleanup t "transport-complete/error")))))
       (if errorp
           (carriage-ui-set-state 'error)
         (carriage-ui-set-state 'idle))
@@ -272,17 +279,15 @@ Contract:
       ;; GPTel backend
       ('gptel
        (cond
-        ;; Fast path: entry-point present
-        ((fboundp 'carriage-transport-gptel-dispatch)
-         (apply #'carriage-transport-gptel-dispatch args))
-        ;; One-shot lazy load guarded
+        ((fboundp 'carriage-transport-gptel-v2-dispatch)
+         (apply #'carriage-transport-gptel-v2-dispatch args))
         ((not carriage--transport-loading-adapter)
          (let* ((carriage--transport-loading-adapter t))
            (when (and (require 'gptel nil t)
                       (require 'carriage-transport-gptel nil t))
              (carriage-log "Transport: gptel adapter loaded on demand"))
-           (if (fboundp 'carriage-transport-gptel-dispatch)
-               (apply #'carriage-transport-gptel-dispatch args)
+           (if (fboundp 'carriage-transport-gptel-v2-dispatch)
+               (apply #'carriage-transport-gptel-v2-dispatch args)
              (carriage-log "Transport: no gptel entry-point; request dropped")
              (carriage-transport-complete t)
              (user-error "No transport adapter installed (gptel)"))))

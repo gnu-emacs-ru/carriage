@@ -1,227 +1,119 @@
-#+title: LLM Transport v2 — Streaming, events, and tool-use ABI
-#+author: Peter Kosov <11111000000@email.com>
-#+language: en
-#+options: toc:2 num:t
-#+property: header-args :results silent
+* LLM Transport (v2) — GPTel adapter
 
-Meta
-- Spec-ID: carriage/transport/llm/v2
-- Version: v2.0
-- Status: draft
-- Normativity: RFC 2119 applies
-- Ownership: transports
-- Prompt-ABI: v1
-- Pack-Profiles: P0-min, P1-core, P2-full, P3-debug
-- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
-- RAG-Indexing: on
-- Fingerprint: <auto>
+This document defines the contract for Carriage transports and the
+reference GPTel transport implementation.
 
-Purpose
-- Anchor: PURPOSE
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- LLM-Summary: Define transport-agnostic streaming API and event model for LLMs.
-  - Begin/stream/complete lifecycle
-  - Reasoning and text channels
-  - Abort semantics
-  - Tool-call envelope
-  - Error mapping and logging
+** Goals
+- Small, predictable transport (minimal state).
+- Streaming output via callbacks (no "magic" keepalive in hot path).
+- Self-healing on hangs/errors without requiring Emacs restart:
+  - watchdog timeout → abort → cleanup.
+- Diagnostics on every finalization:
+  - what callback delivered (RESPONSE/INFO shape),
+  - final result (DONE/ABORT/ERROR/TIMEOUT),
+  - live gptel-curl processes before/after cleanup,
+  - actions taken (abort/cleanup/watchdog).
 
-Scope
-- Anchor: SCOPE
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- In scope: event taxonomy, API, tool-use envelope, reasoning channel.
-- Out of scope: vendor-specific SDK details.
+** Non-goals
+- No usage parsing via SSE trailers.
+- No advices into gptel internals.
+- No keepalive/accept-process-output loops in hot path.
+- Pricing is best-effort; missing usage must be explicit in logs.
 
-Terms
-- Anchor: TERMS
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- Event: structured notification (begin, chunk, reasoning, done, error).
-- Tool-use: explicit call to a tool with typed arguments.
+** Transport event contract
 
-Normative Requirements
-- Anchor: REQ
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- REQ-tr-001: Transport MUST expose carriage-transport-begin/streaming/complete APIs.
-- REQ-tr-002: Events MUST be delivered in order; channels include :text, :reasoning.
-- REQ-tr-003: Abort MUST stop streaming and deliver a terminal completion event.
-- REQ-tr-004: Tool calls MUST carry name, version, args schema, and correlation id.
-- REQ-tr-005: Errors MUST map to ERR codes with vendor payload preserved as details.
-- REQ-tr-006: Transport MUST record metrics per observability (pid, elapsed-ms, usage),
-  and produce traffic summaries (head/tail/bytes).
-- REQ-tr-007: Streaming adapters MAY emit combined reasoning+text chunks; clients MUST handle both combined and separate forms.
-- REQ-tr-009: Terminal completion (done|error|abort) MUST provide token usage summary when available,
-  in a transport-agnostic schema suitable for pricing and fingerprint upsert. Missing usage MUST be allowed.
+Carriage transports MUST drive the UI via:
+- `carriage-transport-begin`
+- `carriage-transport-streaming` (first streamed content)
+- `carriage-transport-complete` (finalize; errorp indicates failure)
 
-Invariants
-- Anchor: INV
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- INV-tr-001: Exactly one terminal event per request (done|error|abort).
-- INV-tr-002: Reasoning channel is optional and may be truncated for UI.
+** GPTel callback semantics (assumed)
 
-Grammar/Schema
-- Anchor: SCHEMA
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- Event (plist):
-  - :type one of (begin chunk reasoning tool-call done error abort)
-  - :id string, :ts number, :payload plist
-- Usage (plist, optional; present on terminal events when available):
-  - :tokens-in integer|nil
-  - :tokens-out integer|nil
-  - :audio-in integer|nil
-  - :audio-out integer|nil
-  - :raw any|nil (vendor payload preserved for diagnostics; must not affect UI logic)
-- Tool-call (plist):
-  - :name string, :ver string, :args plist, :corr-id string
+The GPTel callback is called with (RESPONSE INFO):
+- RESPONSE is a string: streamed text chunk
+- RESPONSE is t: successful completion
+- RESPONSE is nil: failure (inspect INFO for status/error)
+- RESPONSE is symbol `abort`: aborted request
+- RESPONSE is (reasoning . TEXT|t): reasoning chunk or end marker
+- RESPONSE may be other cons values (tool-call / tool-result). Transport must not crash.
 
-Interfaces/Contracts
-- Anchor: IFC
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- IFC-tr-001: carriage-transport-begin CTX → token
-- IFC-tr-002: carriage-transport-streaming token chunk
-- IFC-tr-003: carriage-transport-complete token status
-- IFC-tr-004: Abort handler on token MUST be idempotent
+** GPTel transport v2 design
 
-Algorithms
-- Anchor: ALG
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- ALG-tr-001: Marshal events to UI on main thread; coalesce small chunks.
-- ALG-tr-002: On abort, cancel vendor stream and emit terminal state.
+*** Minimal per-request state
+- request-id (string)
+- start-ts, last-activity-ts
+- finished flag
+- first-streamed flag
+- last-response-snippet (string, clipped)
+- last-info-snippet (string, clipped)
+- last-info-keys (list of keys, clipped)
 
-Errors and Diagnostics
-- Anchor: ERR
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- ERR-tr-001: TR_E_ABORT — user abort
-- ERR-tr-002: TR_E_STREAM — vendor streaming error
-- ERR-tr-003: TR_E_TOOL — tool invocation failure
+*** Watchdog (mandatory)
+- A per-request watchdog timer MUST be started on dispatch.
+- Default timeout is 30 seconds (configurable).
+- Watchdog MUST be **two-phase**:
+  - **startup timeout**: applies until the first streamed content chunk arrives (string response or (reasoning . string)).
+  - **silence timeout**: applies after first streamed content arrives, and MAY be larger than startup timeout.
+    If the implementation provides only a single user option, it MUST interpret it as startup timeout and MAY
+    internally extend the silence timeout to a safe floor (e.g., 60s) to avoid aborting valid long generations.
+- Watchdog fires when (now - last-activity) > current-timeout:
+  - logs TIMEOUT with phase (startup|silence) and process inventory,
+  - calls `gptel-abort` for origin buffer (best-effort),
+  - runs cleanup policy (see below),
+  - MUST finalize the transport even if GPTel never delivers a terminal callback
+    (code LLM_E_TIMEOUT).
+- Late callbacks: after transport finalization, any subsequent GPTel callback invocations MUST be ignored safely
+  (no non-local exits, no thrown errors, no state changes), but MAY be logged as "LATE" under diagnostics.
 
-Security and Limits
-- Anchor: SEC
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- Sanitize tool arguments; mask secrets in logs; rate-limit retries.
+*** Cleanup policy (mandatory)
+Default policy: aggressive-on-error.
+- On DONE: no cleanup (avoid side effects).
+- On ERROR/ABORT/TIMEOUT:
+  - call `gptel-abort` (best-effort),
+  - snapshot live `gptel-curl` processes (name match),
+  - after a short delay (0.2s) kill remaining live `gptel-curl*` processes
+    (delete-process), even if they are still listed in `gptel--request-alist`,
+  - log before/after inventories and count killed.
 
-Performance and Asynchrony
-- Anchor: PERF
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- Batching for tokens; backpressure handling; timeouts per event loop tick.
+NOTE: This may kill unrelated GPTel requests. This is allowed by policy
+"reliability over isolation", but MUST be explicitly logged as "global cleanup".
 
-UI/UX
-- Anchor: UI
-- Normative: t
-- Stability: stable
-- Pack-Priority: P2
-- Distinct rendering for reasoning vs user text; progress indicators.
+*** Diagnostics (mandatory)
+On every finalize (DONE/ABORT/ERROR/TIMEOUT) transport MUST log a single
+summary line in *carriage-log* containing:
+- request-id
+- final kind
+- classification code (see below)
+- INFO :status, :http-status (if present)
+- response kind (string/t/nil/symbol/cons)
+- gptel--request-alist size (if bound)
+- live gptel-curl processes count before cleanup and after cleanup
+- actions taken: abort-called? watchdog-fired? killed=N?
 
-Prompt Guidance
-- Anchor: PRM
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- PRM-tr-001: Tool-call outputs MUST be machine-formatted; no extra prose.
-- PRM-tr-002: Output-Format: ONLY JSON or Elisp plist for any tool-call or event envelope.
-  Fields: :type (enum), :id (string), :ts (number), :payload (plist). No Markdown fences.
-- PRM-tr-003: Forbidden-Phrases: "Here is", "As an AI", greetings, apologies, ``` fences.
-  No additional commentary or headers around machine payloads.
-- PRM-tr-004: Determinism Window: T=0, top_p=1.0 for tests; permitted variance: :ts only.
-  All other fields MUST be byte-stable in T=0 runs.
-- PRM-tr-005: Escape Policy: UTF-8 strings; escape quotes; no newlines unless a field explicitly
-  allows them; no zero-width characters; normalize whitespace.
-- Positive Example (JSON):
-  {"type":"done","id":"req-123","ts":171234.5,"payload":{"status":"ok","usage":{"tokens":123}}}
-- Negative Example (violates PRM-tr-003):
-  Here is your result:
-  {"type":"done","id":"req-123","ts":171234.5,"payload":{"status":"ok"}}
+On failure (ERROR/ABORT/TIMEOUT) additionally log:
+- last-response-snippet
+- last-info-keys + last-info-snippet (clipped)
 
-Tool Contract
-- Anchor: TOOL
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- Tools declare JSON/plist schemas; invalid args MUST produce structured ERR.
+If callback processing itself errors, it MUST be classified as LLM_E_INTERNAL
+and log error + backtrace (best-effort) to *carriage-log*.
 
-Context Packaging
-- Anchor: PACK
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- P0-min:
-  - include: carriage/transport/llm/v2#REQ priority=P0 max-tokens=700 summarize=off
+*** Error classification codes
+Minimal set for gptel transport v2:
+- LLM_E_TIMEOUT
+- LLM_E_ABORT
+- LLM_E_PROVIDER     (INFO has :error or non-2xx HTTP)
+- LLM_E_NETWORK      (no INFO error but nil response; transport-level failure)
+- LLM_E_INTERNAL     (callback handler crashed)
+- LLM_E_UNKNOWN      (fallback)
 
-Retrieval and Indexing
-- Anchor: RAG
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- Index normative sections; chunk ids CHK-carriage/transport/llm/v2-REQ-01..NN.
+HTTP-based refinement is allowed:
+- 401/403 → LLM_E_AUTH
+- 429 → LLM_E_RATE_LIMIT
+…but is optional.
 
-Precedence Rules
-- Anchor: PREC
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- Security and Errors take precedence over transport claims.
-
-Testing and Conformance
-- Anchor: TST
-- Normative: t
-- Stability: stable
-- Pack-Priority: P0
-- TST-tr-001: single terminal event delivered
-- TST-tr-002: abort cancels vendor stream; idempotent
-- TST-tr-003: reasoning channel starts/ends correctly; no duplicate end
-- TST-tr-004: callbacks marshalled to main thread; ordering preserved
-- TST-tr-005: streaming → UI state transitions sending→streaming→done/error
-- TST-tr-006: tool-call envelope validated (name, ver, args, corr-id); roundtrip logged
-- TST-tr-007: event schema conformance (type/id/ts/payload); malformed fields rejected
-- TST-tr-008: observability metrics recorded (elapsed-ms, model-id, token-usage); summaries logged
-- Traceability Map:
-  - REQ-tr-001 → TST-tr-005
-  - REQ-tr-002 → TST-tr-003, TST-tr-004, TST-tr-007
-  - REQ-tr-003 → TST-tr-002
-  - REQ-tr-004 → TST-tr-006 (and TOOL tests)
-  - REQ-tr-005 → TST-tr-001..007
-  - REQ-tr-006 → TST-tr-008
-
-Cross-References and Anchors
-- Anchor: XREF
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- Source of Truth:
-  - spec/spec-on-specs.org#TOOL
-  - spec/errors-v2.org#ERR
-- Related:
-  - spec/logging-v2.org
-  - spec/observability-v2.org
-- Code:
-  - lisp/transports/carriage-transport.el
-  - lisp/transports/carriage-transport-gptel.el
-  - lisp/transports/carriage-transport-echo.el
-
-Evolution
-- Anchor: EVO
-- Normative: t
-- Stability: stable
-- Pack-Priority: P1
-- Affects-Prompt: high (tool envelope and output contracts)
+** Implementation requirements
+- Must be contained in a single file `lisp/carriage-transport-gptel.el`.
+- Must provide entry-point: `carriage-transport-gptel-v2-dispatch`.
+- Must not install advices into gptel or rely on gptel internal stream parsing.
+- Must not run keepalive loops; only watchdog is allowed.
+- Must never signal unhandled errors from callback; all failures must finalize cleanly.

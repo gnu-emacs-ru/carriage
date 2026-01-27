@@ -1,741 +1,591 @@
-;;; carriage-transport-gptel.el --- gptel transport adapter  -*- lexical-binding: t; -*-
+;;; carriage-transport-gptel.el --- GPTel transport adapter (v2)  -*- lexical-binding: t; -*-
 ;;
 ;; Copyright (C) 2025 Carriage contributors
 ;; Author: Peter Kosov <11111000000@email.com>
 ;; URL: https://gnu-emacs.ru/carriage
-;; Package-Requires: ((emacs "27.1") (gptel "0.1"))
-;; Version: 0.1
-;; Keywords: transport, gptel
+;; Package-Requires: ((emacs "27.1"))
+;; Version: 0.2
+;; Keywords: transport, llm, gptel
 ;;
 ;; Specifications:
-;;   spec/code-style-v2.org
-;;   spec/index.org
-;;   spec/errors-v2.org
-;;   spec/compliance-checklist-v2.org
 ;;   spec/llm-transport-v2.org
-;;   spec/tool-contracts-v2.org
+;;   spec/errors-v2.org
 ;;   spec/logging-v2.org
+;;   spec/security-v2.org
 ;;   spec/observability-v2.org
-;;   spec/golden-fixtures-v2.org
 ;;
 ;;; Commentary:
-;; Adapter for streaming gptel backends.
+;; Small, predictable GPTel transport for Carriage.
+;;
+;; Design principles:
+;; - Hot path is callback-driven only (no keepalive, no SSE trailer parsing, no advices).
+;; - Self-healing: watchdog timeout + abort + cleanup.
+;; - Diagnostics: on every finalize we log response/info shape and process inventory.
 ;;
 ;;; Code:
 
-;; Minimal reference adapter that maps Carriage transport events to gptel-request.
-;; - Streams chunks to *carriage-traffic* and accumulates response.
-;; - On completion feeds accumulated text to carriage-accept-llm-response.
-;; - Registers an abort handler that stops the underlying gptel request.
-
 (require 'cl-lib)
 (require 'subr-x)
-(require 'gptel nil t)        ;; optional at load time; allow tests without gptel
 (require 'carriage-logging)
 (require 'carriage-ui)
 (require 'carriage-transport)
-(require 'carriage-errors)
-(require 'carriage-llm-registry)
-;; Avoid hard dependency on carriage-mode to break cycles at load time.
+
+;; Avoid hard dependency cycle with carriage-mode at load time.
 (declare-function carriage-register-abort-handler "carriage-mode" (fn))
 (declare-function carriage-insert-stream-chunk "carriage-mode" (string &optional type))
-(declare-function carriage-begin-reasoning "carriage-mode" ())
-(declare-function carriage-end-reasoning "carriage-mode" ())
 (declare-function carriage-stream-finalize "carriage-mode" (&optional errorp mark-last-iteration))
-(declare-function carriage-stream-flush-now "carriage-mode" (&optional buffer))
 (declare-function carriage-fingerprint-note-usage-and-cost "carriage-mode" (usage &optional backend provider model))
 
+;; GPTel entry-points
+(declare-function gptel-request "gptel-request" (&optional prompt &rest args))
+(declare-function gptel-abort "gptel-request" (buf))
+(declare-function gptel-fsm-info "gptel-request" (fsm))
+
 (defgroup carriage-transport-gptel nil
-  "GPTel transport adapter for Carriage."
+  "GPTel transport adapter (v2) for Carriage."
   :group 'carriage)
 
-(defcustom carriage-transport-gptel-disable-gptel-log t
-  "When non-nil, suppress GPTel internal logging (`gptel--log') for performance.
+(defcustom carriage-transport-gptel-timeout-seconds 30
+  "Watchdog startup timeout in seconds.
+If no callback activity is observed for this long, the request is treated as hung:
+we log TIMEOUT, call `gptel-abort' and perform cleanup.
 
-Profiling shows GPTel may spend significant CPU in json-pretty-print inside logging.
-Carriage already provides structured request/response logging via *carriage-traffic*."
-  :type 'boolean
-  :group 'carriage-transport-gptel)
-
-(defcustom carriage-transport-gptel-log-stream-chunks nil
-  "When non-nil, log every incoming stream chunk to *carriage-traffic*.
-
-Default nil improves perceived streaming speed by avoiding per-chunk formatting,
-buffer growth and trimming work. Request/response summaries are still logged."
-  :type 'boolean
-  :group 'carriage-transport-gptel)
-
-(defcustom carriage-transport-gptel-keepalive-enabled t
-  "When non-nil, run a lightweight keepalive timer during streaming.
-
-Motivation: on some setups/process backends, process filters/callbacks may not
-run promptly while Emacs is idle with no user input, causing \"stream prints only
-after keypress\". Keepalive pumps process output via `accept-process-output'."
-  :type 'boolean
-  :group 'carriage-transport-gptel)
-
-(defcustom carriage-transport-gptel-keepalive-interval 0.05
-  "Interval (seconds) for GPTel keepalive pumping (`accept-process-output').
-
-Smaller values improve responsiveness but increase overhead."
+Note: after the first streamed content chunk arrives, the transport MAY extend
+the watchdog to a longer \"silence timeout\" to avoid aborting valid long generations."
   :type 'number
   :group 'carriage-transport-gptel)
 
-(defvar-local carriage--gptel-keepalive-timer nil
-  "Buffer-local keepalive timer used by GPTel transport to pump process output.")
+(defcustom carriage-transport-gptel-cleanup-delay 0.2
+  "Delay (seconds) before the second cleanup pass after abort/error."
+  :type 'number
+  :group 'carriage-transport-gptel)
 
-(defun carriage--gptel--keepalive-stop (&optional buffer)
-  "Stop GPTel keepalive timer in BUFFER (or current buffer). Best-effort."
-  (with-current-buffer (or buffer (current-buffer))
-    (when (timerp carriage--gptel-keepalive-timer)
-      (ignore-errors (cancel-timer carriage--gptel-keepalive-timer)))
-    (setq carriage--gptel-keepalive-timer nil)
-    t))
+(defcustom carriage-transport-gptel-cleanup-policy 'aggressive-on-error
+  "Process cleanup policy for GPTel transport.
 
-(defun carriage--gptel--keepalive-start (&optional buffer)
-  "Start GPTel keepalive timer in BUFFER (or current buffer). Best-effort."
-  (let ((buf (or buffer (current-buffer))))
-    (with-current-buffer buf
-      (when (timerp carriage--gptel-keepalive-timer)
-        (ignore-errors (cancel-timer carriage--gptel-keepalive-timer)))
-      (setq carriage--gptel-keepalive-timer nil)
-      (when (and (not (bound-and-true-p noninteractive))
-                 (boundp 'carriage-transport-gptel-keepalive-enabled)
-                 carriage-transport-gptel-keepalive-enabled)
-        (let* ((interval (max 0.01 (float (or carriage-transport-gptel-keepalive-interval 0.05)))))
-          (setq carriage--gptel-keepalive-timer
-                (run-at-time
-                 0 interval
-                 (lambda ()
-                   (when (buffer-live-p buf)
-                     (with-current-buffer buf
-                       (condition-case _e
-                           ;; Prefer pumping known GPTel curl process(es) only.
-                           ;; Fallback to nil (any process) is avoided to reduce global overhead.
-                           (let ((procs (cl-remove-if-not
-                                         (lambda (p)
-                                           (and (processp p)
-                                                (memq (process-status p) '(run open))
-                                                (string-match-p "gptel\\|curl" (process-name p))))
-                                         (process-list))))
-                             (dolist (p procs)
-                               (ignore-errors (accept-process-output p 0))))
-                         (error nil))))))))))
-    t))
+- nil: never delete processes (only call gptel-abort on errors).
+- aggressive-on-error: on ERROR/ABORT/TIMEOUT, delete all live processes whose
+  names start with \"gptel-curl\".
 
-(defun carriage--gptel--log@perf (orig-fn &rest args)
-  "Around-advice for `gptel--log' to disable expensive logging when configured."
-  (if carriage-transport-gptel-disable-gptel-log
-      nil
-    (apply orig-fn args)))
+NOTE: This is global (may kill non-Carriage GPTel requests). This is allowed
+by the user policy \"reliability over isolation\", and MUST be logged."
+  :type '(choice (const :tag "No process deletion" nil)
+                 (const :tag "Kill all gptel-curl on error/abort/timeout" aggressive-on-error))
+  :group 'carriage-transport-gptel)
 
-(defun carriage-transport-gptel--ensure-perf-log-advice ()
-  "Ensure GPTel logging is wrapped to avoid expensive JSON pretty-printing.
+(defcustom carriage-transport-gptel-diagnostics t
+  "When non-nil, log diagnostic details on finalize, including snippets and process inventory."
+  :type 'boolean
+  :group 'carriage-transport-gptel)
 
-This must be resilient to gptel version/load order differences.
+;; ---------------------------------------------------------------------
+;; Utilities
 
-Known entry points across versions:
-- `gptel--log' (internal, often triggers json-pretty-print)
-- `gptel-log'  (public wrapper in some versions)"
-  (dolist (fn '(gptel--log gptel-log))
-    (when (fboundp fn)
-      (unless (advice-member-p #'carriage--gptel--log@perf fn)
-        (advice-add fn :around #'carriage--gptel--log@perf))))
-  t)
+(defvar carriage-transport-gptel--seq 0)
 
-;; Install immediately if possible (gptel may already be loaded), and also after load.
-(ignore-errors (carriage-transport-gptel--ensure-perf-log-advice))
-(with-eval-after-load 'gptel
-  (ignore-errors (carriage-transport-gptel--ensure-perf-log-advice)))
+(defun carriage-transport-gptel--new-id ()
+  "Return a new request id string."
+  (format "gptel-%d" (cl-incf carriage-transport-gptel--seq)))
 
-(defun carriage--gptel--normalize-model (model)
-  "Return a symbol for GPTel's `gptel-model' from MODEL string/symbol.
+(defun carriage-transport-gptel--plist-keys (pl)
+  "Return keys of plist PL (best-effort)."
+  (when (listp pl)
+    (let ((keys '()) (tail pl) (n 0))
+      (while (and (consp tail) (< n 40))
+        (let ((k (car tail)))
+          (when (or (keywordp k) (symbolp k))
+            (push k keys)))
+        (setq tail (cddr tail))
+        (setq n (1+ n)))
+      (nreverse keys))))
 
-Accepts forms:
-- \"gptel:PROVIDER:MODEL\" → MODEL
-- \"PROVIDER:MODEL\"       → MODEL
-- \"MODEL\"                → MODEL
-- symbol → as-is
+(defun carriage-transport-gptel--snip (obj &optional max)
+  "Return a clipped printed representation of OBJ."
+  (let* ((max (or max 600))
+         (s (condition-case _e
+                (cond
+                 ((stringp obj) obj)
+                 (t (prin1-to-string obj)))
+              (error (format "%S" obj)))))
+    (if (> (length s) max)
+        (concat (substring s 0 max) "…")
+      s)))
 
-If MODEL cannot be interned meaningfully, return it unchanged."
+(defun carriage-transport-gptel--response-kind (resp)
+  "Return short kind name for RESP."
   (cond
-   ((symbolp model) model)
-   ((stringp model)
-    (let* ((last (car (last (split-string model ":" t)))))
-      (if (and last (not (string-empty-p last)))
-          (intern last)
-        (intern model))))
-   (t model)))
+   ((eq resp t) "t")
+   ((null resp) "nil")
+   ((stringp resp) "string")
+   ((symbolp resp) (format "sym:%s" resp))
+   ((consp resp) "cons")
+   (t (format "%s" (type-of resp)))))
 
-(defun carriage--gptel--strip-carriage-markers (text)
-  "Return TEXT with internal Carriage marker lines stripped (centralized).
+(defun carriage-transport-gptel--live-gptel-curl-procs ()
+  "Return list of live processes whose names start with \"gptel-curl\"."
+  (cl-loop for p in (process-list)
+           when (and (processp p)
+                     (memq (process-status p) '(run open connect))
+                     (string-prefix-p "gptel-curl" (process-name p)))
+           collect p))
 
-Policy: applied patch bodies must never be sent to the LLM (only headers/metadata).
-The Patch/Patched context source controls ONLY external context collection (files),
-not whether patch bodies are kept in the payload."
-  (carriage-transport--strip-internal-lines text))
+(defun carriage-transport-gptel--proc-desc (p)
+  "Return one-line description for process P."
+  (format "%s pid=%s status=%s buf=%s"
+          (process-name p)
+          (or (ignore-errors (process-id p)) "?")
+          (process-status p)
+          (let ((b (process-buffer p)))
+            (if (buffer-live-p b) (buffer-name b) "-"))))
 
-(defun carriage--gptel--prompt (source buffer mode)
-  "Build prompt string for GPTel from SOURCE and BUFFER in MODE.
-Strips internal Carriage marker lines from the outgoing text."
-  (with-current-buffer buffer
-    (let* ((raw
-            (pcase source
-              ('subtree
-               (if (eq mode 'org-mode)
-                   (save-excursion
-                     (require 'org)
-                     (ignore-errors (org-back-to-heading t))
-                     (let ((beg (save-excursion (org-back-to-heading t) (point)))
-                           (end (save-excursion (org-end-of-subtree t t) (point))))
-                       (buffer-substring-no-properties beg end)))
-                 (buffer-substring-no-properties (point-min) (point-max))))
-              (_ (buffer-substring-no-properties (point-min) (point-max))))))
-      (carriage--gptel--strip-carriage-markers raw))))
+(defun carriage-transport-gptel--log-procs (tag id procs)
+  "Log process inventory PROCS under TAG."
+  (when carriage-transport-gptel-diagnostics
+    (carriage-log "Transport[gptel] %s id=%s procs=%d%s"
+                  tag id (length procs)
+                  (if (null procs) "" ":"))
+    (dolist (p procs)
+      (carriage-log "Transport[gptel] %s id=%s - %s"
+                    tag id (carriage-transport-gptel--proc-desc p)))))
 
-(defun carriage--gptel--maybe-open-logs ()
-  "Open log/traffic buffers if user prefs demand and we are interactive."
-  (when (and (boundp 'carriage-mode-auto-open-log)
-             carriage-mode-auto-open-log
-             (not (bound-and-true-p noninteractive)))
-    (ignore-errors (carriage-show-log)))
-  (when (and (boundp 'carriage-mode-auto-open-traffic)
-             carriage-mode-auto-open-traffic
-             (not (bound-and-true-p noninteractive)))
-    (ignore-errors (carriage-show-traffic))))
+(defun carriage-transport-gptel--maybe-gptel-request-alist-size ()
+  "Return length of gptel--request-alist when available, else nil."
+  (when (boundp 'gptel--request-alist)
+    (condition-case _e
+        (length gptel--request-alist)
+      (error nil))))
 
-(defun carriage--gptel--classify (response)
-  "Normalize GPTel RESPONSE into a plist with :kind and payload.
-Kinds: 'text 'reasoning 'both 'reasoning-end 'tool 'done 'abort 'unknown.
-When both reasoning and text are present, returns :kind 'both with keys :thinking and :text."
+(defun carriage-transport-gptel--gptel-fsm-for-buffer (buf)
+  "Return the first live GPTel FSM whose :buffer equals BUF, or nil (best-effort)."
+  (when (and (buffer-live-p buf)
+             (boundp 'gptel--request-alist)
+             (listp gptel--request-alist))
+    (cl-loop
+     for entry in gptel--request-alist
+     for fsm = (ignore-errors (cadr entry))
+     for info = (and fsm (ignore-errors (gptel-fsm-info fsm)))
+     when (and (listp info) (eq (plist-get info :buffer) buf))
+     return fsm)))
+
+(defun carriage-transport-gptel--gptel-http-status-known-p (buf)
+  "Return non-nil when GPTel already knows HTTP status for BUF (best-effort)."
+  (when-let* ((fsm (carriage-transport-gptel--gptel-fsm-for-buffer buf))
+              (info (ignore-errors (gptel-fsm-info fsm))))
+    (and (listp info)
+         (or (plist-get info :http-status)
+             (plist-get info :http_status)
+             (plist-get info :status)))))
+
+(defun carriage-transport-gptel--cleanup-request-alist (origin-buffer id)
+  "Remove any gptel--request-alist entries whose FSM belongs to ORIGIN-BUFFER.
+
+This is a scoped cleanup to avoid \"dirty\" GPTel state after early aborts.
+Returns number of removed entries (best-effort)."
+  (if (not (and (buffer-live-p origin-buffer) (boundp 'gptel--request-alist)))
+      0
+    (let ((removed 0)
+          (before (ignore-errors (length gptel--request-alist))))
+      (dolist (entry (copy-sequence gptel--request-alist))
+        (let* ((proc (car entry))
+               (fsm (ignore-errors (cadr entry)))
+               (info (and fsm (ignore-errors (gptel-fsm-info fsm))))
+               (buf (and (listp info) (plist-get info :buffer))))
+          (when (eq buf origin-buffer)
+            (ignore-errors
+              (setf (alist-get proc gptel--request-alist nil 'remove) nil))
+            (setq removed (1+ removed)))))
+      (when (and carriage-transport-gptel-diagnostics (> removed 0))
+        (carriage-log "Transport[gptel] CLEAN id=%s removed-request-alist=%d before=%s after=%s"
+                      id
+                      removed
+                      (if (numberp before) before "—")
+                      (ignore-errors (length gptel--request-alist))))
+      removed)))
+
+(defun carriage-transport-gptel--classify-final (resp info watchdog-fired)
+  "Return classification code symbol for finalization."
   (cond
-   ;; Plain text piece
-   ((stringp response)
-    (list :kind 'text :text response))
-   ;; End
-   ((eq response t)
-    (list :kind 'done))
-   ;; Abort/error
-   ((or (null response) (eq response 'abort))
-    (list :kind 'abort))
-   ;; Reasoning stream (classic pair: (reasoning . CHUNK|t))
-   ((and (consp response) (eq (car response) 'reasoning))
-    (let ((chunk (cdr response)))
-      (cond
-       ((eq chunk t) (list :kind 'reasoning-end))
-       ((stringp chunk) (list :kind 'reasoning :text chunk))
-       (t (list :kind 'unknown)))))
-   ;; Tool events
-   ((and (consp response) (memq (car response) '(tool-call tool-result)))
-    (list :kind 'tool))
-   ;; Plist/alist with :thinking and/or :content/:delta
-   ((listp response)
-    (let* ((th  (or (plist-get response :thinking)
-                    (and (fboundp 'alist-get) (alist-get :thinking response))))
-           (txt (or (plist-get response :content)
-                    (plist-get response :delta)
-                    (and (fboundp 'alist-get) (alist-get :content response))
-                    (and (fboundp 'alist-get) (alist-get :delta response)))))
-      (cond
-       ;; End of reasoning
-       ((eq th t) (list :kind 'reasoning-end))
-       ;; Both thinking and text present
-       ((and (stringp th) (stringp txt))
-        (list :kind 'both :thinking th :text txt))
-       ;; Only thinking
-       ((stringp th)
-        (list :kind 'reasoning :text th))
-       ;; Only text
-       ((stringp txt)
-        (list :kind 'text :text txt))
-       (t (list :kind 'unknown)))))
-   (t (list :kind 'unknown))))
+   (watchdog-fired 'LLM_E_TIMEOUT)
+   ((eq resp 'abort) 'LLM_E_ABORT)
+   ((and (null resp) (listp info) (or (plist-get info :error) (plist-get info :http-status)))
+    'LLM_E_PROVIDER)
+   ((null resp) 'LLM_E_NETWORK)
+   (t 'LLM_E_UNKNOWN)))
 
-(defun carriage--gptel--extract-usage (response info)
-  "Extract token/audio usage from GPTel RESPONSE/INFO and normalize to a plist.
-
-Returns plist with keys:
-- :tokens-in integer|nil
-- :tokens-out integer|nil
-- :audio-in integer|nil
-- :audio-out integer|nil
-- :raw any|nil
-
-Best-effort: returns nil when nothing can be extracted.
-Robustness: must never signal even when RESPONSE is a dotted cons like (reasoning . \".\")."
+(defun carriage-transport-gptel--maybe-backtrace-string ()
+  "Return a best-effort backtrace string."
   (condition-case _e
-      (cl-labels
-          ((safe-alist-get (k x)
-             (ignore-errors
-               (when (and (listp x) (fboundp 'alist-get))
-                 (alist-get k x))))
-           (safe-plist-get (k x)
-             (ignore-errors
-               (when (listp x) (plist-get x k))))
-           (any-get (k1 k2 x)
-             (or (safe-plist-get k1 x)
-                 (safe-plist-get k2 x)
-                 (safe-alist-get k1 x)
-                 (safe-alist-get k2 x)))
-           (to-int (v)
-             (cond
-              ((integerp v) v)
-              ((and (numberp v) (>= v 0)) (truncate v))
-              ((and (stringp v) (string-match-p "\\`[0-9]+\\'" v)) (string-to-number v))
-              (t nil)))
-           (usage-from (x)
-             (or (safe-plist-get :usage x)
-                 (safe-alist-get :usage x)
-                 (safe-alist-get 'usage x)
-                 (safe-plist-get 'usage x))))
-        (let* ((u (or (usage-from info)
-                      (usage-from response)
-                      ;; Some payloads may store usage nested under :payload.
-                      (usage-from (safe-plist-get :payload info))
-                      (usage-from (safe-alist-get :payload info))))
-               ;; GPTel sometimes exposes only :output-tokens (non-streaming),
-               ;; so accept these as fallbacks.
-               (tout-info (to-int (or (safe-plist-get :tokens-out info)
-                                      (safe-plist-get :output-tokens info)
-                                      (safe-plist-get :completion_tokens info)
-                                      (safe-plist-get :completion-tokens info))))
-               (tin-info  (to-int (or (safe-plist-get :tokens-in info)
-                                      (safe-plist-get :input_tokens info)
-                                      (safe-plist-get :prompt_tokens info)
-                                      (safe-plist-get :prompt-tokens info))))
-               (tin (or (to-int (or (any-get :tokens-in :prompt_tokens u)
-                                    (any-get :input_tokens :prompt-tokens u)
-                                    (any-get 'input_tokens 'prompt_tokens u)))
-                        tin-info))
-               (tout (or (to-int (or (any-get :tokens-out :completion_tokens u)
-                                     (any-get :output_tokens :completion-tokens u)
-                                     (any-get 'output_tokens 'completion_tokens u)))
-                         tout-info))
-               (ain (to-int (or (any-get :audio-in :audio_prompt_tokens u)
-                                (any-get :audio_input_tokens :audio-prompt-tokens u)
-                                (any-get 'audio_input_tokens 'audio_prompt_tokens u))))
-               (aout (to-int (or (any-get :audio-out :audio_completion_tokens u)
-                                 (any-get :audio_output_tokens :audio-completion-tokens u)
-                                 (any-get 'audio_output_tokens 'audio_completion_tokens u)))))
-          (when (or tin tout ain aout u)
-            (list :tokens-in tin :tokens-out tout :audio-in ain :audio-out aout :raw u))))
+      (with-temp-buffer
+        (let ((standard-output (current-buffer)))
+          (backtrace))
+        (buffer-string))
     (error nil)))
 
-(defun carriage--gptel--ensure-backend (backend buffer)
-  "Ensure BACKEND is 'gptel or signal error and complete in BUFFER."
-  (unless (memq (if (symbolp backend) backend (intern (format "%s" backend)))
-                '(gptel))
-    (carriage-log "Transport[gptel]: backend mismatch (%s), dropping" backend)
-    (with-current-buffer buffer
-      (condition-case _
-          (signal (carriage-error-symbol 'LLM_E_BACKEND)
-                  (list (format "Unknown transport backend: %s" backend)))
-        (error nil))
-      (carriage-transport-complete t))
-    (user-error "No transport adapter for backend: %s" backend))
-  t)
+(defun carriage-transport-gptel--cleanup-kill-procs (procs)
+  "Delete PROCS best-effort and return count killed."
+  (let ((k 0))
+    (dolist (p procs)
+      (when (process-live-p p)
+        (ignore-errors (delete-process p))
+        (setq k (1+ k))))
+    k))
 
-(defun carriage--gptel--state-waiting (buffer model provider)
-  "Set UI waiting state for BUFFER and initialize progress metadata."
-  (with-current-buffer buffer
-    (carriage-ui-set-state 'waiting)
-    (ignore-errors
-      (carriage-ui-note-stream-progress
-       (list :model (format "%s" model)
-             :provider provider
-             :time-start (float-time)
-             :time-last (float-time))))))
+(defun carriage-transport-gptel--schedule (delay fn)
+  "Run FN after DELAY seconds (best-effort)."
+  (run-at-time (max 0 (or delay 0)) nil fn))
 
-(defun carriage--gptel--register-abort (buffer)
-  "Register abort handler for ongoing GPTel request tied to BUFFER."
-  (with-current-buffer buffer
-    (carriage-register-abort-handler
-     (lambda ()
-       (condition-case e
-           (gptel-abort buffer)
-         (error (carriage-log "Transport[gptel]: abort error: %s"
-                              (error-message-string e))))))))
+;; ---------------------------------------------------------------------
+;; Watchdog / finalization guards (buffer-local)
 
-(defun carriage--gptel--open-and-log (buffer args prompt system model)
-  "Prepare UI/logging for BUFFER and record outbound request."
-  (with-current-buffer buffer
-    (carriage--gptel--maybe-open-logs))
-  (carriage--gptel--register-abort buffer)
-  (carriage--gptel--keepalive-start buffer)
-  (carriage-traffic-log-request buffer
-                                :backend 'gptel
-                                :model model
-                                :system system
-                                :prompt prompt
-                                :context (plist-get args :context))
-  (carriage-traffic-log 'out "gptel request: model=%s source=%s bytes=%d"
-                        model (plist-get args :source) (length prompt))
-  (carriage--gptel--state-waiting buffer model (plist-get args :provider)))
+(defvar-local carriage-transport-gptel--finalized nil
+  "Non-nil once this buffer's current GPTel request has been finalized by the transport.")
 
-(defun carriage--gptel--summary-init ()
-  "Initialize response summary accumulator."
-  (list :head "" :tail "" :bytes 0))
+(defvar-local carriage-transport-gptel--finalized-kind nil
+  "Final kind symbol used for the last finalize in this buffer.")
 
-(defun carriage--gptel--summary-update (summary text head-limit tail-limit)
-  "Update SUMMARY with TEXT using HEAD-LIMIT and TAIL-LIMIT.
-Returns cons (UPDATED-SUMMARY . REMAINDER-TEXT-AFTER-HEAD)."
-  (let* ((head (or (plist-get summary :head) ""))
-         (tail (or (plist-get summary :tail) ""))
-         (bytes (or (plist-get summary :bytes) 0))
-         (s (or text "")))
-    (setq bytes (+ bytes (string-bytes s)))
-    (when (< (length head) head-limit)
-      (let* ((need (max 0 (- head-limit (length head))))
-             (take (min need (length s))))
-        (setq head (concat head (substring s 0 take)))
-        (setq s (substring s take))))
-    (when (> (length s) 0)
-      (let* ((concatd (concat tail s))
-             (len (length concatd)))
-        (setq tail (if (<= len tail-limit)
-                       concatd
-                     (substring concatd (- len tail-limit) len)))))
-    (cons (list :head head :tail tail :bytes bytes) s)))
+(defvar-local carriage-transport-gptel--wd-timer nil)
+(defvar-local carriage-transport-gptel--wd-last-activity 0.0)
+(defvar-local carriage-transport-gptel--wd-fired nil)
+(defvar-local carriage-transport-gptel--wd-timeout nil
+  "Current watchdog timeout (seconds).
+Starts as startup timeout, then may be extended after first stream content arrives.")
+(defvar-local carriage-transport-gptel--wd-extended nil
+  "Non-nil once watchdog timeout has been extended after first stream content arrives.")
 
-(defun carriage--gptel--summary-string (summary)
-  "Return compact summary string for SUMMARY plist."
-  (let ((head (or (plist-get summary :head) ""))
-        (tail (or (plist-get summary :tail) ""))
-        (bytes (or (plist-get summary :bytes) 0)))
-    (concat head
-            (when (> bytes (+ (string-bytes head) (string-bytes tail)))
-              "…")
-            tail)))
+(defun carriage-transport-gptel--wd-stop ()
+  "Stop watchdog timer."
+  (when (timerp carriage-transport-gptel--wd-timer)
+    (cancel-timer carriage-transport-gptel--wd-timer))
+  (setq carriage-transport-gptel--wd-timer nil))
 
-(defun carriage--gptel--on-done (buffer state)
-  "Handle completion: log summary, upsert fingerprint usage+cost and finalize BUFFER."
-  (let* ((summary (and (listp state) (plist-get state :summary)))
-         (usage (and (listp state) (plist-get state :usage)))
-         (backend (and (listp state) (plist-get state :backend)))
-         (provider (and (listp state) (plist-get state :provider)))
-         (model (and (listp state) (plist-get state :model))))
-    (carriage-traffic-log 'in "gptel: done")
-    (with-current-buffer buffer
-      (ignore-errors (carriage-ui-note-stream-progress (list :time-last (float-time)))))
-    (carriage-traffic-log-response-summary buffer (carriage--gptel--summary-string summary))
-    (with-current-buffer buffer
-      ;; Two-phase fingerprint upsert: attach usage and computed cost on completion.
-      ;; Best-effort: do not signal if carriage-mode is not loaded.
-      (when (and (listp usage)
-                 (fboundp 'carriage-fingerprint-note-usage-and-cost))
-        (ignore-errors (carriage-fingerprint-note-usage-and-cost usage backend provider model)))
-      ;; Ensure all pending coalesced chunks are inserted before finalizing.
-      (when (fboundp 'carriage-stream-flush-now)
-        (ignore-errors (carriage-stream-flush-now buffer)))
-      (carriage-stream-finalize nil t)
-      (carriage-transport-complete nil buffer))))
+(defun carriage-transport-gptel--wd-touch ()
+  "Record activity timestamp."
+  (setq carriage-transport-gptel--wd-last-activity (float-time)))
 
-(defun carriage--gptel--on-abort (buffer info state)
-  "Handle abort/error with INFO: log, upsert fingerprint usage+cost (if any) and finalize BUFFER."
-  (let* ((summary (and (listp state) (plist-get state :summary)))
-         (usage (and (listp state) (plist-get state :usage)))
-         (backend (and (listp state) (plist-get state :backend)))
-         (provider (and (listp state) (plist-get state :provider)))
-         (model (and (listp state) (plist-get state :model)))
-         (msg (or (plist-get info :status) "error/abort")))
-    (carriage-traffic-log 'in "gptel: %s" msg)
-    (with-current-buffer buffer
-      (ignore-errors
-        (carriage-ui-note-error
-         (list :code 'LLM_ABORT :message msg :source 'transport))))
-    (carriage-traffic-log-response-summary buffer (carriage--gptel--summary-string summary))
-    (with-current-buffer buffer
-      ;; If usage was reported even on error/abort, still record it (and attempt cost).
-      (when (and (listp usage)
-                 (fboundp 'carriage-fingerprint-note-usage-and-cost))
-        (ignore-errors (carriage-fingerprint-note-usage-and-cost usage backend provider model)))
-      ;; Ensure all pending coalesced chunks are inserted before finalizing.
-      (when (fboundp 'carriage-stream-flush-now)
-        (ignore-errors (carriage-stream-flush-now buffer)))
-      (carriage-stream-finalize t nil)
-      (carriage-transport-complete t buffer))))
+(defun carriage-transport-gptel--wd-extended-timeout ()
+  "Return silence timeout (seconds) to use after first stream content arrives.
 
-(defun carriage--gptel--cb--ensure-reasoning (gptel-buffer state)
-  "Ensure UI enters reasoning phase on the first reasoning event. Return updated STATE."
-  (if (plist-get state :reasoning-started)
-      state
-    (with-current-buffer gptel-buffer
-      (carriage-ui-set-state 'reasoning))
-    (plist-put state :reasoning-started t)))
+Policy: keep only one user-facing knob (`carriage-transport-gptel-timeout-seconds`)
+as the startup timeout, but never let the silence timeout drop below 60s to avoid
+aborting valid long generations."
+  (max (float (or carriage-transport-gptel-timeout-seconds 10)) 60.0))
 
-(defun carriage--gptel--cb--ensure-streaming (gptel-buffer state)
-  "Ensure streaming state on first event. Return updated STATE."
-  (if (plist-get state :first-event)
-      (progn
-        (with-current-buffer gptel-buffer
-          (carriage-transport-streaming))
-        (plist-put state :first-event nil))
-    state))
+(defun carriage-transport-gptel--wd-extend ()
+  "Extend watchdog timeout after first stream content arrives (idempotent)."
+  (unless carriage-transport-gptel--wd-extended
+    (setq carriage-transport-gptel--wd-extended t
+          carriage-transport-gptel--wd-timeout (carriage-transport-gptel--wd-extended-timeout))
+    (when carriage-transport-gptel-diagnostics
+      (carriage-log "Transport[gptel] WD: extend silence-timeout=%.3fs"
+                    carriage-transport-gptel--wd-timeout))))
 
-(defun carriage--gptel--cb--update-summary (state text)
-  "Update STATE's summary with TEXT. Returns cons (NEW-STATE . REMAINDER)."
-  (let* ((hl (or (plist-get state :head-limit) 4096))
-         (tl (or (plist-get state :tail-limit) 4096))
-         (sum (or (plist-get state :summary) (carriage--gptel--summary-init)))
-         (upd (carriage--gptel--summary-update sum (or text "") hl tl)))
-    (cons (plist-put state :summary (car upd)) (cdr upd))))
+(defun carriage-transport-gptel--wd-extended-timeout ()
+  "Return silence timeout (seconds) to use after first stream content arrives.
 
-(defun carriage--gptel--cb-handle-reasoning (gptel-buffer state text)
-  "Handle reasoning CHUNK TEXT. Return updated STATE."
-  (setq state (carriage--gptel--cb--ensure-reasoning gptel-buffer state))
-  (if (plist-get state :any-text-seen)
-      (when carriage-transport-gptel-log-stream-chunks
-        (carriage-traffic-log 'in "[reasoning] %s" (or text "")))
-    (with-current-buffer gptel-buffer
-      (carriage-insert-stream-chunk (or text "") 'reasoning)
-      (ignore-errors (carriage-ui-note-reasoning-chunk (or text "")))))
-  state)
+Policy: keep only one user-facing knob (`carriage-transport-gptel-timeout-seconds`)
+as the startup timeout, but never let the silence timeout drop below 60s to avoid
+aborting valid long generations."
+  (max (float (or carriage-transport-gptel-timeout-seconds 10)) 60.0))
 
-(defun carriage--gptel--cb-handle-both (gptel-buffer state thinking text)
-  "Handle event with both THINKING and TEXT. Return updated STATE."
-  (setq state (carriage--gptel--cb--ensure-reasoning gptel-buffer state))
-  (when (and (stringp thinking) (not (plist-get state :any-text-seen)))
-    (with-current-buffer gptel-buffer
-      (carriage-insert-stream-chunk thinking 'reasoning))
-    (carriage-traffic-log 'in "[reasoning] %s" thinking))
-  (when (stringp text)
-    (setq state (carriage--gptel--cb--ensure-streaming gptel-buffer state))
-    (with-current-buffer gptel-buffer
-      (carriage-insert-stream-chunk text 'text)
-      (ignore-errors
-        (carriage-ui-note-stream-progress (list :inc-chunk t :time-last (float-time))))))
-  (let* ((res (carriage--gptel--cb--update-summary state text)))
-    (setq state (car res))
-    (let ((remainder (cdr res)))
-      (setq state (plist-put state :any-text-seen t))
-      (carriage-traffic-log 'in "%s" remainder)))
-  state)
+(defun carriage-transport-gptel--wd-extend ()
+  "Extend watchdog timeout after first stream content arrives (idempotent)."
+  (unless carriage-transport-gptel--wd-extended
+    (setq carriage-transport-gptel--wd-extended t
+          carriage-transport-gptel--wd-timeout (carriage-transport-gptel--wd-extended-timeout))
+    (when carriage-transport-gptel-diagnostics
+      (carriage-log "Transport[gptel] WD: extend silence-timeout=%.3fs"
+                    carriage-transport-gptel--wd-timeout))))
 
-(defun carriage--gptel--cb-handle-reasoning-end (gptel-buffer state)
-  "Handle end of reasoning. Return STATE unchanged."
-  (with-current-buffer gptel-buffer
-    ;; Ensure any buffered reasoning chunks are inserted before we close the block.
-    (when (fboundp 'carriage-stream-flush-now)
-      (ignore-errors (carriage-stream-flush-now gptel-buffer)))
-    (ignore-errors (carriage-end-reasoning)))
-  (carriage-traffic-log 'in "[reasoning] end")
-  state)
+(defun carriage-transport-gptel--wd-start (origin-buffer id on-timeout)
+  "Start watchdog for ORIGIN-BUFFER.
 
-(defun carriage--gptel--cb-handle-text (gptel-buffer state text)
-  "Handle plain TEXT chunk. Return updated STATE."
-  (setq state (carriage--gptel--cb--ensure-streaming gptel-buffer state))
-  (when (stringp text)
-    (with-current-buffer gptel-buffer
-      (carriage-insert-stream-chunk text 'text)
-      (ignore-errors
-        (carriage-ui-note-stream-progress (list :inc-chunk t :time-last (float-time))))))
-  (let* ((res (carriage--gptel--cb--update-summary state text)))
-    (setq state (car res))
-    (let ((remainder (cdr res)))
-      (setq state (plist-put state :any-text-seen t))
-      (when (stringp remainder)
-        (carriage-traffic-log 'in "%s" remainder))))
-  state)
+ON-TIMEOUT is a zero-arg function called when the watchdog fires.
+It MUST be idempotent."
+  (with-current-buffer origin-buffer
+    (setq carriage-transport-gptel--wd-fired nil
+          carriage-transport-gptel--wd-extended nil
+          carriage-transport-gptel--wd-timeout
+          (max 0.1 (float (or carriage-transport-gptel-timeout-seconds 10))))
+    (carriage-transport-gptel--wd-stop)
+    (carriage-transport-gptel--wd-touch)
+    (let ((buf origin-buffer))
+      (setq carriage-transport-gptel--wd-timer
+            (run-at-time
+             0.5 0.5
+             (lambda ()
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (let* ((timeout (or carriage-transport-gptel--wd-timeout
+                                       (max 0.1 (float (or carriage-transport-gptel-timeout-seconds 30))))))
+                     ;; If GPTel already observed HTTP response headers/status for this buffer,
+                     ;; treat it as activity and switch to (longer) silence-timeout.
+                     (when (and (not carriage-transport-gptel--finalized)
+                                (carriage-transport-gptel--gptel-http-status-known-p buf))
+                       (carriage-transport-gptel--wd-touch)
+                       (carriage-transport-gptel--wd-extend))
+                     (let ((dt (- (float-time) (or carriage-transport-gptel--wd-last-activity 0.0))))
+                       (when (and (not carriage-transport-gptel--wd-fired)
+                                  (not carriage-transport-gptel--finalized)
+                                  (> dt timeout))
+                         (setq carriage-transport-gptel--wd-fired t)
+                         (carriage-log "Transport[gptel] TIMEOUT id=%s phase=%s dt=%.3fs timeout=%.3fs"
+                                       id
+                                       (if carriage-transport-gptel--wd-extended "silence" "startup")
+                                       dt timeout)
+                         (ignore-errors (funcall on-timeout)))))))))))))
 
-(defun carriage--gptel--cb-handle-tool (state)
-  "Handle tool events. Return STATE unchanged."
-  (carriage-traffic-log 'in "[tool] ...")
-  state)
+;; ---------------------------------------------------------------------
+;; Finalization + cleanup
 
-(defun carriage--gptel--make-callback (gptel-buffer args head-limit tail-limit backend provider model)
-  "Return GPTel stream callback for GPTEL-BUFFER with limits.
+(defun carriage-transport-gptel--finalize
+    (origin-buffer id final resp info &optional internal-error)
+  "Finalize request and update UI. FINAL is one of 'done 'abort 'error 'timeout."
+  (with-current-buffer origin-buffer
+    (carriage-transport-gptel--wd-stop)
+    (if carriage-transport-gptel--finalized
+        (progn
+          (when carriage-transport-gptel-diagnostics
+            (carriage-log "Transport[gptel] DUP-FINALIZE id=%s final=%s ignored"
+                          id final))
+          t)
+      (setq carriage-transport-gptel--finalized t
+            carriage-transport-gptel--finalized-kind final)
+      (let* ((watchdog-fired (and (boundp 'carriage-transport-gptel--wd-fired)
+                                  carriage-transport-gptel--wd-fired))
+             (code (if internal-error
+                       'LLM_E_INTERNAL
+                     (carriage-transport-gptel--classify-final resp info watchdog-fired)))
+             (status (and (listp info) (plist-get info :status)))
+             (http (and (listp info) (or (plist-get info :http-status)
+                                         (plist-get info :http_status))))
+             (reqn (carriage-transport-gptel--maybe-gptel-request-alist-size))
+             (resp-kind (carriage-transport-gptel--response-kind resp))
+             (procs0 (carriage-transport-gptel--live-gptel-curl-procs))
+             (abort-called nil)
+             (killed0 0)
+             (killed1 0))
+        ;; Always log a single END line with key attributes
+        (carriage-log
+         "Transport[gptel] END id=%s final=%s code=%s status=%s http=%s resp=%s req-alist=%s procs0=%d"
+         id final code
+         (if status (carriage-transport-gptel--snip status 200) "—")
+         (if http (format "%s" http) "—")
+         resp-kind
+         (if (numberp reqn) (number-to-string reqn) "—")
+         (length procs0))
 
-Important robustness rule:
-- GPTel may invoke callbacks multiple times in unusual error/abort paths.
-- Carriage MUST finalize (pricing log + stream-finalize + transport-complete) at most once."
-  (let ((state (list :first-event t
-                     :any-text-seen nil
-                     :finished nil
-                     :summary (carriage--gptel--summary-init)
-                     :head-limit head-limit
-                     :tail-limit tail-limit
-                     ;; Identity for fingerprint upsert on completion.
-                     :backend backend
-                     :provider provider
-                     :model model)))
-    (lambda (response info)
-      (condition-case qerr
+        (when (and carriage-transport-gptel-diagnostics
+                   (memq final '(abort error timeout)))
+          (carriage-log "Transport[gptel] LAST id=%s resp=%s" id
+                        (carriage-transport-gptel--snip resp 600))
+          (carriage-log "Transport[gptel] LAST id=%s info-keys=%S" id
+                        (carriage-transport-gptel--plist-keys info))
+          (carriage-log "Transport[gptel] LAST id=%s info=%s" id
+                        (carriage-transport-gptel--snip info 600)))
+
+        (when internal-error
+          (carriage-log "Transport[gptel] INTERNAL id=%s err=%s" id
+                        (carriage-transport-gptel--snip internal-error 600))
+          (when-let* ((bt (carriage-transport-gptel--maybe-backtrace-string)))
+            (carriage-log "Transport[gptel] INTERNAL id=%s backtrace:\n%s" id bt)))
+
+        ;; Process handling: only on non-successful finals
+        (when (and (eq carriage-transport-gptel-cleanup-policy 'aggressive-on-error)
+                   (memq final '(abort error timeout)))
+          (setq abort-called t)
+          (ignore-errors (gptel-abort origin-buffer))
+          ;; Scoped cleanup: remove any gptel request state tied to this origin buffer.
+          (ignore-errors (carriage-transport-gptel--cleanup-request-alist origin-buffer id))
+          (carriage-transport-gptel--log-procs "PROCS-BEFORE" id procs0)
+          (setq killed0 (carriage-transport-gptel--cleanup-kill-procs procs0))
+          ;; second pass after delay
+          (carriage-transport-gptel--schedule
+           (or carriage-transport-gptel-cleanup-delay 0.2)
+           (lambda ()
+             (when (buffer-live-p origin-buffer)
+               (with-current-buffer origin-buffer
+                 (let ((procs1 (carriage-transport-gptel--live-gptel-curl-procs)))
+                   (setq killed1 (carriage-transport-gptel--cleanup-kill-procs procs1))
+                   (ignore-errors (carriage-transport-gptel--cleanup-request-alist origin-buffer id))
+                   (carriage-transport-gptel--log-procs "PROCS-AFTER" id
+                                                        (carriage-transport-gptel--live-gptel-curl-procs))
+                   (carriage-log "Transport[gptel] ACTION id=%s abort=%s kill0=%d kill1=%d"
+                                 id (if abort-called "t" "nil") killed0 killed1)))))))
+
+        ;; Finalize stream and transport UI
+        (with-demoted-errors "carriage-stream-finalize error: %S"
+          (pcase final
+            ('done (carriage-stream-finalize nil t))
+            (_     (carriage-stream-finalize t nil))))
+        (carriage-transport-complete (memq final '(abort error timeout)) origin-buffer)
+        t))))
+
+;; ---------------------------------------------------------------------
+;; Callback
+
+(defun carriage-transport-gptel--make-callback (origin-buffer id)
+  "Return GPTel callback for ORIGIN-BUFFER."
+  (let ((finished nil)
+        (first-stream nil)
+        (last-info nil)
+        (last-resp nil))
+    (lambda (resp info)
+      (with-current-buffer origin-buffer
+        (carriage-transport-gptel--wd-touch))
+      (setq last-info info)
+      (setq last-resp resp)
+      (condition-case err
           (progn
-            ;; Idempotency guard: if already finished, ignore all subsequent callbacks.
-            (when (plist-get state :finished)
-              (cl-return-from carriage--gptel--make-callback nil))
-            (let* ((cls (carriage--gptel--classify response))
-                   (kind (plist-get cls :kind))
-                   (text (plist-get cls :text))
-                   (thinking (plist-get cls :thinking))
-                   (usage (carriage--gptel--extract-usage response info)))
-              (when usage
-                (setq state (plist-put state :usage usage)))
-              (pcase kind
-                ('reasoning
-                 (setq state (carriage--gptel--cb-handle-reasoning gptel-buffer state text)))
-                ('both
-                 (setq state (carriage--gptel--cb-handle-both gptel-buffer state thinking text)))
-                ('reasoning-end
-                 (setq state (carriage--gptel--cb-handle-reasoning-end gptel-buffer state)))
-                ('text
-                 (setq state (carriage--gptel--cb-handle-text gptel-buffer state text)))
-                ('tool
-                 (setq state (carriage--gptel--cb-handle-tool state)))
-                ('done
-                 (setq state (plist-put state :finished t))
-                 (carriage--gptel--on-done gptel-buffer state))
-                ('abort
-                 (setq state (plist-put state :finished t))
-                 (carriage--gptel--on-abort gptel-buffer info state))
-                (_
-                 (carriage-traffic-log 'in "[unknown] %S" response)))))
+            (when finished
+              ;; Late callback after finalize: never signal.
+              (when carriage-transport-gptel-diagnostics
+                (carriage-log "Transport[gptel] LATE id=%s resp=%s"
+                              id (carriage-transport-gptel--snip resp 200)))
+              ;; Return quietly, do not throw/catch.
+              nil)
+
+            (cond
+             ;; Stream text
+             ((stringp resp)
+              (unless first-stream
+                (setq first-stream t)
+                (with-current-buffer origin-buffer
+                  (carriage-transport-gptel--wd-extend))
+                (carriage-transport-streaming origin-buffer))
+              (with-current-buffer origin-buffer
+                (carriage-insert-stream-chunk resp 'text)))
+
+             ;; Reasoning stream (best-effort, use carriage-mode policy at insertion layer)
+             ((and (consp resp) (eq (car resp) 'reasoning))
+              (let ((val (cdr resp)))
+                (cond
+                 ((stringp val)
+                  (unless first-stream
+                    (setq first-stream t)
+                    (carriage-transport-streaming origin-buffer))
+                  (with-current-buffer origin-buffer
+                    (carriage-insert-stream-chunk val 'reasoning)))
+                 ((eq val t)
+                  ;; end reasoning marker: insertion layer handles closing
+                  nil)
+                 (t nil))))
+
+             ;; Done
+             ((eq resp t)
+              (setq finished t)
+              (carriage-transport-gptel--finalize origin-buffer id 'done resp info))
+
+             ;; Abort (explicit)
+             ((eq resp 'abort)
+              (setq finished t)
+              (carriage-transport-gptel--finalize origin-buffer id 'abort resp info))
+
+             ;; Error (nil response)
+             ((null resp)
+              (setq finished t)
+              (carriage-transport-gptel--finalize origin-buffer id 'error resp info))
+
+             ;; Unknown event kind: log and ignore (do not crash)
+             (t
+              (when carriage-transport-gptel-diagnostics
+                (carriage-log "Transport[gptel] UNKNOWN id=%s resp=%s info=%s"
+                              id
+                              (carriage-transport-gptel--snip resp 400)
+                              (carriage-transport-gptel--snip info 400)))
+              nil)))
         (error
-         ;; Treat callback errors as terminal, but only once.
-         (unless (plist-get state :finished)
-           (setq state (plist-put state :finished t))
-           (carriage-traffic-log 'in "gptel callback error: %s" (error-message-string qerr))
-           (carriage--gptel--on-abort gptel-buffer (list :status (error-message-string qerr)) state)))))))
+         ;; Internal crash in our callback handler
+         (setq finished t)
+         (carriage-transport-gptel--finalize
+          origin-buffer id 'error last-resp last-info err))))))
 
-(defun carriage-transport-gptel-dispatch (&rest args)
-  "Dispatch Carriage request via GPTel when backend is 'gptel.
+;; ---------------------------------------------------------------------
+;; Dispatch entry-point
 
-ARGS is a plist with at least :backend, :model, :source, :buffer, :mode.
-Optionally accepts :prompt and :system to override prompt construction.
-When :insert-marker is a live marker, insert accepted blocks at its position.
-Streams chunks to *carriage-traffic*, accumulates text, and on completion
-invokes =carriage-accept-llm-response' in the originating buffer/marker.
+;;;###autoload
+(defun carriage-transport-gptel-v2-dispatch (&rest args)
+  "Dispatch Carriage request via GPTel.
 
-On backend mismatch, logs and completes with error."
+ARGS is a plist with keys like:
+:backend :model :source :buffer :mode :prompt :system :insert-marker
+
+This implementation is minimal and callback-driven, with watchdog + cleanup."
   (let* ((backend (plist-get args :backend))
          (model   (plist-get args :model))
-         (source  (plist-get args :source))
+         (source  (or (plist-get args :source) 'buffer))
          (buffer  (or (plist-get args :buffer) (current-buffer)))
-         (mode    (or (plist-get args :mode)
-                      (buffer-local-value 'major-mode buffer)))
-         (ins-marker (plist-get args :insert-marker)))
-    (carriage--gptel--ensure-backend backend buffer)
-    (let* ((prompt (or (plist-get args :prompt)
-                       (carriage--gptel--prompt source buffer (intern (format "%s" mode)))))
-           (system (plist-get args :system))
-           (gptel-buffer buffer)
-           (prov (or (plist-get args :provider)
-                     (and (boundp 'carriage-mode-provider) carriage-mode-provider)))
-           (resolved (ignore-errors (carriage-llm-resolve-model 'gptel prov model)))
-           (gptel-model (carriage--gptel--normalize-model (or resolved model)))
-           (head-limit (or (and (boundp 'carriage-traffic-summary-head-bytes)
-                                carriage-traffic-summary-head-bytes) 4096))
-           (tail-limit (or (and (boundp 'carriage-traffic-summary-tail-bytes)
-                                carriage-traffic-summary-tail-bytes) 4096)))
-      (carriage--gptel--open-and-log gptel-buffer args prompt system gptel-model)
-      (condition-case err
-          (gptel-request prompt
-            :system system
-            :stream t
-            :callback (carriage--gptel--make-callback gptel-buffer args head-limit tail-limit 'gptel prov model))
-        (error
-         (carriage-traffic-log 'in "gptel: request error: %s" (error-message-string err))
-         (carriage--gptel--on-abort gptel-buffer (list :status (error-message-string err)) (carriage--gptel--summary-init)))))))
+         (prompt  (plist-get args :prompt))
+         (system  (plist-get args :system))
+         (_mode   (plist-get args :mode))
+         (id      (carriage-transport-gptel--new-id)))
+    (unless (eq (if (symbolp backend) backend (intern (format "%s" backend))) 'gptel)
+      (carriage-log "Transport[gptel] backend mismatch: %S" backend)
+      (carriage-transport-complete t buffer)
+      (user-error "No transport adapter for backend: %s" backend))
 
-;; Entry-point: carriage-transport-gptel-dispatch
+    (unless (require 'gptel-request nil t)
+      (carriage-log "Transport[gptel] gptel-request not available")
+      (carriage-transport-complete t buffer)
+      (user-error "GPTel is not available"))
 
-;; Assist (schema-locked) minimal APIs and validators
-(require 'carriage-assist)
-
-;; -------------------------------------------------------------------
-;; GPTel streaming usage capture (AITUNNEL SSE trailer)
-;;
-;; AITUNNEL гарантирует usage в конце SSE-стрима (choices: [] + usage:{...}),
-;; но gptel не всегда поднимает это в INFO, доступный callback'у.
-;; Без usage Carriage не может посчитать цену по spec/pricing-v2.
-;;
-;; Решение: advice вокруг `gptel-curl--stream-cleanup` (после загрузки gptel-request):
-;; - парсим хвост process-buffer, ищем последний data:{...} с :usage
-;; - записываем :usage в fsm-info (и логируем vendor cost_rub/balance как диагностику)
-;;
-;; Безопасность/robustness:
-;; - best-effort, never signal
-;; - не трогаем сеть, используем только уже полученный SSE текст
-;; - не зависит от конкретного backend'а (OpenAI-совместимые SSE)
-(defun carriage-transport-gptel--json-parse-safe (s)
-  "Parse JSON string S into plist, or nil. Best-effort; never signals."
-  (condition-case _e
-      (cond
-       ((and (fboundp 'json-parse-string) (stringp s))
-        (json-parse-string s :object-type 'plist :array-type 'list
-                           :null-object :null :false-object :json-false))
-       ((stringp s)
-        (require 'json)
-        (let ((json-object-type 'plist))
-          (json-read-from-string s)))
-       (t nil))
-    (error nil)))
-
-(defun carriage-transport-gptel--sse-last-usage (buffer)
-  "Return plist (:usage USAGE :obj OBJ) from the last SSE data chunk in BUFFER that contains :usage.
-Returns nil when not found."
-  (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (save-excursion
-        (goto-char (point-max))
-        (let ((hit nil))
-          (while (and (not hit)
-                      (re-search-backward "^data:[ \t]*" nil t))
-            (let* ((line (buffer-substring-no-properties (point) (line-end-position)))
-                   (payload (string-trim (replace-regexp-in-string "\\`data:[ \t]*" "" line t t))))
-              (unless (or (string-empty-p payload)
-                          (string= payload "[DONE]"))
-                (let* ((obj (carriage-transport-gptel--json-parse-safe payload))
-                       (usage (and (listp obj) (plist-get obj :usage))))
-                  (when (listp usage)
-                    (setq hit (list :usage usage :obj obj)))))))
-          hit)))))
+      (let* ((cb (carriage-transport-gptel--make-callback buffer id))
+             (abort-fn
+              (lambda ()
+                (carriage-log "Transport[gptel] ABORT requested id=%s" id)
+                (ignore-errors (gptel-abort buffer))
+                ;; If GPTel never delivers terminal callback, force-finalize as abort.
+                (carriage-transport-gptel--schedule
+                 0.6
+                 (lambda ()
+                   (when (buffer-live-p buffer)
+                     (with-current-buffer buffer
+                       (unless carriage-transport-gptel--finalized
+                         (carriage-transport-gptel--finalize
+                          buffer id 'abort 'abort (list :status "abort-timeout") nil))))))))
+             (start-procs (carriage-transport-gptel--live-gptel-curl-procs)))
+        ;; Reset per-request guards for this buffer
+        (setq carriage-transport-gptel--finalized nil
+              carriage-transport-gptel--finalized-kind nil)
+        (carriage-log "Transport[gptel] START id=%s source=%s model=%s prompt-bytes=%s"
+                      id source (or model "—")
+                      (if (stringp prompt) (number-to-string (string-bytes prompt)) "—"))
+        (carriage-transport-gptel--log-procs "PROCS-START" id start-procs)
 
-(defun carriage-transport-gptel--capture-usage-into-fsm (process)
-  "If possible, capture :usage from PROCESS buffer SSE trailer into gptel fsm-info.
-Returns non-nil when usage was captured."
-  (condition-case _e
-      (when (and (processp process)
-                 (boundp 'gptel--request-alist)
-                 (fboundp 'gptel-fsm-info)
-                 (fboundp 'gptel-copy-fsm))
-        (let* ((cell (alist-get process gptel--request-alist))
-               (fsm (car-safe cell))
-               (info (and fsm (gptel-fsm-info fsm)))
-               (buf (process-buffer process)))
-          (when (and (listp info) (buffer-live-p buf)
-                     ;; Do not overwrite if info already has :usage.
-                     (not (plist-member info :usage)))
-            (let* ((hit (carriage-transport-gptel--sse-last-usage buf))
-                   (usage (and (listp hit) (plist-get hit :usage))))
-              (when (listp usage)
-                ;; IMPORTANT: plist-put returns a new list; set it back into FSM.
-                (setf (gptel-fsm-info fsm) (plist-put info :usage usage))
-                (ignore-errors
-                  (let* ((pt (plist-get usage :prompt_tokens))
-                         (ct (plist-get usage :completion_tokens))
-                         (cr (plist-get usage :cost_rub))
-                         (bal (plist-get usage :balance)))
-                    (when (fboundp 'carriage-log)
-                      (carriage-log "gptel: captured SSE usage trailer: prompt_tokens=%s completion_tokens=%s cost_rub=%s balance=%s"
-                                    (if (numberp pt) pt "—")
-                                    (if (numberp ct) ct "—")
-                                    (if (numberp cr) cr "—")
-                                    (if (numberp bal) bal "—")))))
-                t)))))
-    (error nil)))
+        ;; Register abort handler for UI (C-c e k)
+        (carriage-register-abort-handler abort-fn)
 
-(defun carriage-transport-gptel--stream-cleanup@capture-usage (orig process status)
-  "Around advice: capture usage from SSE trailer before gptel finalizes the request."
-  (ignore-errors (carriage-transport-gptel--capture-usage-into-fsm process))
-  (funcall orig process status))
+        ;; Start watchdog (watchdog calls on-timeout).
+        ;; UI state (sending) is managed by the caller via `carriage-transport-begin'.
+        (carriage-transport-gptel--wd-start
+         buffer id
+         (lambda ()
+           (funcall abort-fn)
+           (carriage-transport-gptel--finalize
+            buffer id 'timeout nil (list :status "timeout") nil)))
 
-(with-eval-after-load 'gptel-request
-  (when (fboundp 'gptel-curl--stream-cleanup)
-    (unless (advice-member-p #'carriage-transport-gptel--stream-cleanup@capture-usage
-                             'gptel-curl--stream-cleanup)
-      (advice-add 'gptel-curl--stream-cleanup :around
-                  #'carriage-transport-gptel--stream-cleanup@capture-usage))))
+        ;; Invoke gptel-request in the origin buffer.
+        ;;
+        ;; We intentionally avoid touching internal gptel logging or curl buffers.
+        ;; Everything we need for diagnostics is logged from callback and process inventory.
+        (condition-case err
+            (let ((gptel-backend (and (boundp 'gptel-backend) gptel-backend))
+                  (gptel-model   (and (boundp 'gptel-model) gptel-model)))
+              ;; If model is provided as string, gptel expects symbol; but we don't mutate global.
+              ;; Let gptel sanitize if needed; keep this adapter minimal.
+              (ignore gptel-backend)
+              (ignore gptel-model)
+              (gptel-request
+                  prompt
+                :callback cb
+                :buffer buffer
+                :stream t
+                :system system))
+          (error
+           ;; Request could not be started at all.
+           (carriage-log "Transport[gptel] START-ERROR id=%s err=%s" id (error-message-string err))
+           (carriage-transport-gptel--finalize buffer id 'error nil (list :status "start-error") err))))
+      t)))
 
 (provide 'carriage-transport-gptel)
 ;;; carriage-transport-gptel.el ends here

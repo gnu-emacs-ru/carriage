@@ -1225,6 +1225,10 @@ Adjacent events with the same TYPE are merged to reduce buffer operations."
                                     (= (marker-position carriage--stream-end-marker) tailpos))
                            (set-marker carriage--stream-end-marker newpos (current-buffer)))))))))
               (_
+               ;; If a reasoning block is open, close it before inserting normal text,
+               ;; otherwise the whole answer will be wrapped inside the reasoning block.
+               (when carriage--reasoning-open
+                 (ignore-errors (carriage-end-reasoning)))
                (carriage--stream-insert-at-end (or (cdr ev) ""))))))
         ;; Move preloader overlay to stream tail (single update per flush)
         (when (and (boundp 'carriage--preloader-overlay)
@@ -2303,13 +2307,13 @@ Best-effort: never signal."
                                         (if (and (stringp ctx-text)
                                                  (string-match-p "#\\+begin_map\\b" ctx-text))
                                             "t" "nil"))))))))
-            (carriage-traffic-log 'out
-                                  "context: final ctx-text bytes=%d has-begin_map=%s"
-                                  (if (stringp ctx-text) (string-bytes ctx-text) 0)
-                                  (if (and (stringp ctx-text)
-                                           (string-match-p "#\\+begin_map\\b" ctx-text))
-                                      "t" "nil"))
-            ctx-text))
+          (carriage-traffic-log 'out
+                                "context: final ctx-text bytes=%d has-begin_map=%s"
+                                (if (stringp ctx-text) (string-bytes ctx-text) 0)
+                                (if (and (stringp ctx-text)
+                                         (string-match-p "#\\+begin_map\\b" ctx-text))
+                                    "t" "nil"))
+          ctx-text))
     (error nil)))
 
 (defun carriage--build-context (source buffer)

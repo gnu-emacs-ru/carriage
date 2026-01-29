@@ -413,6 +413,31 @@ Default is t (include plain segments by default; toggle to focus only on typed b
   (force-mode-line-update t))
 
 ;; -------------------------------------------------------------------
+;; Typed-blocks structure hint (controls Ask/Hybrid system guidance)
+(defcustom carriage-mode-typedblocks-structure-hint t
+  "When non-nil, Ask/Hybrid system prompts include a compact \"Typed Blocks (v1)\" guidance
+asking the model to wrap key information into begin_<type> blocks (task, analysis, plan, verify, commands,
+question, answer, context; notes is optional). Turning it off keeps the intent semantics intact
+but removes the guidance text from the prompt."
+  :type 'boolean
+  :group 'carriage)
+(make-variable-buffer-local 'carriage-mode-typedblocks-structure-hint)
+
+;;;###autoload
+(defun carriage-toggle-typedblocks-structure-hint ()
+  "Toggle inclusion of \"Typed Blocks (v1)\" guidance in Ask/Hybrid prompts for this buffer."
+  (interactive)
+  (setq-local carriage-mode-typedblocks-structure-hint
+              (not (and (boundp 'carriage-mode-typedblocks-structure-hint)
+                        carriage-mode-typedblocks-structure-hint)))
+  (message "Typed Blocks guidance: %s"
+           (if carriage-mode-typedblocks-structure-hint "on" "off"))
+  ;; Best-effort UI refresh
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (ignore-errors (carriage-ui--invalidate-ml-cache)))
+  (force-mode-line-update t))
+
+;; -------------------------------------------------------------------
 ;; Org structure templates for typed blocks (quick insert: <q, <ans, <t, etc.)
 (defun carriage-mode--install-typedblocks-templates ()
   "Install Org structure templates for Carriage typed blocks (idempotent)."
@@ -2396,6 +2421,11 @@ May include :context-text and :context-target per v1.1."
            (res (list :payload payload)))
       (when (and (stringp ctx-text) (not (string-empty-p ctx-text)))
         (setq res (append res (list :context-text ctx-text :context-target target))))
+      ;; Pass typed-blocks guidance toggle into prompt fragments
+      (when (boundp 'carriage-mode-typedblocks-structure-hint)
+        (setq res (append res
+                          (list :typedblocks-structure-hint
+                                (and carriage-mode-typedblocks-structure-hint t)))))
       res)))
 
 ;;; Commands (stubs/minimal implementations)

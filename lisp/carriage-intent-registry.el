@@ -73,19 +73,51 @@ Do NOT include any prose outside blocks. No reasoning, no commentary.
 
 (defun carriage--intent-frag-hybrid (ctx)
   "Default fragment for Intent=Hybrid."
-  (concat
-   (carriage--intent-frag-org-formatting ctx)
-   "\n"
-   "You MAY include brief prose, but the tool will extract and apply ONLY Org begin_patch blocks.\n"
-   "Default behavior: reply with Org prose only. Output #+begin_patch blocks ONLY when the user explicitly asks to modify files (e.g., \"Implement\", \"Fix\", \"Apply changes\", \"Реализуй\", \"Вноси правки\").\n"
-   "Keep prose minimal and place it before or after the blocks. Do not insert text inside blocks."))
+  (let* ((typed-hint
+          (when (or (null ctx) (plist-get ctx :typedblocks-structure-hint))
+            (concat
+             "\n"
+             "Typed Blocks (v1):\n"
+             "- In addition to Org prose, structure the key parts of your reply using typed blocks:\n"
+             "  begin_task, begin_analysis, begin_plan, begin_verify, begin_commands,\n"
+             "  begin_question, begin_answer, begin_context (begin_notes is optional).\n"
+             "- Put only important information inside these blocks so the tool can extract it even when plain text is disabled.\n"
+             "- Keep prose minimal and avoid duplicating the same content inside and outside blocks.\n"
+             "- Typical mapping:\n"
+             "  • task — concise statement of goals; analysis — key considerations/constraints;\n"
+             "  • plan — step-by-step plan; verify — checks/criteria; commands — run/build/test commands;\n"
+             "  • question/answer — clarifications; context — links/paths/artifacts; notes — auxiliary (optional).\n")))
+         (base
+          (concat
+           (carriage--intent-frag-org-formatting ctx)
+           "\n"
+           "You MAY include brief prose, but the tool will extract and apply ONLY Org begin_patch blocks.\n"
+           "Default behavior: reply with Org prose only. Output #+begin_patch blocks ONLY when the user explicitly asks to modify files (e.g., \"Implement\", \"Fix\", \"Apply changes\", \"Реализуй\", \"Вноси правки\").\n"
+           "Keep prose minimal and place it before or after the blocks. Do not insert text inside blocks.\n")))
+    (concat base (or typed-hint ""))))
 
 (defun carriage--intent-frag-ask (ctx)
   "Default fragment for Intent=Ask."
-  (concat
-   (carriage--intent-frag-org-formatting ctx)
-   "\n"
-   "Do NOT produce any begin_patch blocks. Provide a concise prose answer only."))
+  (let* ((typed-hint
+          (when (or (null ctx) (plist-get ctx :typedblocks-structure-hint))
+            (concat
+             "\n"
+             "Typed Blocks (v1):\n"
+             "- Structure the key parts of your reply using typed blocks:\n"
+             "  begin_task, begin_analysis, begin_plan, begin_verify, begin_commands,\n"
+             "  begin_question, begin_answer, begin_context (begin_notes is optional).\n"
+             "- Put only important information inside these blocks so the tool can extract it even when plain text is disabled.\n"
+             "- Keep prose minimal and avoid duplicating the same content inside and outside blocks.\n"
+             "- Typical mapping:\n"
+             "  • task — concise statement of goals; analysis — key considerations/constraints;\n"
+             "  • plan — step-by-step plan; verify — checks/criteria; commands — run/build/test commands;\n"
+             "  • question/answer — clarifications; context — links/paths/artifacts; notes — auxiliary (optional).\n")))
+         (base
+          (concat
+           (carriage--intent-frag-org-formatting ctx)
+           "\n"
+           "Do NOT produce any begin_patch blocks. Provide a concise answer; use typed blocks for key information.")))
+    (concat base (or typed-hint ""))))
 
 ;; Register defaults
 (carriage-intent-register 'Code   #'carriage--intent-frag-code)

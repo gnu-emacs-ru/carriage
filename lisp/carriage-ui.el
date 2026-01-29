@@ -548,6 +548,7 @@ Disabling this eliminates periodic redisplay work during active phases."
     context
     toggle-visible
     toggle-plain
+    toggle-typed
     toggle-ctx
     toggle-map
     toggle-patched
@@ -2012,12 +2013,25 @@ Important: the cache key includes label's text properties to ensure visual updat
                     ((fboundp 'all-the-icons-material)
                      (all-the-icons-material "subject"
                                              :height carriage-mode-icon-height
-                                             :v-adjust carriage-mode-icon-v-adjust
+                                             :v-adjust (- carriage-mode-icon-v-adjust 0.12)
                                              :face fplist))
                     ((fboundp 'all-the-icons-octicon)
                      (all-the-icons-octicon "file-text"
                                             :height carriage-mode-icon-height
-                                            :v-adjust carriage-mode-icon-v-adjust
+                                            :v-adjust (- carriage-mode-icon-v-adjust 0.12)
+                                            :face fplist))
+                    (t nil)))
+                  ('typed
+                   (cond
+                    ((fboundp 'all-the-icons-material)
+                     (all-the-icons-material "view_agenda"
+                                             :height carriage-mode-icon-height
+                                             :v-adjust (- carriage-mode-icon-v-adjust 0.12)
+                                             :face fplist))
+                    ((fboundp 'all-the-icons-octicon)
+                     (all-the-icons-octicon "list-unordered"
+                                            :height carriage-mode-icon-height
+                                            :v-adjust (- carriage-mode-icon-v-adjust 0.12)
                                             :face fplist))
                     (t nil)))
                   (_ nil))))
@@ -2613,6 +2627,14 @@ Performance:
                          #'carriage-toggle-include-plain-text-context
                          help 'plain)))
 
+(defun carriage-ui--ml-seg-toggle-typed ()
+  "Build toggle for including \"Typed Blocks (v1)\" guidance in Ask/Hybrid prompts."
+  (let* ((_ (require 'carriage-i18n nil t))
+         (help "Toggle guidance asking the model to wrap key information into typed blocks (Ask/Hybrid)"))
+    (carriage-ui--toggle "Typed" 'carriage-mode-typedblocks-structure-hint
+                         #'carriage-toggle-typedblocks-structure-hint
+                         help 'typed)))
+
 (defun carriage-ui--ml-seg-doc-scope-all ()
   "Build button to select 'all doc-context scope."
   (let* ((enabled (if (boundp 'carriage-mode-include-doc-context)
@@ -2730,6 +2752,7 @@ If cache is empty/uninitialized, schedule an async refresh and show a placeholde
     ('toggle-map     (carriage-ui--ml-seg-toggle-map))
     ('toggle-visible (carriage-ui--ml-seg-toggle-visible))
     ('toggle-plain   (carriage-ui--ml-seg-toggle-plain))
+    ('toggle-typed   (carriage-ui--ml-seg-toggle-typed))
     ('abort         (carriage-ui--ml-seg-abort))
     ('report        (carriage-ui--ml-seg-report))
     ('toggle-ctx    (carriage-ui--ml-seg-toggle-ctx))

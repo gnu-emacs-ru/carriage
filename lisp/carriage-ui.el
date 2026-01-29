@@ -540,6 +540,7 @@ Disabling this eliminates periodic redisplay work during active phases."
 (defconst carriage-ui--modeline-default-blocks
   '(
     intent
+    toggle-typed
     model
     state
     apply-status
@@ -548,7 +549,6 @@ Disabling this eliminates periodic redisplay work during active phases."
     context
     toggle-visible
     toggle-plain
-    toggle-typed
     toggle-ctx
     toggle-map
     toggle-patched

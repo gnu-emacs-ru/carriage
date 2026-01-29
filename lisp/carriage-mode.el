@@ -1808,6 +1808,8 @@ Important: only response/context shaping fields (no UI prefs, no secrets)."
                          carriage-mode-include-gptel-context)
    :CAR_CTX_VISIBLE (and (boundp 'carriage-mode-include-visible-context)
                          carriage-mode-include-visible-context)
+   :CAR_CTX_PLAIN  (and (boundp 'carriage-mode-include-plain-text-context)
+                        carriage-mode-include-plain-text-context)
    :CAR_CTX_PATCHED (and (boundp 'carriage-mode-include-patched-files)
                          carriage-mode-include-patched-files)
    :CAR_CTX_MAP (and (boundp 'carriage-mode-include-project-map)

@@ -541,6 +541,7 @@ Budgets are intentionally NOT included in the summary subset (they go to tooltip
          (ctx-doc (carriage-doc-state--bool (plist-get pl :CAR_CTX_DOC)))
          (ctx-gptel (carriage-doc-state--bool (plist-get pl :CAR_CTX_GPTEL)))
          (ctx-vis (carriage-doc-state--bool (plist-get pl :CAR_CTX_VISIBLE)))
+         (ctx-plain (carriage-doc-state--bool (plist-get pl :CAR_CTX_PLAIN)))
          (ctx-patched (carriage-doc-state--bool (plist-get pl :CAR_CTX_PATCHED)))
          (ctx-map (carriage-doc-state--bool (plist-get pl :CAR_CTX_MAP)))
          (scope (carriage-doc-state--as-symbol (plist-get pl :CAR_DOC_CTX_SCOPE)))
@@ -553,6 +554,7 @@ Budgets are intentionally NOT included in the summary subset (they go to tooltip
           :CAR_CTX_DOC ctx-doc
           :CAR_CTX_GPTEL ctx-gptel
           :CAR_CTX_VISIBLE ctx-vis
+          :CAR_CTX_PLAIN ctx-plain
           :CAR_CTX_PATCHED ctx-patched
           :CAR_CTX_MAP ctx-map
           :CAR_DOC_CTX_SCOPE scope
@@ -658,6 +660,7 @@ Important: use `concat' (not `format') to preserve icon text properties."
          (ctx-doc (plist-get imp :CAR_CTX_DOC))
          (ctx-gptel (plist-get imp :CAR_CTX_GPTEL))
          (ctx-vis (plist-get imp :CAR_CTX_VISIBLE))
+         (ctx-plain (plist-get imp :CAR_CTX_PLAIN))
          (ctx-patched (plist-get imp :CAR_CTX_PATCHED))
          (ctx-map (plist-get imp :CAR_CTX_MAP))
          (scope (plist-get imp :CAR_DOC_CTX_SCOPE))
@@ -689,6 +692,7 @@ Important: use `concat' (not `format') to preserve icon text properties."
          (ctx-b (string-join
                  (delq nil
                        (list
+                        (carriage-doc-state--ctx-flag-badge "Plain" ctx-plain 'plain)
                         (carriage-doc-state--ctx-flag-badge "Doc" ctx-doc 'files)
                         (carriage-doc-state--ctx-flag-badge "Gpt" ctx-gptel 'ctx)
                         (carriage-doc-state--ctx-flag-badge "Vis" ctx-vis 'visible)
@@ -750,6 +754,7 @@ Also shows total request cost when present (as the last badge):
          (ctx-doc (plist-get imp :CAR_CTX_DOC))
          (ctx-gptel (plist-get imp :CAR_CTX_GPTEL))
          (ctx-vis (plist-get imp :CAR_CTX_VISIBLE))
+         (ctx-plain (plist-get imp :CAR_CTX_PLAIN))
          (ctx-patched (plist-get imp :CAR_CTX_PATCHED))
          (ctx-map (plist-get imp :CAR_CTX_MAP))
          (scope (plist-get imp :CAR_DOC_CTX_SCOPE))
@@ -788,6 +793,7 @@ Also shows total request cost when present (as the last badge):
          (ctx-b (string-join
                  (delq nil
                        (list
+                        (carriage-doc-state--ctx-flag-badge "Plain" ctx-plain 'plain)
                         (carriage-doc-state--ctx-flag-badge "Doc" ctx-doc 'files)
                         (carriage-doc-state--ctx-flag-badge "Gpt" ctx-gptel 'ctx)
                         (carriage-doc-state--ctx-flag-badge "Vis" ctx-vis 'visible)
@@ -846,10 +852,11 @@ Also shows total request cost when present (as the last badge):
             (format "Intent: %s" (or intent "-"))
             (format "Suite: %s" (or suite "-"))
             (format "Model: %s:%s:%s" (or backend "-") (or provider "-") (or model "-"))
-            (format "Context sources: doc=%s gptel=%s visible=%s patched=%s map=%s"
+            (format "Context sources: doc=%s gptel=%s visible=%s plain=%s patched=%s map=%s"
                     (if ctx-doc "on" "off")
                     (if ctx-gptel "on" "off")
                     (if ctx-vis "on" "off")
+                    (if ctx-plain "on" "off")
                     (if ctx-patched "on" "off")
                     (if ctx-map "on" "off"))
             (when (or (not (string-empty-p scope)) (not (string-empty-p profile)))
@@ -1102,6 +1109,7 @@ Perf invariant:
          (ctx-gptel (carriage-doc-state--bool (plist-get imp :CAR_CTX_GPTEL)))
          (ctx-vis (carriage-doc-state--bool (plist-get imp :CAR_CTX_VISIBLE)))
          (ctx-patched (carriage-doc-state--bool (plist-get imp :CAR_CTX_PATCHED)))
+         (ctx-plain (carriage-doc-state--bool (plist-get imp :CAR_CTX_PLAIN)))
          (scope (carriage-doc-state--as-string (plist-get imp :CAR_DOC_CTX_SCOPE)))
          (profile (carriage-doc-state--as-string (plist-get imp :CAR_CTX_PROFILE)))
          (cost-u (and (eq kind 'CARRIAGE_FINGERPRINT)
@@ -1122,10 +1130,11 @@ Perf invariant:
             raw
             (format "Model: %s" (carriage-doc-state--llm-display-name backend provider model))
             cost-line
-            (format "Context: doc=%s gptel=%s visible=%s patched=%s"
+            (format "Context: doc=%s gptel=%s visible=%s plain=%s patched=%s"
                     (if ctx-doc "on" "off")
                     (if ctx-gptel "on" "off")
                     (if ctx-vis "on" "off")
+                    (if ctx-plain "on" "off")
                     (if ctx-patched "on" "off"))
             (when (or (not (string-empty-p scope))
                       (not (string-empty-p profile)))

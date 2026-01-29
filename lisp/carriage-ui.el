@@ -547,9 +547,10 @@ Disabling this eliminates periodic redisplay work during active phases."
     all
     context
     toggle-visible
+    toggle-plain
     toggle-ctx
-    toggle-patched
     toggle-map
+    toggle-patched
     toggle-files
     doc-scope-all
     doc-scope-last
@@ -639,6 +640,7 @@ Unknown symbols are ignored."
                          (const :tag "Patched files toggle" toggle-patched)
                          (const :tag "Project map toggle" toggle-map)
                          (const :tag "Visible-buffers toggle" toggle-visible)
+                         (const :tag "Plain-text toggle" toggle-plain)
                          (const :tag "Settings button" settings)))
   :set #'carriage-ui--set-modeline-blocks
   :group 'carriage-ui)
@@ -2005,6 +2007,19 @@ Important: the cache key includes label's text properties to ensure visual updat
                                             :v-adjust carriage-mode-icon-v-adjust
                                             :face fplist))
                     (t nil)))
+                  ('plain
+                   (cond
+                    ((fboundp 'all-the-icons-material)
+                     (all-the-icons-material "subject"
+                                             :height carriage-mode-icon-height
+                                             :v-adjust carriage-mode-icon-v-adjust
+                                             :face fplist))
+                    ((fboundp 'all-the-icons-octicon)
+                     (all-the-icons-octicon "file-text"
+                                            :height carriage-mode-icon-height
+                                            :v-adjust carriage-mode-icon-v-adjust
+                                            :face fplist))
+                    (t nil)))
                   (_ nil))))
           (when (stringp res)
             (puthash ckey res cache))
@@ -2588,6 +2603,16 @@ Performance:
                          #'carriage-toggle-include-visible-context
                          help 'visible)))
 
+(defun carriage-ui--ml-seg-toggle-plain ()
+  "Build Plain-text (outside typed blocks) context toggle."
+  (let* ((_ (require 'carriage-i18n nil t))
+         (help (if (and (featurep 'carriage-i18n) (fboundp 'carriage-i18n))
+                   (carriage-i18n :plain-tooltip)
+                 "Toggle including plain text (outside typed blocks)")))
+    (carriage-ui--toggle "Plain" 'carriage-mode-include-plain-text-context
+                         #'carriage-toggle-include-plain-text-context
+                         help 'plain)))
+
 (defun carriage-ui--ml-seg-doc-scope-all ()
   "Build button to select 'all doc-context scope."
   (let* ((enabled (if (boundp 'carriage-mode-include-doc-context)
@@ -2704,6 +2729,7 @@ If cache is empty/uninitialized, schedule an async refresh and show a placeholde
     ('toggle-patched (carriage-ui--ml-seg-toggle-patched))
     ('toggle-map     (carriage-ui--ml-seg-toggle-map))
     ('toggle-visible (carriage-ui--ml-seg-toggle-visible))
+    ('toggle-plain   (carriage-ui--ml-seg-toggle-plain))
     ('abort         (carriage-ui--ml-seg-abort))
     ('report        (carriage-ui--ml-seg-report))
     ('toggle-ctx    (carriage-ui--ml-seg-toggle-ctx))
@@ -5936,6 +5962,19 @@ Robustness:
                (bound-and-true-p carriage-mode-include-patched-files))
            (apply orig args)
          nil)))))
+
+(defun carriage-toggle-include-plain-text-context ()
+  "Toggle inclusion of plain text (outside typed blocks) in payload for this buffer.
+Updates context badge and refreshes the modeline."
+  (interactive)
+  (setq-local carriage-mode-include-plain-text-context
+              (not (and (boundp 'carriage-mode-include-plain-text-context)
+                        carriage-mode-include-plain-text-context)))
+  (when (fboundp 'carriage-ui--ctx-invalidate)
+    (ignore-errors (carriage-ui--ctx-invalidate)))
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (ignore-errors (carriage-ui--invalidate-ml-cache)))
+  (force-mode-line-update t))
 
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

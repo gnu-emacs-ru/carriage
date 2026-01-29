@@ -39,6 +39,7 @@
 (require 'carriage-doc-state nil t)
 (require 'carriage-doc-state-perf nil t)
 (require 'carriage-reasoning-fold nil t)
+(require 'carriage-typedblocks nil t)
 
 ;; -----------------------------------------------------------------------------
 ;; Reasoning fold UX:
@@ -390,6 +391,48 @@ Which block(s) are used depends on `carriage-doc-context-scope' (all vs last)."
   :type 'boolean :group 'carriage)
 (make-variable-buffer-local 'carriage-mode-include-visible-context)
 
+(defcustom carriage-mode-include-plain-text-context t
+  "When non-nil, include plain text (outside typed blocks) into the built payload.
+Default is t (include plain segments by default; toggle to focus only on typed blocks)."
+  :type 'boolean :group 'carriage)
+(make-variable-buffer-local 'carriage-mode-include-plain-text-context)
+
+;; -------------------------------------------------------------------
+;; Plain-text context toggle (buffer-local)
+;;;###autoload
+(defun carriage-toggle-include-plain-text-context ()
+  "Toggle inclusion of plain text (outside typed blocks) in payload for this buffer."
+  (interactive)
+  (setq-local carriage-mode-include-plain-text-context
+              (not carriage-mode-include-plain-text-context))
+  (message "Carriage: plain text %s"
+           (if carriage-mode-include-plain-text-context "ON" "OFF"))
+  ;; Invalidate ctx badge best-effort so modeline reflects the change soon.
+  (when (fboundp 'carriage-ui--ctx-invalidate)
+    (ignore-errors (carriage-ui--ctx-invalidate)))
+  (force-mode-line-update t))
+
+;; -------------------------------------------------------------------
+;; Org structure templates for typed blocks (quick insert: <q, <ans, <t, etc.)
+(defun carriage-mode--install-typedblocks-templates ()
+  "Install Org structure templates for Carriage typed blocks (idempotent)."
+  (when (derived-mode-p 'org-mode)
+    (require 'org)
+    (let* ((pairs '(("q"   . "question")
+                    ("ans" . "answer")
+                    ("t"   . "task")
+                    ("an"  . "analysis")
+                    ("pl"  . "plan")
+                    ("v"   . "verify")
+                    ("c"   . "commands")
+                    ("n"   . "notes")
+                    ("cx"  . "context")
+                    ("p"   . "patch"))))
+      (dolist (kv pairs)
+        (let ((key (car kv)) (blk (cdr kv)))
+          (unless (assoc key org-structure-template-alist)
+            (push (cons key blk) org-structure-template-alist)))))))
+
 (defcustom carriage-mode-include-project-map t
   "When non-nil, include a gitignore-aware repository file tree as a begin_map block in the request context.
 
@@ -670,6 +713,7 @@ Policy (requested UX):
   (setq-local mode-line-format (list carriage--mode-modeline-construct))
   (force-mode-line-update))
 
+
 (defun carriage-mode--ctx-window-change ()
   "Window configuration change hook to refresh [Ctx:N] when external context may change.
 
@@ -805,7 +849,8 @@ Policy:
       (carriage-mode--install-modeline))
     (carriage-mode--install-counters-hooks)
     (carriage-mode--setup-keys-and-panels)
-    (carriage-mode--fold-ui-enable)))
+    (carriage-mode--fold-ui-enable)
+    (ignore-errors (carriage-mode--install-typedblocks-templates))))
 
 (defun carriage-mode--enable ()
   "Enable Carriage mode in the current buffer (internal)."
@@ -1950,21 +1995,44 @@ This function is best-effort and must never signal."
   "Return raw payload text for SOURCE from BUFFER.
 
 SOURCE is either:
-- 'buffer  — entire buffer text
-- 'subtree — current Org subtree when in org-mode; otherwise entire buffer."
+- 'buffer  — typedblocks/v1-assembled payload for entire buffer when in org-mode; otherwise entire buffer text
+- 'subtree — typedblocks/v1-assembled payload for current Org subtree; otherwise entire buffer.
+
+Notes:
+- Uses carriage-typedblocks when available to build payload from allowed begin_<type> blocks
+  with \"In <type>:\" prefixes; plain segments are included only when
+  `carriage-mode-include-plain-text-context' is non-nil.
+- Falls back to raw buffer text when not in org-mode or when typedblocks is unavailable."
   (with-current-buffer buffer
     (let ((mode (buffer-local-value 'major-mode buffer)))
       (pcase source
         ('subtree
-         (if (eq mode 'org-mode)
+         (if (and (eq mode 'org-mode)
+                  (require 'carriage-typedblocks nil t))
              (save-excursion
                (require 'org)
                (ignore-errors (org-back-to-heading t))
-               (let ((beg (save-excursion (org-back-to-heading t) (point)))
-                     (end (save-excursion (org-end-of-subtree t t) (point))))
-                 (buffer-substring-no-properties beg end)))
+               (let* ((beg (save-excursion (org-back-to-heading t) (point)))
+                      (end (save-excursion (org-end-of-subtree t t) (point)))
+                      (sub (buffer-substring-no-properties beg end)))
+                 (with-temp-buffer
+                   (insert sub)
+                   ;; Preserve buffer-local toggles that affect payload assembly
+                   (let* ((plain (and (boundp 'carriage-mode-include-plain-text-context)
+                                      (buffer-local-value 'carriage-mode-include-plain-text-context buffer)))
+                          (cmds  (and (boundp 'carriage-typedblocks-include-commands)
+                                      (buffer-local-value 'carriage-typedblocks-include-commands buffer))))
+                     (when (boundp 'carriage-mode-include-plain-text-context)
+                       (setq-local carriage-mode-include-plain-text-context plain))
+                     (when (boundp 'carriage-typedblocks-include-commands)
+                       (setq-local carriage-typedblocks-include-commands cmds)))
+                   (carriage-typedblocks-build-payload (current-buffer)))))
            (buffer-substring-no-properties (point-min) (point-max))))
-        (_ (buffer-substring-no-properties (point-min) (point-max)))))))
+        (_
+         (if (and (eq mode 'org-mode)
+                  (require 'carriage-typedblocks nil t))
+             (carriage-typedblocks-build-payload buffer)
+           (buffer-substring-no-properties (point-min) (point-max))))))))
 
 (defun carriage--payload-strip-doc-state-and-markers (text)
   "Remove doc-state and per-send marker lines from TEXT.
@@ -2710,7 +2778,7 @@ Important UI rule:
                                carriage-git-ephemeral-prefix)
                           "carriage/tmp"))
                (wip (string= cur-br (or (and (boundp 'carriage-mode-wip-branch) carriage-mode-wip-branch)
-                                    "carriage/WIP")))
+                                        "carriage/WIP")))
                (eph (and (stringp cur-br) (string-prefix-p epref cur-br))))
           (when (and (or wip eph)
                      (not (and (boundp 'carriage-allow-apply-on-wip) carriage-allow-apply-on-wip)))

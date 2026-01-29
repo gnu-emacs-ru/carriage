@@ -59,6 +59,7 @@ Normative Requirements
 - REQ-ui-010: Applied patch block bodies (#+begin_patch … :applied t …) MUST NOT be included in outgoing LLM prompts; only patch headers/metadata may remain.
 - REQ-ui-011: When the “Patched/Patch” context source is enabled, Carriage MUST include the full contents of files referenced by #+begin_patch headers in the document as external context (subject to standard context limits and security policy).
 - REQ-ui-012: UI MUST provide a dedicated modeline toggle for the “Project Map” context source (default=enabled). When enabled, Carriage MUST include a `#+begin_map … #+end_map` block in the outgoing request context (subject to standard limits and security policy). The UI MUST NOT compute the map on redisplay; it is computed in the send pipeline and may be cached.
+- REQ-ui-013: UI MUST provide a modeline toggle for the “Plain text” source (text outside typed blocks) controlling its inclusion in the outgoing payload; default=enabled. The toggle MUST be buffer-local, exposed as a command, and available via API (/api/cmd toggle key=\"plain\").
 
 Invariants
 - Anchor: INV

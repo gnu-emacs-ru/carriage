@@ -628,6 +628,7 @@ Return an alist of (downcased-name . value)."
    "<span class='muted' style='margin-left:auto'>Toggles:</span>"
    "<button class='btn alt' id='tgCtx' title='Toggle GPT ctx'>Ctx</button>"
    "<button class='btn alt' id='tgFiles' title='Toggle doc ctx'>Files</button>"
+   "<button class='btn alt' id='tgPlain' title='Toggle plain text'>Plain</button>"
    "<button class='btn alt' id='tgVisible' title='Toggle visible ctx'>Visible</button>"
    "<button class='btn alt' id='tgPatched' title='Toggle patched files'>Patched</button>"
    "<button class='btn alt' id='tgProfile' title='Toggle profile P1/P3'>Profile</button>"
@@ -1200,6 +1201,9 @@ Accepts JSON body: {\"cmd\":\"...\",\"doc\":\"...\",...} and returns a structure
                           ((fboundp 'carriage-toggle-context-profile)
                            (carriage-toggle-context-profile) t)
                           (t nil))))
+                      ("plain"
+                       (when (fboundp 'carriage-toggle-include-plain-text-context)
+                         (carriage-toggle-include-plain-text-context) t))
                       (_ nil))))
             (if ok
                 (carriage-web--send-json proc "200 OK" (list :ok t))

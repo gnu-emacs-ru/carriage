@@ -1,0 +1,59 @@
+#+title: Typed Blocks v1 — Минимальный профиль сборки payload из документа
+#+author: Carriage Team <dev@carriage>
+#+language: en
+#+options: toc:2 num:t
+#+property: header-args :results silent
+
+Meta
+- Spec-ID: carriage/docs/typedblocks/v1
+- Version: v1.0
+- Status: draft
+- Normativity: RFC 2119 applies
+- Ownership: ui, transport
+- Prompt-ABI: v1
+- Pack-Profiles: P1-core
+- Precedence: Security > Errors > Formats > Interfaces > Algorithms > UI
+- RAG-Indexing: on
+- Fingerprint: <auto>
+
+Purpose
+- Minimal, deterministic сборка пользовательского payload из Org‑документа:
+  видим «суть» из begin_<type>…end_<type>, а «plain»‑контекст по умолчанию включён (его можно отключить флагом).
+
+Grammar (minimal)
+- begin_<type> / end_<type>, case-insensitive (^[ \t]*#\+begin_<type>\b …).
+- Content = between markers; markers themselves are excluded.
+- Optional header plist after begin_<type>: "(…)" — :nollm t excludes a block from payload.
+
+Allowed types (recognized)
+- task, notes, analysis, plan, verify, commands, context, patch, question, answer.
+
+Inclusion matrix (defaults)
+- Included: task, analysis, plan, verify, context, question, answer.
+- Included by flag: commands (carriage-typedblocks-include-commands t|nil, default t).
+- Excluded: notes.
+- Patch body: never included (treat as excluded regardless of flags).
+- Plain text (outside typed blocks): included by default; toggle via
+  carriage-mode-include-plain-text-context.
+
+Assembly rules
+- Preserve document order; interleave plain segments when enabled.
+- Each included segment is prefixed with: "In <type>:\n".
+  - Plain uses "In plain:".
+- If the assembled payload is empty and plain=off, do not fallback to full-buffer.
+  The transport SHOULD log a notice suggesting to wrap text in begin_question or begin_task.
+
+Security and limits
+- Applied patch bodies are never included (UI requirement).
+- :nollm t header excludes a block unconditionally.
+- Optional total bytes cap may be introduced later (carriage-typedblocks-max-bytes).
+
+Interfaces
+- carriage-typedblocks-build-payload BUFFER → string (assembled).
+- Flags:
+  - carriage-typedblocks-include-commands (default t)
+  - carriage-mode-include-plain-text-context (default t)
+
+Evolution
+- Future: strict registry/canon, incremental fold/index, richer block metadata handling.
+

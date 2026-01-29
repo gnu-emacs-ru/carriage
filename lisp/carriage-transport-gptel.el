@@ -279,6 +279,23 @@ aborting valid long generations."
       (carriage-log "Transport[gptel] WD: extend silence-timeout=%.3fs"
                     carriage-transport-gptel--wd-timeout))))
 
+(defun carriage-transport-gptel--wd-extended-timeout ()
+  "Return silence timeout (seconds) to use after first stream content arrives.
+
+Policy: keep only one user-facing knob (`carriage-transport-gptel-timeout-seconds`)
+as the startup timeout, but never let the silence timeout drop below 60s to avoid
+aborting valid long generations."
+  (max (float (or carriage-transport-gptel-timeout-seconds 10)) 60.0))
+
+(defun carriage-transport-gptel--wd-extend ()
+  "Extend watchdog timeout after first stream content arrives (idempotent)."
+  (unless carriage-transport-gptel--wd-extended
+    (setq carriage-transport-gptel--wd-extended t
+          carriage-transport-gptel--wd-timeout (carriage-transport-gptel--wd-extended-timeout))
+    (when carriage-transport-gptel-diagnostics
+      (carriage-log "Transport[gptel] WD: extend silence-timeout=%.3fs"
+                    carriage-transport-gptel--wd-timeout))))
+
 (defun carriage-transport-gptel--wd-start (origin-buffer id on-timeout)
   "Start watchdog for ORIGIN-BUFFER.
 

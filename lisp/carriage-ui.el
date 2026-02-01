@@ -1384,6 +1384,30 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                                                 :v-adjust carriage-mode-icon-v-adjust
                                                 :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face))))
                         (t nil)))
+                 ('plain (cond
+                          ((fboundp 'all-the-icons-material)
+                           (all-the-icons-material "subject"
+                                                   :height carriage-mode-icon-height
+                                                   :v-adjust (- carriage-mode-icon-v-adjust 0.12)
+                                                   :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face))))
+                          ((fboundp 'all-the-icons-octicon)
+                           (all-the-icons-octicon "file-text"
+                                                  :height carriage-mode-icon-height
+                                                  :v-adjust carriage-mode-icon-v-adjust
+                                                  :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-blue-face))))
+                          (t nil)))
+                 ('typed (cond
+                          ((fboundp 'all-the-icons-material)
+                           (all-the-icons-material "view_agenda"
+                                                   :height carriage-mode-icon-height
+                                                   :v-adjust (- carriage-mode-icon-v-adjust 0.12)
+                                                   :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face))))
+                          ((fboundp 'all-the-icons-octicon)
+                           (all-the-icons-octicon "list-unordered"
+                                                  :height carriage-mode-icon-height
+                                                  :v-adjust carriage-mode-icon-v-adjust
+                                                  :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face))))
+                          (t nil)))
                  ;; Additional icons for doc-state badges (scope/profile/injection)
                  ;; Keep generic 'scope for other UI bits, and add explicit icons for modeline All/Last scope.
                  ('scope-all (when (fboundp 'all-the-icons-material)

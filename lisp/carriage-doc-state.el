@@ -337,6 +337,8 @@ This function must never signal."
           (put :CAR_CTX_INJECTION (b 'carriage-mode-context-injection))
           (put :CAR_CTX_MAX_FILES (b 'carriage-mode-context-max-files))
           (put :CAR_CTX_MAX_BYTES (b 'carriage-mode-context-max-total-bytes))
+          ;; Typed Blocks guidance toggle
+          (put :CAR_TYPED (b 'carriage-mode-typedblocks-structure-hint))
 
           ;; UI/behaviour toggles
           (put :CAR_SHOW_DIFFS (b 'carriage-mode-show-diffs))

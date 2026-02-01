@@ -28,6 +28,11 @@
 ;; - <q overrides Org’s default "quote" template key. If you prefer to keep <q
 ;;   for quote, either do not call the installer or change the key below.
 ;;
+;; Guidance (Typed Blocks v1):
+;; - Use exact \"#+begin_<type>\" … \"#+end_<type>\" markers at the beginning of line.
+;; - Do not use asterisk headlines like \"*begin_<type>\" / \"*end_<type>\" — they are NOT typed blocks.
+;; - Do not insert spaces inside markers (\"#+begin_task\" is correct; \"#+ begin_task\" is incorrect).
+;;
 ;;; Code:
 
 (require 'org)

@@ -143,6 +143,9 @@ Prompt Guidance (LLM Output Contract)
 - Stability: stable
 - Pack-Priority: P0
 - PRM-reg-001: Fragments MUST avoid engine specifics; describe format-only rules.
+- PRM-reg-002: Fragments MUST include or reference the canonical Typed Blocks v1 prompt fragment
+  (see spec/typedblocks-v1.org Prompt guidance), enforcing:
+  allowed types, exact "#+begin_<type>/#+end_<type>" markers at BOL, and forbidding "*begin_*/*end_*" and "#+ begin_".
 - Forbidden-Phrases: engine commands, shell session excerpts.
 
 Testing and Conformance

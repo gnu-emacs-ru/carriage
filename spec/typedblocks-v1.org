@@ -44,12 +44,18 @@ Assembly rules
   The transport SHOULD log a notice suggesting to wrap text in begin_question or begin_task.
 
 Prompt guidance (for LLM)
-- Ask/Hybrid system prompts SHOULD instruct the model to wrap the key parts of the reply into Typed Blocks (v1):
-  begin_task, begin_analysis, begin_plan, begin_verify, begin_commands, begin_question, begin_answer, begin_context
-  (begin_notes is optional).
-- Only important information SHOULD go inside blocks so the tool can extract it even when plain text is disabled.
-- Keep prose minimal and avoid duplicating the same content both inside and outside the blocks.
-- Code intent remains unchanged (ONLY begin_patch blocks).
+- LLM Output Contract (Typed Blocks v1):
+  • Allowed types: task, analysis, plan, verify, commands, context, question, answer, notes.
+  • Syntax only: lines starting at BOL with exactly "#+begin_<type>" … "#+end_<type>" (case-insensitive type).
+  • Never include the begin_/end_ markers themselves in the payload (only the content between them is used).
+- Forbidden/negative examples (must NOT appear):
+  • "*begin_task …" / "*end_task" (headlines with asterisk are NOT typed blocks).
+  • "#+ begin_task …" (no spaces inside "#+begin_"; use exactly "#+begin_task").
+  • Any other variations like "#+BEGIN <type>", "#+begin <type>".
+- Guidance:
+  • Wrap only the key parts into begin_task/analysis/plan/verify/commands/context/question/answer/notes.
+  • Keep plain prose minimal and avoid duplicating the same content inside and outside blocks.
+  • Code intent remains unchanged (ONLY begin_patch blocks).
 
 Security and limits
 - Applied patch bodies are never included (UI requirement).

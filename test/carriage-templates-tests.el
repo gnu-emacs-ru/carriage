@@ -79,5 +79,22 @@
     (should (listp issues))
     (should (zerop (length issues)))))
 
+(ert-deftest carriage-templates/no-raw-asterisk-begin-in-renders ()
+  "Rendered built-in templates must not contain raw '*begin_' headlines."
+  (let* ((ctx (list :title "My Task"
+                    :today "2025-01-01"
+                    :project "demo"
+                    :origin-file "TODO.org"
+                    :origin-heading "My Task"
+                    :subtree "Subtree text"
+                    :ctx-profile 'p1
+                    :parent-context '()
+                    :inherited (list :begin-context nil :car-flags nil))))
+    (dolist (tid '(task/default task/decomposition task/implementation-step
+                                test/plan debug/protocol design/adr bug/incident))
+      (let* ((s (carriage-templates-render tid ctx)))
+        (should-not (string-match-p "^\\*begin_" s))
+        (should-not (string-match-p "\\s\\*begin_" s))))))
+
 (provide 'carriage-templates-tests)
 ;;; carriage-templates-tests.el ends here

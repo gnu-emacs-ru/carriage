@@ -184,5 +184,23 @@ header are skipped entirely."
             (buffer-substring-no-properties (point-min) (point-max)))
         assembled))))
 
+(defun carriage-typedblocks-prompt-fragment-v1 ()
+  "Return canonical prompt fragment for Org Typed Blocks v1.
+
+The fragment enforces:
+- Allowed types: task, analysis, plan, verify, commands, context, question, answer, notes.
+- Exact syntax: lines starting at column 0 with \"#+begin_<type>\" ... \"#+end_<type>\".
+- Forbidden variations: \"*begin_<type>\"/\"*end_<type>\" headlines; \"#+ begin_<type>\" with a space; any \"#+begin <type>\".
+- Guidance to keep plain prose minimal and avoid duplication."
+  (mapconcat
+   #'identity
+   '("You MUST structure key parts using Org Typed Blocks v1."
+     "- Allowed types: task, analysis, plan, verify, commands, context, question, answer, notes."
+     "- Syntax: lines starting at column 0: \"#+begin_<type>\" … \"#+end_<type>\"."
+     "- Forbidden: asterisk headlines like \"*begin_<type>\"/\"*end_<type>\"."
+     "- Forbidden: spaces inside the marker, e.g., use \"#+begin_task\", NOT \"#+ begin_task\"."
+     "- Keep plain prose minimal; avoid duplicating the same content inside and outside blocks.")
+   "\n"))
+
 (provide 'carriage-typedblocks)
 ;;; carriage-typedblocks.el ends here

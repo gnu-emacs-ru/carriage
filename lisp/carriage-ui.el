@@ -282,15 +282,18 @@ May scan buffer text; must not be called from redisplay."
     (let ((sum 0)
           (known 0)
           (unknown 0)
-          (case-fold-search t))
+          (case-fold-search t)
+          (results-found 0))
       (save-excursion
+        ;; Primary source: CARRIAGE_RESULT lines
         (goto-char (point-min))
-        (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:[ \t]*\\(.*\\)$" nil t)
+        (while (re-search-forward "^[ \t]*#\\+CARRIAGE_RESULT:[ \t]*\\(.*\\)$" nil t)
           (let* ((s (match-string 1))
                  (obj (condition-case _e
                           (car (read-from-string s))
                         (error nil)))
                  (v (and (listp obj) (plist-get obj :CAR_COST_TOTAL_U))))
+            (setq results-found (1+ results-found))
             (cond
              ((integerp v)
               (setq sum (+ sum v))
@@ -299,6 +302,23 @@ May scan buffer text; must not be called from redisplay."
               ;; Explicit nil (unknown cost)
               (setq unknown (1+ unknown)))
              (t nil)))))
+      (when (<= results-found 0)
+        ;; Fallback: legacy fingerprints
+        (save-excursion
+          (goto-char (point-min))
+          (while (re-search-forward "^[ \t]*#\\+CARRIAGE_FINGERPRINT:[ \t]*\\(.*\\)$" nil t)
+            (let* ((s (match-string 1))
+                   (obj (condition-case _e
+                            (car (read-from-string s))
+                          (error nil)))
+                   (v (and (listp obj) (plist-get obj :CAR_COST_TOTAL_U))))
+              (cond
+               ((integerp v)
+                (setq sum (+ sum v))
+                (setq known (1+ known)))
+               ((and (listp obj) (plist-member obj :CAR_COST_TOTAL_U))
+                (setq unknown (1+ unknown)))
+               (t nil))))))
       (setq carriage-ui--doc-cost-cache
             (list :known-total-u sum
                   :known-count known

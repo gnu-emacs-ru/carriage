@@ -828,7 +828,44 @@ Also shows total request cost when present (as the last badge):
                                      "")))
                          (concat ic gap (carriage-doc-state--as-string profile)))
                        'shadow))))
-    (string-join (delq nil (list intent-b suite-b model-b ctx-b scope-b profile-b cost-b)) " ")))
+    (string-join (delq nil (list intent-b suite-b model-b ctx-b scope-b profile-b)) " ")))
+
+(defun carriage-doc-state--summary-string-result (pl)
+  "Return compact summary string for CARRIAGE_RESULT plist PL.
+
+Shows: model, tokens (in/out when present) and total cost when present."
+  (let* ((backend (plist-get pl :CAR_BACKEND))
+         (provider (plist-get pl :CAR_PROVIDER))
+         (model (plist-get pl :CAR_MODEL))
+         (tin (plist-get pl :CAR_TOKENS_IN))
+         (tout (plist-get pl :CAR_TOKENS_OUT))
+         (total-u (plist-get pl :CAR_COST_TOTAL_U))
+         (known (plist-get pl :CAR_COST_KNOWN))
+         (model-ic (carriage-doc-state--ui-icon 'model nil))
+         (receipt-ic (carriage-doc-state--ui-icon 'report nil))
+         (model-b (carriage-doc-state--badge
+                   (let* ((ic (or model-ic ""))
+                          (gap (if (and (stringp ic) (> (length ic) 0))
+                                   (carriage-doc-state--icon-gap)
+                                 "")))
+                     (concat ic gap (carriage-doc-state--llm-display-name backend provider model)))
+                   'mode-line-emphasis))
+         (tok-b (let ((parts (delq nil
+                                   (list (and (integerp tin) (format "in:%d" tin))
+                                         (and (integerp tout) (format "out:%d" tout))))))
+                  (when parts
+                    (carriage-doc-state--badge (mapconcat #'identity parts " ") 'shadow))))
+         (cost-b (cond
+                  ((integerp total-u)
+                   (let* ((ic (or receipt-ic "")) (gap (if (and (stringp ic) (> (length ic) 0))
+                                                           (carriage-doc-state--icon-gap) "")))
+                     (carriage-doc-state--badge
+                      (concat ic gap (carriage-doc-state--format-money-suffix total-u))
+                      'shadow)))
+                  ((and (plist-member pl :CAR_COST_TOTAL_U) (not (integerp total-u)))
+                   (carriage-doc-state--badge "—" 'shadow))
+                  (t nil))))
+    (string-join (delq nil (list model-b tok-b cost-b)) " ")))
 
 (defun carriage-doc-state--tooltip-string (pl)
   "Return detailed tooltip text for CARRIAGE_STATE plist PL (includes budgets)."
@@ -921,6 +958,7 @@ Compatibility: mirrors overlay into `carriage-doc-state--overlay' for legacy tes
 
 (defvar-local carriage-doc-state--fold-state-ov nil)
 (defvar-local carriage-doc-state--fold-fp-ovs nil)
+(defvar-local carriage-doc-state--fold-result-ovs nil)
 (defvar-local carriage-doc-state--fold--active-fp-ov nil
   "Fingerprint overlay currently revealed due to point being inside (perf cache; O(1) post-command).")
 
@@ -1114,17 +1152,34 @@ Perf invariant:
          (ctx-plain (carriage-doc-state--bool (plist-get imp :CAR_CTX_PLAIN)))
          (scope (carriage-doc-state--as-string (plist-get imp :CAR_DOC_CTX_SCOPE)))
          (profile (carriage-doc-state--as-string (plist-get imp :CAR_CTX_PROFILE)))
-         (cost-u (and (eq kind 'CARRIAGE_FINGERPRINT)
-                      (listp pl0)
-                      (plist-get pl0 :CAR_COST_TOTAL_U)))
+         (cost-u-fp (and (eq kind 'CARRIAGE_FINGERPRINT)
+                         (listp pl0)
+                         (plist-get pl0 :CAR_COST_TOTAL_U)))
+         (cost-u-res (and (eq kind 'CARRIAGE_RESULT)
+                          (listp pl0)
+                          (plist-get pl0 :CAR_COST_TOTAL_U)))
+         (tokens-in (and (eq kind 'CARRIAGE_RESULT) (plist-get pl0 :CAR_TOKENS_IN)))
+         (tokens-out (and (eq kind 'CARRIAGE_RESULT) (plist-get pl0 :CAR_TOKENS_OUT)))
          (cost-line
-          (when (eq kind 'CARRIAGE_FINGERPRINT)
-            (cond
-             ((integerp cost-u)
-              (format "Cost: %s" (carriage-doc-state--format-money-suffix cost-u)))
-             ((and (listp pl0) (plist-member pl0 :CAR_COST_TOTAL_U))
-              "Cost: —")
-             (t nil)))))
+          (pcase kind
+            ('CARRIAGE_FINGERPRINT
+             (cond
+              ((integerp cost-u-fp)
+               (format "Cost: %s" (carriage-doc-state--format-money-suffix cost-u-fp)))
+              ((and (listp pl0) (plist-member pl0 :CAR_COST_TOTAL_U))
+               "Cost: —")
+              (_ nil)))
+            ('CARRIAGE_RESULT
+             (cond
+              ((integerp cost-u-res)
+               (format "Cost: %s (tokens in=%s out=%s)"
+                       (carriage-doc-state--format-money-suffix cost-u-res)
+                       (or tokens-in "—") (or tokens-out "—")))
+              ((and (listp pl0) (plist-member pl0 :CAR_COST_TOTAL_U))
+               (format "Cost: — (tokens in=%s out=%s)"
+                       (or tokens-in "—") (or tokens-out "—")))
+              (_ nil)))
+            (_ nil))))
     (string-join
      (delq nil
            (list
@@ -1185,6 +1240,22 @@ Supported canonical format (no backwards compatibility): `#+CARRIAGE_FINGERPRINT
         (if (and (integerp mx) (> mx 0) (> (length res) mx))
             (cl-subseq res (- (length res) mx))
           res)))))
+
+(defun carriage-doc-state--fold--scan-result-lines ()
+  "Return list of plists describing all result lines.
+Supported canonical format: `#+CARRIAGE_RESULT: <sexp>`."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((rx "^[ \t]*#\\+CARRIAGE_RESULT:\\s-*\\(.*\\)$")
+          (acc nil))
+      (while (re-search-forward rx nil t)
+        (let* ((beg (line-beginning-position))
+               (end (line-end-position))
+               (raw (buffer-substring-no-properties beg end))
+               (sexp (match-string-no-properties 1))
+               (pl (carriage-doc-state--fold--parse-sexp sexp)))
+          (push (list :beg beg :end end :raw raw :pl pl) acc)))
+      (nreverse acc))))
 
 (defun carriage-doc-state--fold--ov-upsert (ov beg end summary tooltip)
   (unless (overlayp ov)
@@ -1280,15 +1351,44 @@ Perf:
                               ov (plist-get fp :beg) (plist-get fp :end)
                               summary tooltip)))))
 
+          ;; Results (many): overlay summary for CARRIAGE_RESULT lines
+          (let* ((res (carriage-doc-state--fold--scan-result-lines))
+                 (wanted-r (length res))
+                 (existing-r (cl-remove-if-not #'overlayp carriage-doc-state--fold-result-ovs)))
+            ;; Trim extra result overlays.
+            (when (> (length existing-r) wanted-r)
+              (dolist (ov (nthcdr wanted-r existing-r))
+                (when (overlayp ov) (delete-overlay ov)))
+              (setq existing-r (cl-subseq existing-r 0 wanted-r)))
+            ;; Extend list.
+            (while (< (length existing-r) wanted-r)
+              (push nil existing-r))
+            (setq existing-r (nreverse existing-r))
+            ;; Upsert/move each result overlay.
+            (setq carriage-doc-state--fold-result-ovs
+                  (cl-loop for r in res
+                           for ov in existing-r
+                           collect
+                           (let* ((pl (plist-get r :pl))
+                                  (raw (plist-get r :raw))
+                                  (summary (carriage-doc-state--summary-string-result pl))
+                                  (tooltip (carriage-doc-state--fold--tooltip raw pl 'CARRIAGE_RESULT)))
+                             (carriage-doc-state--fold--ov-upsert
+                              ov (plist-get r :beg) (plist-get r :end)
+                              summary tooltip)))))
+
           ;; Record scan outcome for fast-path early return.
           (setq carriage-doc-state--fold--last-scan-tick tick)
           (setq carriage-doc-state--fold--last-scan-env env)
           (setq carriage-doc-state--fold--last-scan-had-lines
-                (if (or st (and (listp fps) (> (length fps) 0))) t nil)))))
+                (if (or st
+                        (and (listp fps) (> (length fps) 0))
+                        (let ((r (carriage-doc-state--fold--scan-result-lines))) (and r (> (length r) 0))))
+                    t nil))))))
 
-    ;; Critical: restore folded/revealed according to current point after refresh.
-    (carriage-doc-state--fold--apply-for-point)
-    t))
+  ;; Critical: restore folded/revealed according to current point after refresh.
+  (carriage-doc-state--fold--apply-for-point)
+  t))
 
 (defun carriage-doc-state--fold--schedule-refresh (beg end _len)
   "Coalesced schedule of fold overlay refresh (perf critical).

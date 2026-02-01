@@ -29,6 +29,7 @@
 (require 'carriage-logging)
 (require 'carriage-ui)
 (require 'carriage-transport)
+(require 'carriage-typedblocks)
 
 ;; Avoid hard dependency cycle with carriage-mode at load time.
 (declare-function carriage-register-abort-handler "carriage-mode" (fn))
@@ -418,6 +419,72 @@ It MUST be idempotent."
             ('done (carriage-stream-finalize nil t))
             (_     (carriage-stream-finalize t nil))))
         (carriage-transport-complete (memq final '(abort error timeout)) origin-buffer)
+        ;; Record result line with usage/model/cost for doc-cost aggregation
+        (ignore-errors
+          (let* ((mdl-raw (and (listp info) (plist-get info :model)))
+                 (model-str (and mdl-raw (format "%s" mdl-raw)))
+                 ;; Robust token extraction: consider multiple possible INFO keys and sanitize to integers
+                 (raw-out (and (listp info)
+                               (or (plist-get info :output-tokens)
+                                   (plist-get info :completion-tokens)
+                                   (plist-get info :tokens-out)
+                                   (let ((u (plist-get info :usage)))
+                                     (and (listp u)
+                                          (or (plist-get u :output-tokens)
+                                              (plist-get u :completion-tokens)))))))
+                 (raw-in  (and (listp info)
+                               (or (plist-get info :input-tokens)
+                                   (plist-get info :prompt-tokens)
+                                   (plist-get info :tokens-in)
+                                   (let ((u (plist-get info :usage)))
+                                     (and (listp u)
+                                          (or (plist-get u :input-tokens)
+                                              (plist-get u :prompt-tokens)))))))
+                 (out (and (numberp raw-out) (>= raw-out 0) (truncate raw-out)))
+                 (in  (and (numberp raw-in)  (>= raw-in 0)  (truncate raw-in)))
+                 (usage (let (u)
+                          (when in  (setq u (plist-put u :tokens-in in)))
+                          (when out (setq u (plist-put u :tokens-out out)))
+                          u))
+                 (status (pcase final ('done 'done) ('abort 'abort) ('timeout 'timeout) (_ 'error)))
+                 (cost nil))
+            ;; Best-effort pricing (no network). If pricing is unavailable, cost remains nil.
+            (when (and (require 'carriage-pricing nil t)
+                       (stringp (or model-str "")))
+              (let* ((canon (concat "gptel:" model-str))
+                     (table (carriage-pricing-load-table (with-current-buffer origin-buffer default-directory))))
+                (setq cost (carriage-pricing-compute canon usage table))))
+            ;; Insert #+CARRIAGE_RESULT near end of buffer
+            (with-current-buffer origin-buffer
+              (save-excursion
+                (goto-char (point-max))
+                (unless (bolp) (insert "\n"))
+                (let* ((pl (list
+                            :CAR_REQ_ID id
+                            :CAR_STATUS status
+                            :CAR_BACKEND 'gptel
+                            :CAR_PROVIDER nil
+                            :CAR_MODEL (or model-str "")
+                            :CAR_TOKENS_IN (plist-get usage :tokens-in)
+                            :CAR_TOKENS_OUT (plist-get usage :tokens-out)
+                            :CAR_COST_IN_U (and cost (plist-get cost :cost-in-u))
+                            :CAR_COST_OUT_U (and cost (plist-get cost :cost-out-u))
+                            :CAR_COST_AUDIO_IN_U (and cost (plist-get cost :cost-audio-in-u))
+                            :CAR_COST_AUDIO_OUT_U (and cost (plist-get cost :cost-audio-out-u))
+                            :CAR_COST_TOTAL_U (and cost (plist-get cost :cost-total-u))
+                            :CAR_COST_KNOWN (and cost (plist-get cost :known))
+                            :CAR_TS (float-time))))
+                  (insert (format "#+CARRIAGE_RESULT: %S\n" pl)))))
+            ;; Trigger doc-cost refresh (debounced)
+            (when (fboundp 'carriage-ui-doc-cost-schedule-refresh)
+              (ignore-errors
+                (with-current-buffer origin-buffer
+                  (carriage-ui-doc-cost-schedule-refresh 0.05))))
+            ;; Refresh doc-state fold overlays (best-effort; show CARRIAGE_RESULT nicely)
+            (when (fboundp 'carriage-doc-state-summary-refresh)
+              (ignore-errors
+                (with-current-buffer origin-buffer
+                  (carriage-doc-state-summary-refresh origin-buffer)))))))
         t))))
 
 ;; ---------------------------------------------------------------------
@@ -575,12 +642,21 @@ This implementation is minimal and callback-driven, with watchdog + cleanup."
               ;; Let gptel sanitize if needed; keep this adapter minimal.
               (ignore gptel-backend)
               (ignore gptel-model)
-              (gptel-request
-                  prompt
-                :callback cb
-                :buffer buffer
-                :stream t
-                :system system))
+              (let* ((sys-frag (and (fboundp 'carriage-typedblocks-prompt-fragment-v1)
+                                    (carriage-typedblocks-prompt-fragment-v1)))
+                     (system* (cond
+                               ((and (stringp system) (> (length system) 0))
+                                (if sys-frag (concat sys-frag "\n\n" system) system))
+                               (sys-frag sys-frag)
+                               (t system))))
+                (when (and sys-frag (not (equal system* system)))
+                  (carriage-log "Transport[gptel] inject typedblocks-v1 fragment into :system"))
+                (gptel-request
+                 prompt
+                 :callback cb
+                 :buffer buffer
+                 :stream t
+                 :system system*)))
           (error
            ;; Request could not be started at all.
            (carriage-log "Transport[gptel] START-ERROR id=%s err=%s" id (error-message-string err))

@@ -372,19 +372,6 @@ Behavior:
     (when auto
       (carriage-task--start-analysis (current-buffer)))))
 
-;; Keys integration (via keyspec when available)
-(with-eval-after-load 'carriage-keyspec
-  (when (fboundp 'carriage-keys-register-actions)
-    (ignore-errors
-      (carriage-keys-register-actions
-       '((:id task-new
-              :label "Create task doc"
-              :cmd carriage-create-task-doc
-              :keys ("n")
-              :section tools
-              :contexts (carriage org global)
-              :desc-key :task-new)))))
-  (when (fboundp 'carriage-keys-apply-known-keymaps) (ignore-errors (carriage-keys-apply-known-keymaps))))
 
 ;; Branching via templates (v1)
 

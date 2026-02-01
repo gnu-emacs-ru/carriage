@@ -91,6 +91,7 @@
 (autoload 'carriage-swarm-hub-start "carriage-swarm-supervisor" nil t)
 (autoload 'carriage-swarm-hub-stop "carriage-swarm-supervisor" nil t)
 (autoload 'carriage-swarm-open-dashboard "carriage-swarm-supervisor" nil t)
+(autoload 'carriage-create-task-doc "carriage-task" nil t)
 
 ;; ---------------------------------------------------------------------------
 ;; Declarations (byte-compile hygiene)
@@ -329,6 +330,7 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
     (:key "T" :cmd carriage-show-traffic)
     (:key "e" :cmd carriage-open-buffer)
     (:key "f" :cmd carriage-open-file-chat)
+    (:key "n" :cmd carriage-create-task-doc)
 
     ;; Insert/Assist
     (:key "x p" :cmd carriage-insert-plan-section)

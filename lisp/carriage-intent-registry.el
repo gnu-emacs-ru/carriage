@@ -22,6 +22,20 @@ Override takes precedence over the registry defaults."
   :type '(alist :key-type symbol :value-type (choice string function))
   :group 'carriage-prompts)
 
+(defcustom carriage-intent-order '(Ask Code Hybrid MultiPatch)
+  "Preferred order of intents for UI selectors."
+  :type '(repeat symbol)
+  :group 'carriage-prompts)
+
+(defcustom carriage-intent-icons
+  '((Ask . "❓")
+    (Code . "🧩")
+    (Hybrid . "🔀")
+    (MultiPatch . "⧉"))
+  "Alist mapping intent symbol to an icon string for UI."
+  :type '(alist :key-type symbol :value-type string)
+  :group 'carriage-prompts)
+
 (defvar carriage--intent-fragments (make-hash-table :test 'eq)
   "Registry of intent fragments: INTENT → FRAG (STRING or FUNCTION (CTX → STRING)).")
 
@@ -87,6 +101,23 @@ Do NOT include any prose outside blocks. No reasoning, no commentary.
              "  • task — concise statement of goals; analysis — key considerations/constraints;\n"
              "  • plan — step-by-step plan; verify — checks/criteria; commands — run/build/test commands;\n"
              "  • question/answer — clarifications; context — links/paths/artifacts; notes — auxiliary (optional).\n")))
+         (strict
+          (concat
+           "\n"
+           "Typed Blocks — strict format:\n"
+           "- Always use explicit Org typed blocks with '#+begin_<type>' ... '#+end_<type>' markers. Do not emulate blocks with headings, drawers, or Markdown fences.\n"
+           "- Commands (build/test):\n"
+           "  • Prefer one command per src block; you MAY include multiple commands in a single src block when a single consolidated output is desired.\n"
+           "  • Each src block MUST include the attribute: :results output\n"
+           "  • Start by changing directory to the repository root, then run the command (e.g.):\n"
+           "      #+begin_src sh :results output\n"
+           "      cd $(git rev-parse --show-toplevel 2>/dev/null || pwd)\n"
+           "      make test\n"
+           "      #+end_src\n"
+           "- begin_context:\n"
+           "  • Strict list of file paths — exactly one path per line.\n"
+           "  • Paths are absolute or relative to the repository root.\n"
+           "  • No comments, labels or annotations — only paths.\n"))
          (base
           (concat
            (carriage--intent-frag-org-formatting ctx)
@@ -94,7 +125,7 @@ Do NOT include any prose outside blocks. No reasoning, no commentary.
            "You MAY include brief prose, but the tool will extract and apply ONLY Org begin_patch blocks.\n"
            "Default behavior: reply with Org prose only. Output #+begin_patch blocks ONLY when the user explicitly asks to modify files (e.g., \"Implement\", \"Fix\", \"Apply changes\", \"Реализуй\", \"Вноси правки\").\n"
            "Keep prose minimal and place it before or after the blocks. Do not insert text inside blocks.\n")))
-    (concat base (or typed-hint ""))))
+    (concat base (or typed-hint "") strict)))
 
 (defun carriage--intent-frag-ask (ctx)
   "Default fragment for Intent=Ask."
@@ -116,13 +147,54 @@ Do NOT include any prose outside blocks. No reasoning, no commentary.
           (concat
            (carriage--intent-frag-org-formatting ctx)
            "\n"
-           "Do NOT produce any begin_patch blocks. Provide a concise answer; use typed blocks for key information.")))
-    (concat base (or typed-hint ""))))
+           "Do NOT produce any begin_patch blocks. Provide a concise answer; use typed blocks for key information."))
+         (strict
+          (concat
+           "\n"
+           "Typed Blocks — strict format:\n"
+           "- Always use explicit Org typed blocks with '#+begin_<type>' ... '#+end_<type>' markers. Do not emulate blocks with headings, links, drawers, or Markdown fences.\n"
+           "- Commands (build/test):\n"
+           "  • Prefer one command per src block; you MAY include multiple commands in a single src block when a single consolidated output is desired.\n"
+           "  • Each src block MUST include the attribute: :results output\n"
+           "  • Start by changing directory to the repository root, then run the command (e.g.):\n"
+           "      #+begin_src sh :results output\n"
+           "      cd $(git rev-parse --show-toplevel 2>/dev/null || pwd)\n"
+           "      make test\n"
+           "      #+end_src\n"
+           "- begin_context:\n"
+           "  • Strict list of file paths — exactly one path per line.\n"
+           "  • Paths are absolute or relative to the repository root.\n"
+           "  • No comments, labels or annotations — only paths.\n")))
+    (concat base (or typed-hint "") strict)))
+
+;; New intent: MultiPatch
+(defun carriage--intent-frag-multipatch (_ctx)
+  "Default fragment for Intent=MultiPatch."
+  (concat
+   (carriage--intent-frag-org-formatting nil)
+   "Answer ONLY with Org begin_patch blocks first. Do NOT include any prose outside blocks.\n"
+   "- Use exactly one block per operation.\n"
+   "- Paths must be RELATIVE to project root; no absolute paths, no \"..\" segments.\n"
+   "- Allowed operations depend on Suite. Do not mention formats that are not allowed by the Suite.\n"
+   "\n"
+   "After printing ALL required begin_patch blocks, decide whether further work is needed:\n"
+   "- If more iterations are required, append in this exact order:\n"
+   "  1) A #+begin_task block describing the next iteration scope, concrete steps and acceptance criteria.\n"
+   "  2) A #+begin_context block with a strict list of file paths (one per line; absolute or repo-root-relative; no comments/labels).\n"
+   "- If the work is fully complete and no further iterations are needed, output a single word on a separate line: ГОТОВО\n"
+   "\n"
+   "Typed Blocks — strict format:\n"
+   "- Always use explicit Org typed blocks with '#+begin_<type>' ... '#+end_<type>' markers. Do not emulate blocks with headings, links, drawers, or Markdown fences.\n"
+   "- begin_context:\n"
+   "  • Strict list of file paths — exactly one path per line.\n"
+   "  • Paths are absolute or relative to the repository root.\n"
+   "  • No comments, labels or annotations — only paths.\n"))
 
 ;; Register defaults
 (carriage-intent-register 'Code   #'carriage--intent-frag-code)
 (carriage-intent-register 'Hybrid #'carriage--intent-frag-hybrid)
 (carriage-intent-register 'Ask    #'carriage--intent-frag-ask)
+(carriage-intent-register 'MultiPatch #'carriage--intent-frag-multipatch)
 
 (provide 'carriage-intent-registry)
 ;;; carriage-intent-registry.el ends here

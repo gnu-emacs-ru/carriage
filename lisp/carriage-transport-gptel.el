@@ -485,7 +485,7 @@ It MUST be idempotent."
               (ignore-errors
                 (with-current-buffer origin-buffer
                   (carriage-doc-state-summary-refresh origin-buffer)))))))
-        t))))
+        t)))
 
 ;; ---------------------------------------------------------------------
 ;; Callback

@@ -1388,7 +1388,7 @@ Perf:
 
   ;; Critical: restore folded/revealed according to current point after refresh.
   (carriage-doc-state--fold--apply-for-point)
-  t))
+  t)
 
 (defun carriage-doc-state--fold--schedule-refresh (beg end _len)
   "Coalesced schedule of fold overlay refresh (perf critical).

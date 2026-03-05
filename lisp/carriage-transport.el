@@ -135,12 +135,13 @@ end of the batch and record the target buffer in `carriage-traffic-batch--flushe
         (let* ((root (with-current-buffer origin-buffer default-directory))
                (path (if (file-name-absolute-p carriage-traffic-log-file)
                          carriage-traffic-log-file
-                       (expand-name carriage-traffic-log-file root))))
+                       (expand-file-name carriage-traffic-log-file root))))
           (make-directory (file-name-directory path) t)
-          (with-temp-buffer
-            (insert text)
-            (unless (string-suffix-p "\n" text) (insert "\n"))
-            (append-to-file (point-min) (point-max) path)))
+          (let ((coding-system-for-write 'utf-8-unix))
+            (with-temp-buffer
+              (insert text)
+              (unless (string-suffix-p "\n" text) (insert "\n"))
+              (append-to-file (point-min) (point-max) path))))
       (error nil))))
 
 (defun carriage-traffic-log-local (origin-buffer type fmt &rest args)
@@ -417,8 +418,14 @@ Strips:
                 (insert summary)
                 (goto-char (min (point-max) (+ beg-line-beg (length summary)))))
             ;; not applied → continue scanning from next line to avoid infinite loops
-            (goto-char (min (point-max) (1+ (line-end-position)))))))))
-  (buffer-substring-no-properties (point-min) (point-max)))
+            (goto-char (min (point-max) (1+ (line-end-position)))))))
+      ;; Also strip any accidentally pasted transport diagnostic lines to avoid polluting prompts.
+      ;; Example: \"Transport[gptel] …\" lines copied from *carriage-log*/*carriage-traffic*.
+      (goto-char (point-min))
+      (while (re-search-forward "^[ \t]*Transport\\[[^]\n]+\\].*$" nil t)
+        (delete-region (line-beginning-position)
+                       (min (point-max) (1+ (line-end-position))))))
+    (buffer-substring-no-properties (point-min) (point-max))))
 
 
 (provide 'carriage-transport)

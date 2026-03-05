@@ -107,16 +107,85 @@ Default is nil to avoid duplication with FINGERPRINT and reduce UI drift."
       (nreverse keys))))
 
 (defun carriage-transport-gptel--snip (obj &optional max)
-  "Return a clipped printed representation of OBJ."
-  (let* ((max (or max 600))
+  "Return a clipped printed representation of OBJ (safe).
+Ensures multibyte escaping to avoid inserting raw byte-code into logs."
+  (let* ((print-escape-multibyte t)
+         (max (or max 600))
          (s (condition-case _e
                 (cond
-                 ((stringp obj) obj)
+                 ;; Always print strings via prin1 with multibyte escaping to avoid
+                 ;; embedding raw bytes into logs; also coerce to safe UTF-8 first.
+                 ((stringp obj)
+                  (prin1-to-string (carriage-transport-gptel--safe-utf8 obj)))
                  (t (prin1-to-string obj)))
               (error (format "%S" obj)))))
     (if (> (length s) max)
         (concat (substring s 0 max) "…")
       s)))
+
+(defun carriage-transport-gptel--redact (obj &optional max)
+  "Return a safe, redacted single-line preview for OBJ suitable for logs.
+- Functions/closures/byte-code are replaced with \"#<fn>\".
+- Large strings are truncated; multibyte is escaped.
+- Plists/alists/vectors are walked shallowly."
+  (let ((print-escape-multibyte t)
+        (max (or max 300)))
+    (cl-labels
+        ((safe-val (v)
+           (cond
+            ;; redact any function/closure/subr/byte-code
+            ((functionp v) "#<fn>")
+            ((and (symbolp v) (fboundp v)) "#<fn>")
+            ((and (fboundp 'byte-code-function-p) (byte-code-function-p v)) "#<fn>")
+            ;; strings: trim and escape
+            ((stringp v)
+             (let ((s v))
+               (when (> (length s) max)
+                 (setq s (concat (substring s 0 max) "…")))
+               (with-temp-buffer
+                 (let ((print-escape-multibyte t))
+                   (prin1 s (current-buffer))
+                   (buffer-substring-no-properties (point-min) (point-max))))))
+            ;; numbers, symbols, booleans
+            ((or (numberp v) (symbolp v) (null v) (eq v t)) (format "%S" v))
+            ;; vectors: shallow map
+            ((vectorp v)
+             (format "[%s]" (mapconcat (lambda (x) (safe-val x))
+                                       (append v nil) " ")))
+            ;; cons/plist/alist (shallow)
+            ((consp v)
+             (let* ((is-plist (keywordp (car v)))
+                    (pairs
+                     (if is-plist
+                         (cl-loop for (k val) on v by #'cddr
+                                  collect (cons k (safe-val val)))
+                       ;; alist-ish
+                       (cl-loop for it in v
+                                for k = (car-safe it)
+                                for val = (cdr-safe it)
+                                collect (cons k (safe-val val))))))
+               (if is-plist
+                   (format ":%s" (mapconcat (lambda (kv)
+                                              (format "%s=%s" (car kv) (cdr kv)))
+                                            pairs " "))
+                 (format "{%s}" (mapconcat (lambda (kv)
+                                             (format "%s=%s" (car kv) (cdr kv)))
+                                           pairs " ")))))
+            ;; fallback
+            (t (carriage-transport-gptel--snip v max)))))
+      (safe-val obj))))
+
+(defun carriage-transport-gptel--safe-utf8 (s)
+  "Return S coerced to a safe UTF-8 string, replacing invalid bytes.
+When S is not a string, return it unchanged."
+  (if (stringp s)
+      (let* ((enc (condition-case _e
+                      (encode-coding-string s 'utf-8 'noerror)
+                    (error s))))
+        (condition-case _e
+            (decode-coding-string enc 'utf-8 'noerror)
+          (error s)))
+    s))
 
 (defun carriage-transport-gptel--response-kind (resp)
   "Return short kind name for RESP."
@@ -416,10 +485,11 @@ It MUST be idempotent."
                    (memq final '(abort error timeout)))
           (carriage-log "Transport[gptel] LAST id=%s resp=%s" id
                         (carriage-transport-gptel--snip resp 600))
+          ;; Log only keys and a redacted summary for info to avoid raw byte-code in logs
           (carriage-log "Transport[gptel] LAST id=%s info-keys=%S" id
                         (carriage-transport-gptel--plist-keys info))
-          (carriage-log "Transport[gptel] LAST id=%s info=%s" id
-                        (carriage-transport-gptel--snip info 600)))
+          (carriage-log "Transport[gptel] LAST id=%s info-redacted=%s" id
+                        (carriage-transport-gptel--redact info 300)))
 
         (when internal-error
           (carriage-log "Transport[gptel] INTERNAL id=%s err=%s" id
@@ -692,6 +762,100 @@ It MUST be idempotent."
 ;; ---------------------------------------------------------------------
 ;; Dispatch entry-point
 
+(defun carriage-transport-gptel--dispatch-validate (backend buffer)
+  "Validate BACKEND and GPTel availability, else signal a user-error and complete BUFFER."
+  (unless (eq (if (symbolp backend) backend (intern (format "%s" backend))) 'gptel)
+    (carriage-log "Transport[gptel] backend mismatch: %S" backend)
+    (carriage-transport-complete t buffer)
+    (user-error "No transport adapter for backend: %s" backend))
+  (unless (require 'gptel-request nil t)
+    (carriage-log "Transport[gptel] gptel-request not available")
+    (carriage-transport-complete t buffer)
+    (user-error "GPTel is not available"))
+  t)
+
+(defun carriage-transport-gptel--dispatch-make-abort (buffer id)
+  "Return an abort function bound to BUFFER and request ID."
+  (lambda ()
+    (carriage-log "Transport[gptel] ABORT requested id=%s" id)
+    (ignore-errors (gptel-abort buffer))
+    ;; If GPTel never delivers terminal callback, force-finalize as abort.
+    (carriage-transport-gptel--schedule
+     0.6
+     (lambda ()
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (unless carriage-transport-gptel--finalized
+             (carriage-transport-gptel--finalize
+              buffer id 'abort 'abort (list :status "abort-timeout") nil))))))))
+
+(defun carriage-transport-gptel--dispatch-init (buffer id model source prompt abort-fn)
+  "Initialize per-request state, logging, and abort handler."
+  (let ((start-procs (carriage-transport-gptel--live-gptel-curl-procs)))
+    (setq carriage-transport-gptel--finalized nil
+          carriage-transport-gptel--finalized-kind nil)
+    (carriage-log "Transport[gptel] START id=%s source=%s model=%s prompt-bytes=%s"
+                  id source (or model "—")
+                  (if (stringp prompt) (number-to-string (string-bytes prompt)) "—"))
+    (carriage-transport-gptel--log-procs "PROCS-START" id start-procs)
+    (carriage-register-abort-handler abort-fn)))
+
+(defun carriage-transport-gptel--dispatch-start-watchdog (buffer id abort-fn)
+  "Start watchdog timers for BUFFER and ID using ABORT-FN."
+  (carriage-transport-gptel--wd-start
+   buffer id
+   (lambda ()
+     (funcall abort-fn)
+     (carriage-transport-gptel--finalize
+      buffer id 'timeout nil (list :status "timeout") nil))))
+
+
+(defun carriage-transport-gptel--dispatch-prepare-payload (prompt system)
+  "Build system prompt fragment, sanitize payload and return (CONS PROMPT2 . SYSTEM2)."
+  (let* ((sys-frag (and (fboundp 'carriage-typedblocks-prompt-fragment-v1)
+                        (carriage-typedblocks-prompt-fragment-v1)))
+         (system* (cond
+                   ((and (stringp system) (> (length system) 0))
+                    (if sys-frag (concat sys-frag "\n\n" system) system))
+                   (sys-frag sys-frag)
+                   (t system))))
+    (when (and sys-frag (not (equal system* system)))
+      (carriage-log "Transport[gptel] inject typedblocks-v1 fragment into :system"))
+    (let* ((prompt0 (or prompt ""))
+           (system0 (or system* ""))
+           (prompt1 (carriage-transport--strip-internal-lines prompt0))
+           (system1 (carriage-transport--strip-internal-lines system0))
+           (prompt2 (carriage-transport-gptel--safe-utf8 prompt1))
+           (system2 (carriage-transport-gptel--safe-utf8 system1)))
+      (when (or (not (string= prompt0 prompt2))
+                (not (string= system0 system2)))
+        (carriage-log "Transport[gptel] WARN: payload sanitized (internal log lines or invalid bytes removed)")
+        (carriage-traffic-log 'out "payload: sanitized: prompt-diff=%s system-diff=%s"
+                              (if (string= prompt0 prompt2) "no" "yes")
+                              (if (string= system0 system2) "no" "yes")))
+      (cons prompt2 system2))))
+
+(defun carriage-transport-gptel--dispatch-invoke (buffer id prompt2 system2 cb)
+  "Invoke GPTel request with prepared PROMPT2 and SYSTEM2, finalizing on start errors."
+  (condition-case err
+      (let ((gptel-backend (and (boundp 'gptel-backend) gptel-backend))
+            (gptel-model   (and (boundp 'gptel-model) gptel-model)))
+        ;; If model is provided as string, gptel expects symbol; but we don't mutate global.
+        ;; Let gptel sanitize if needed; keep this adapter minimal.
+        (ignore gptel-backend)
+        (ignore gptel-model)
+        (gptel-request
+         prompt2
+         :callback cb
+         :buffer buffer
+         :stream t
+         :system system2))
+    (error
+     ;; Request could not be started at all.
+     (carriage-log "Transport[gptel] START-ERROR id=%s err=%s" id (error-message-string err))
+     (carriage-transport-gptel--finalize buffer id 'error nil (list :status "start-error") err)))
+  t)
+
 ;;;###autoload
 (defun carriage-transport-gptel-v2-dispatch (&rest args)
   "Dispatch Carriage request via GPTel.
@@ -708,83 +872,17 @@ This implementation is minimal and callback-driven, with watchdog + cleanup."
          (system  (plist-get args :system))
          (_mode   (plist-get args :mode))
          (id      (carriage-transport-gptel--new-id)))
-    (unless (eq (if (symbolp backend) backend (intern (format "%s" backend))) 'gptel)
-      (carriage-log "Transport[gptel] backend mismatch: %S" backend)
-      (carriage-transport-complete t buffer)
-      (user-error "No transport adapter for backend: %s" backend))
-
-    (unless (require 'gptel-request nil t)
-      (carriage-log "Transport[gptel] gptel-request not available")
-      (carriage-transport-complete t buffer)
-      (user-error "GPTel is not available"))
-
+    (carriage-transport-gptel--dispatch-validate backend buffer)
     (with-current-buffer buffer
       (let* ((cb (carriage-transport-gptel--make-callback buffer id))
-             (abort-fn
-              (lambda ()
-                (carriage-log "Transport[gptel] ABORT requested id=%s" id)
-                (ignore-errors (gptel-abort buffer))
-                ;; If GPTel never delivers terminal callback, force-finalize as abort.
-                (carriage-transport-gptel--schedule
-                 0.6
-                 (lambda ()
-                   (when (buffer-live-p buffer)
-                     (with-current-buffer buffer
-                       (unless carriage-transport-gptel--finalized
-                         (carriage-transport-gptel--finalize
-                          buffer id 'abort 'abort (list :status "abort-timeout") nil))))))))
-             (start-procs (carriage-transport-gptel--live-gptel-curl-procs)))
-        ;; Reset per-request guards for this buffer
-        (setq carriage-transport-gptel--finalized nil
-              carriage-transport-gptel--finalized-kind nil)
-        (carriage-log "Transport[gptel] START id=%s source=%s model=%s prompt-bytes=%s"
-                      id source (or model "—")
-                      (if (stringp prompt) (number-to-string (string-bytes prompt)) "—"))
-        (carriage-transport-gptel--log-procs "PROCS-START" id start-procs)
-
-        ;; Register abort handler for UI (C-c e k)
-        (carriage-register-abort-handler abort-fn)
-
-        ;; Start watchdog (watchdog calls on-timeout).
-        ;; UI state (sending) is managed by the caller via `carriage-transport-begin'.
-        (carriage-transport-gptel--wd-start
-         buffer id
-         (lambda ()
-           (funcall abort-fn)
-           (carriage-transport-gptel--finalize
-            buffer id 'timeout nil (list :status "timeout") nil)))
-
-        ;; Invoke gptel-request in the origin buffer.
-        ;;
-        ;; We intentionally avoid touching internal gptel logging or curl buffers.
-        ;; Everything we need for diagnostics is logged from callback and process inventory.
-        (condition-case err
-            (let ((gptel-backend (and (boundp 'gptel-backend) gptel-backend))
-                  (gptel-model   (and (boundp 'gptel-model) gptel-model)))
-              ;; If model is provided as string, gptel expects symbol; but we don't mutate global.
-              ;; Let gptel sanitize if needed; keep this adapter minimal.
-              (ignore gptel-backend)
-              (ignore gptel-model)
-              (let* ((sys-frag (and (fboundp 'carriage-typedblocks-prompt-fragment-v1)
-                                    (carriage-typedblocks-prompt-fragment-v1)))
-                     (system* (cond
-                               ((and (stringp system) (> (length system) 0))
-                                (if sys-frag (concat sys-frag "\n\n" system) system))
-                               (sys-frag sys-frag)
-                               (t system))))
-                (when (and sys-frag (not (equal system* system)))
-                  (carriage-log "Transport[gptel] inject typedblocks-v1 fragment into :system"))
-                (gptel-request
-                    prompt
-                  :callback cb
-                  :buffer buffer
-                  :stream t
-                  :system system*)))
-          (error
-           ;; Request could not be started at all.
-           (carriage-log "Transport[gptel] START-ERROR id=%s err=%s" id (error-message-string err))
-           (carriage-transport-gptel--finalize buffer id 'error nil (list :status "start-error") err))))
-      t)))
+             (abort-fn (carriage-transport-gptel--dispatch-make-abort buffer id))
+             (pair (carriage-transport-gptel--dispatch-prepare-payload prompt system))
+             (prompt2 (car pair))
+             (system2 (cdr pair)))
+        (carriage-transport-gptel--dispatch-init buffer id model source prompt abort-fn)
+        (carriage-transport-gptel--dispatch-start-watchdog buffer id abort-fn)
+        (carriage-transport-gptel--dispatch-invoke buffer id prompt2 system2 cb)))
+    t))
 
 (provide 'carriage-transport-gptel)
 ;;; carriage-transport-gptel.el ends here

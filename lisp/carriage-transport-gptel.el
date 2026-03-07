@@ -813,8 +813,19 @@ It MUST be idempotent."
 
 (defun carriage-transport-gptel--dispatch-prepare-payload (prompt system)
   "Build system prompt fragment, sanitize payload and return (CONS PROMPT2 . SYSTEM2)."
-  (let* ((sys-frag (and (fboundp 'carriage-typedblocks-prompt-fragment-v1)
-                        (carriage-typedblocks-prompt-fragment-v1)))
+  (let* ((use-typedblocks-hint
+          (and (boundp 'carriage-mode-typedblocks-structure-hint)
+               carriage-mode-typedblocks-structure-hint))
+         (sys-frag
+          (and use-typedblocks-hint
+               (fboundp 'carriage-typedblocks-prompt-fragment-v1)
+               (carriage-typedblocks-prompt-fragment-v1)))
+         ;; Avoid double-injecting when the prompt builder already included it.
+         (sys-frag
+          (if (and (stringp system)
+                   (string-match-p "Org Typed Blocks v1" system))
+              nil
+            sys-frag))
          (system* (cond
                    ((and (stringp system) (> (length system) 0))
                     (if sys-frag (concat sys-frag "\n\n" system) system))
@@ -899,7 +910,7 @@ This implementation is minimal and callback-driven, with watchdog + cleanup."
     (with-current-buffer buffer
       (let* ((cb (carriage-transport-gptel--make-callback buffer id))
              (abort-fn (carriage-transport-gptel--dispatch-make-abort buffer id))
-             (pair (carriage-transport-gptel--dispatch-prepare-payload prompt system))
+             (pair (carriage-transport-gptel--dispatch-prepare-payload prompt system buffer))
              (prompt2 (car pair))
              (system2 (cdr pair)))
         (carriage-transport-gptel--dispatch-init buffer id model source prompt abort-fn)

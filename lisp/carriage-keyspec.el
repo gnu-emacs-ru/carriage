@@ -246,7 +246,6 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
     (:id toggle-map     :cmd carriage-toggle-include-project-map   :section context :desc-key :toggle-map)
     (:id toggle-visible :cmd carriage-toggle-include-visible-context :section context :desc-key :visible-tooltip)
     (:id toggle-plain   :cmd carriage-toggle-include-plain-text-context :section context :label "Toggle plain text")
-    (:id toggle-typedblocks :cmd carriage-toggle-typedblocks-structure-hint :section context :label "Toggle Typed Blocks guidance")
     (:id doc-scope-all  :cmd carriage-select-doc-context-all       :section context :desc-key :doc-scope-all)
     (:id doc-scope-last :cmd carriage-select-doc-context-last      :section context :desc-key :doc-scope-last)
     (:id doc-scope-cycle :cmd carriage-toggle-doc-context-scope    :section context :desc-key :doc-scope-cycle :label "Cycle Scope")
@@ -261,6 +260,9 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
     ;; Tools / buffers
     (:id open-buffer  :cmd carriage-open-buffer       :section session :desc-key :open-buffer)
     (:id file-chat    :cmd carriage-open-file-chat    :section tools   :desc-key :file-chat)
+    (:id task-new          :cmd carriage-create-task-doc       :section tools   :desc-key :task-new :label "Create task doc")
+    (:id toggle-typedblocks :cmd carriage-toggle-typedblocks-structure-hint :section tools :label "Toggle Typed Blocks guidance")
+
 
     ;; Logs
     (:id show-log     :cmd carriage-show-log          :section logs :desc-key :show-log)
@@ -281,7 +283,6 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
     (:id swarm-hub-start   :cmd carriage-swarm-hub-start   :section session :label "Swarm: start hub")
     (:id swarm-hub-stop    :cmd carriage-swarm-hub-stop    :section session :label "Swarm: stop hub")
     (:id swarm-dashboard   :cmd carriage-swarm-open-dashboard :section session :label "Swarm: open dashboard")
-    (:id task-new          :cmd carriage-create-task-doc       :section tools   :desc-key :task-new :label "Create task doc")
     )
   "Action catalog used by menu/help providers.")
 
@@ -313,7 +314,6 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
     (:key "t m" :cmd carriage-toggle-include-project-map)
     (:key "t v" :cmd carriage-toggle-include-visible-context)
     (:key "t o" :cmd carriage-toggle-include-plain-text-context)
-    (:key "t T" :cmd carriage-toggle-typedblocks-structure-hint)
     (:key "t a" :cmd carriage-select-doc-context-all)
     (:key "t l" :cmd carriage-select-doc-context-last)
     (:key "t s" :cmd carriage-toggle-doc-context-scope)
@@ -328,6 +328,7 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
     ;; Logs / buffers / tools
     (:key "L" :cmd carriage-show-log)
     (:key "T" :cmd carriage-show-traffic)
+    (:key "b" :cmd carriage-toggle-typedblocks-structure-hint)
     (:key "e" :cmd carriage-open-buffer)
     (:key "f" :cmd carriage-open-file-chat)
     (:key "n" :cmd carriage-create-task-doc)

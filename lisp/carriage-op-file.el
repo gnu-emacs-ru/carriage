@@ -42,7 +42,10 @@
    "#+end_patch\n"
    "- Requirements: :version \"1\"; :file (not :path). The file content is the raw body between begin/end.\n"
    "- No delimiter markers (<<DELIM/:DELIM) are used in v1.\n"
-   "- Aliases like write/create_file/delete_file/rename_file are forbidden; use create/delete/rename/patch.\n"))
+   "- Aliases like write/create_file/delete_file/rename_file are forbidden; use create/delete/rename/patch.\n"
+   "- IMPORTANT: use :op create ONLY when the file does not already exist in the current project state.\n"
+   "- If the file is already present in begin_context, begin_map, or applied patch history, DO NOT use :op create.\n"
+   "- For an existing file, use patch/sre/aibo depending on the task.\n"))
 
 (defun carriage-op-delete-prompt-fragment (_ctx)
   "Prompt fragment for :op delete."
@@ -161,6 +164,10 @@ In v1, no delimiter markers are used. The file content is the raw BODY between
                (fboundp 'carriage-apply-engine)
                (eq (carriage-apply-engine) 'git))
       (carriage-git-add repo-root file))
+    (when (fboundp 'carriage-context-project-map-invalidate)
+      (ignore-errors (carriage-context-project-map-invalidate repo-root)))
+    (when (fboundp 'carriage-context-project-map-invalidate)
+      (ignore-errors (carriage-context-project-map-invalidate repo-root)))
     (list :op 'create :status 'ok :file file :details "Created")))
 
 (defun carriage-apply-delete (plan-item repo-root)
@@ -177,6 +184,8 @@ In v1, no delimiter markers are used. The file content is the raw BODY between
      (t
       (if (file-exists-p abs)
           (progn (delete-file abs)
+                 (when (fboundp 'carriage-context-project-map-invalidate)
+                   (ignore-errors (carriage-context-project-map-invalidate repo-root)))
                  (list :op 'delete :status 'ok :file file :details "Deleted"))
         (list :op 'delete :status 'fail :file file :details "Not found"))))))
 
@@ -203,6 +212,8 @@ In v1, no delimiter markers are used. The file content is the raw BODY between
                                :stdout (plist-get mvres :stdout)))))
       (progn
         (rename-file abs-from abs-to)
+        (when (fboundp 'carriage-context-project-map-invalidate)
+          (ignore-errors (carriage-context-project-map-invalidate repo-root)))
         (list :op 'rename :status 'ok :file (format "%s -> %s" from to) :details "Renamed")))))
 
 ;;;; Registration

@@ -272,10 +272,14 @@ for other ops → delegate to format registry."
               (accept-process-output nil 0.05))
             ;; Yield to command loop to avoid UI input stalls while waiting.
             (sit-for 0))
-          (carriage--engine-row 'patch result t0
-                                "Applied"
-                                "git apply failed"
-                                :path))
+          (let ((row (carriage--engine-row 'patch result t0
+                                           "Applied"
+                                           "git apply failed"
+                                           :path)))
+            (when (eq (plist-get row :status) 'ok)
+              (when (fboundp 'carriage-context-project-map-invalidate)
+                (ignore-errors (carriage-context-project-map-invalidate repo-root))))
+            row))
       (let* ((rec (carriage-format-get op "1"))
              (fn  (and rec (plist-get rec :apply))))
         (if (functionp fn)
@@ -571,6 +575,9 @@ Registers the handler with the mode when available."
 (defun carriage--apply-done-patch (state t0 res plan repo-root callback token)
   "Handle completion of a patch step."
   (let ((row (carriage--engine-row 'patch res t0 "Applied" "git apply failed" :path)))
+    (when (eq (plist-get row :status) 'ok)
+      (when (fboundp 'carriage-context-project-map-invalidate)
+        (ignore-errors (carriage-context-project-map-invalidate repo-root))))
     (carriage--apply-acc-row state row)
     (carriage--apply-bump state (plist-get row :status))
     (if (eq (plist-get row :status) 'ok)

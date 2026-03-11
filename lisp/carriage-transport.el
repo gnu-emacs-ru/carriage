@@ -375,50 +375,12 @@ Strips:
         (delete-region (line-beginning-position)
                        (min (point-max) (1+ (line-end-position)))))
 
-      ;; Applied patch blocks must never leak into prompts (neither bodies nor begin_patch headers).
-      ;; Replace each applied begin_patch…end_patch block with one history comment line:
-      ;;   ;; applied patch: <target> — <description|result|Applied>
-      (goto-char (point-min))
-      (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
-        (let* ((beg-line-beg (line-beginning-position))
-               (sexp-str (match-string 1))
-               (plist (condition-case _e
-                          (car (read-from-string sexp-str))
-                        (error nil))))
-          (if (and (listp plist) (plist-get plist :applied))
-              (let* ((desc (or (plist-get plist :description)
-                               (plist-get plist :result)
-                               "Applied"))
-                     (desc (string-trim (format "%s" desc)))
-                     (desc (if (string-empty-p desc) "Applied" desc))
-                     (target
-                      (cond
-                       ((eq (plist-get plist :op) 'rename)
-                        (let ((a (plist-get plist :from))
-                              (b (plist-get plist :to)))
-                          (string-trim
-                           (format "%s → %s"
-                                   (or (and (stringp a) a) "-")
-                                   (or (and (stringp b) b) "-")))))
-                       ((stringp (plist-get plist :path)) (plist-get plist :path))
-                       ((stringp (plist-get plist :file)) (plist-get plist :file))
-                       (t "-")))
-                     (summary (format ";; applied patch: %s — %s\n"
-                                      (string-trim (format "%s" target))
-                                      desc))
-                     (block-end
-                      (save-excursion
-                        (goto-char (line-end-position))
-                        (forward-line 1)
-                        (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
-                            (min (point-max) (1+ (line-end-position)))
-                          (point-max)))))
-                (delete-region beg-line-beg block-end)
-                (goto-char beg-line-beg)
-                (insert summary)
-                (goto-char (min (point-max) (+ beg-line-beg (length summary)))))
-            ;; not applied → continue scanning from next line to avoid infinite loops
-            (goto-char (min (point-max) (1+ (line-end-position)))))))
+      ;; Applied patch blocks must never leak into prompts.
+      ;; Reuse the canonical payload helper when available to keep formatting identical.
+      (let ((s (buffer-substring-no-properties (point-min) (point-max))))
+        (when (fboundp 'carriage--payload-summarize-applied-patches)
+          (erase-buffer)
+          (insert (carriage--payload-summarize-applied-patches s))))
       ;; Also strip any accidentally pasted transport diagnostic lines to avoid polluting prompts.
       ;; Example: \"Transport[gptel] …\" lines copied from *carriage-log*/*carriage-traffic*.
       (goto-char (point-min))

@@ -41,6 +41,7 @@
 (autoload 'carriage-apply-last-iteration "carriage-mode" nil t)
 (autoload 'carriage-ctrl-c-ctrl-c "carriage-mode" nil t)
 (autoload 'carriage-abort-current "carriage-mode" nil t)
+(autoload 'carriage-attach-file "carriage-mode" nil t)
 
 (autoload 'carriage-report-open "carriage-report" nil t)
 (autoload 'carriage-report-show-diff-at-point "carriage-report" nil t)
@@ -104,6 +105,7 @@
 (declare-function carriage-apply-last-iteration "carriage-mode" ())
 (declare-function carriage-ctrl-c-ctrl-c "carriage-mode" ())
 (declare-function carriage-abort-current "carriage-mode" ())
+(declare-function carriage-attach-file "carriage-mode" (&optional path))
 (declare-function carriage-report-open "carriage-report" (&optional report))
 (declare-function carriage-report-show-diff-at-point "carriage-report" ())
 (declare-function carriage-report-ediff-at-point "carriage-report" ())
@@ -146,6 +148,76 @@
 (declare-function carriage-swarm-hub-start "carriage-swarm-supervisor" ())
 (declare-function carriage-swarm-hub-stop "carriage-swarm-supervisor" ())
 (declare-function carriage-swarm-open-dashboard "carriage-swarm-supervisor" ())
+
+;; ---------------------------------------------------------------------------
+;; Attachments helper command (manual attachments block)
+;;
+;; This command is bound via keyspec as a direct binding:
+;;   C-c C-f → `carriage-attach-file'
+;;
+;; It inserts/updates a special block:
+;;   #+begin_attachments
+;;   /abs/or/rel/path
+;;   ...
+;;   #+end_attachments
+;;
+;; Transport adapters (e.g. GPTel) may pick these up and send them as media
+;; when supported, or at least list them in the request.
+
+(defun carriage-attach-file (&optional path)
+  "Attach PATH by adding it to the last #+begin_attachments block.
+
+If there is no attachments block, create one at the end of the buffer.
+Remote/TRAMP paths are refused."
+  (interactive (list (read-file-name "Attach file: " nil nil t)))
+  (unless (and (stringp path) (not (string-empty-p (string-trim path))))
+    (user-error "Attach file: empty path"))
+  (when (file-remote-p path)
+    (user-error "Attach file: TRAMP/remote paths are not allowed: %s" path))
+  (let* ((abs (file-truename (expand-file-name path)))
+         (case-fold-search t))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let ((begpos nil)
+              (endpos nil)
+              (found nil))
+          ;; Find the last complete attachments block in the buffer.
+          (goto-char (point-max))
+          (when (re-search-backward "^[ \t]*#\\+begin_attachments\\b.*$" nil t)
+            (setq begpos (line-beginning-position))
+            (save-excursion
+              (goto-char (line-end-position))
+              (forward-line 1)
+              (when (re-search-forward "^[ \t]*#\\+end_attachments\\b.*$" nil t)
+                (setq endpos (line-beginning-position))
+                (setq found t))))
+          ;; If none exists, create at end.
+          (unless found
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n"))
+            (insert "\n#+begin_attachments\n#+end_attachments\n")
+            (forward-line -1)
+            (setq endpos (line-beginning-position))
+            (forward-line -1)
+            (setq begpos (line-beginning-position)))
+          ;; Insert before end marker if not already present in the block.
+          (let ((already
+                 (save-excursion
+                   (goto-char begpos)
+                   (re-search-forward
+                    (concat "^[ \t]*" (regexp-quote abs) "[ \t]*$")
+                    endpos t))))
+            (unless already
+              (goto-char endpos)
+              (insert abs "\n")))))))
+  ;; Best-effort: refresh any context/modeline caches.
+  (when (fboundp 'carriage-ui--reset-context-cache)
+    (ignore-errors (carriage-ui--reset-context-cache)))
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (ignore-errors (carriage-ui--invalidate-ml-cache)))
+  (force-mode-line-update t)
+  (message "Attached: %s" (file-truename (expand-file-name path))))
 
 ;; ---------------------------------------------------------------------------
 
@@ -357,6 +429,7 @@ Bindings installed into Carriage-owned mode maps are not restored (they are owne
     (:target carriage-mode-map :key "C-c C-c" :cmd carriage-ctrl-c-ctrl-c)
     (:target carriage-mode-map :key "C-c !"   :cmd carriage-apply-last-iteration)
     (:target carriage-mode-map :key "C-c RET" :cmd carriage-send-buffer)
+    (:target carriage-mode-map :key "C-c C-f" :cmd carriage-attach-file)
 
     ;; Report-mode convenience (installed when report map exists)
     (:target carriage-report-mode-map :key "RET" :cmd carriage-report-show-diff-at-point)

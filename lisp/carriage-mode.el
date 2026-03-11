@@ -2462,7 +2462,17 @@ May include :context-text and :context-target per v1.1."
            (payload (carriage--sanitize-payload-for-llm payload-raw))
            (target (carriage--context-target))
            (ctx-text (carriage--context-collect-and-format buffer target))
+           (project-state-note
+            (concat
+             "Project-state policy:\n"
+             "- Treat begin_context, begin_map, and applied patch history as the current project state.\n"
+             "- Do NOT generate :op create for a file that already exists in that current project state.\n"
+             "- For an existing file, use patch/sre/aibo instead of create.\n"))
            (res (list :payload payload)))
+      (setq ctx-text
+            (if (and (stringp ctx-text) (not (string-empty-p ctx-text)))
+                (concat project-state-note "\n" ctx-text)
+              project-state-note))
       (when (and (stringp ctx-text) (not (string-empty-p ctx-text)))
         (setq res (append res (list :context-text ctx-text :context-target target))))
       ;; Pass typed-blocks guidance toggle into prompt fragments
@@ -3792,7 +3802,6 @@ Designed for use from `after-load-functions' so commands loaded later
            (funcall orig beg end len)
          nil)))))
 
-(provide 'carriage-mode)
 
 (defgroup carriage-separator nil
   "Settings related to insertion of visual separator lines on Send."
@@ -3829,10 +3838,48 @@ Idempotent:
             (insert "-----\n")
             (setq carriage--separator-inserted t)))))))
 
+(defun carriage-attach-file (path)
+  "Attach PATH by inserting it into a #+begin_attachments block in the current buffer.
 
-;; Wire the advice when function is present (defined earlier in this file).
+- Creates the block at end of buffer if missing.
+- Stores absolute truename paths.
+- Refuses TRAMP/remote paths."
+  (interactive (list (read-file-name "Attach file: " nil nil t)))
+  (when (file-remote-p path)
+    (user-error "Attachments: TRAMP/remote paths are not allowed: %s" path))
+  (let* ((abs (file-truename (expand-file-name path)))
+         (case-fold-search t))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let ((beg nil) (end nil))
+          ;; Prefer the last block in the buffer.
+          (goto-char (point-max))
+          (when (re-search-backward "^[ \t]*#\\+begin_attachments\\b" nil t)
+            (setq beg (point))
+            (when (re-search-forward "^[ \t]*#\\+end_attachments\\b" nil t)
+              (setq end (line-beginning-position))))
+          (unless (and beg end)
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n"))
+            (insert "\n#+begin_attachments\n#+end_attachments\n")
+            (goto-char (point-max))
+            (re-search-backward "^[ \t]*#\\+begin_attachments\\b" nil t)
+            (setq beg (point))
+            (re-search-forward "^[ \t]*#\\+end_attachments\\b" nil t)
+            (setq end (line-beginning-position)))
+          ;; Insert before end marker if not already present.
+          (goto-char end)
+          (let ((already
+                 (save-excursion
+                   (goto-char beg)
+                   (re-search-forward
+                    (concat "^[ \t]*" (regexp-quote abs) "[ \t]*$")
+                    end t))))
+            (unless already
+              (insert abs "\n")))))))
+  (force-mode-line-update t)
+  (message "Attached: %s" (file-name-nondirectory (file-truename (expand-file-name path)))))
 
-
-
-
+(provide 'carriage-mode)
 ;;; carriage-mode.el ends here

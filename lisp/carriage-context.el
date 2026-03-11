@@ -1491,6 +1491,26 @@ Cache record plist keys: :time :text :paths :truncated."
   "Cache mapping project root → Project Map record plist.
 Record keys: :time :text :paths :truncated.")
 
+;;;###autoload
+(defun carriage-context-project-map-invalidate (&optional root)
+  "Invalidate cached Project Map for ROOT or current project root.
+Best-effort: never signals. Returns non-nil."
+  (let ((r (or root (carriage-context--project-root))))
+    (when (and (hash-table-p carriage-context--project-map-cache)
+               (stringp r) (not (string-empty-p r)))
+      (remhash r carriage-context--project-map-cache))
+    t))
+
+;;;###autoload
+(defun carriage-context-project-map-invalidate (&optional root)
+  "Invalidate cached Project Map for ROOT or current project root.
+Best-effort: never signals. Returns non-nil."
+  (let ((r (or root (carriage-context--project-root))))
+    (when (and (hash-table-p carriage-context--project-map-cache)
+               (stringp r) (not (string-empty-p r)))
+      (remhash r carriage-context--project-map-cache))
+    t))
+
 (defvar carriage-context--project-map-allow-compute nil
   "When non-nil, Project Map is allowed to run external processes / directory traversal.
 

@@ -43,7 +43,8 @@
     (should (eq (lookup-key carriage-mode-map (kbd pref)) carriage-prefix-map)))
   ;; Direct bindings (must not depend on menu provider)
   (should (eq (lookup-key carriage-mode-map (kbd "C-c C-c")) #'carriage-ctrl-c-ctrl-c))
-  (should (eq (lookup-key carriage-mode-map (kbd "C-c !"))   #'carriage-apply-last-iteration)))
+  (should (eq (lookup-key carriage-mode-map (kbd "C-c !"))   #'carriage-apply-last-iteration))
+  (should (eq (lookup-key carriage-mode-map (kbd "C-c C-f")) #'carriage-attach-file)))
 
 (ert-deftest carriage-keyspec-action-labels-non-empty ()
   "All action labels are non-empty and do not include trailing bracket hints."

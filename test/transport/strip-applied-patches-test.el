@@ -24,6 +24,8 @@
       (should (stringp payload))
       ;; The unique marker from applied block must be stripped
       (should-not (string-match-p "UNIQUE_BODY_SHOULD_NOT_LEAK" payload))
+      ;; Applied patch history must remain visible to the model
+      (should (string-match-p "applied patch: foo.txt — Applied demo" payload))
       ;; Non-patch text remains present
       (should (string-match-p "Some intro text" payload))
       (should (string-match-p "Tail text" payload)))))

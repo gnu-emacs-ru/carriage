@@ -40,7 +40,7 @@
                                  (carriage-typedblocks-build-payload (current-buffer)))))
    (let ((carriage-typedblocks-include-commands t))
      (should (string-match-p "In commands:\nrun me"
-                             (carriage-typedblocks-build-payload (current-buffer))))))
+                             (carriage-typedblocks-build-payload (current-buffer)))))))
 
 (ert-deftest typedblocks/payload-plain-flag ()
   "Plain text is included only when the plain flag is enabled."
@@ -49,7 +49,7 @@
    (let ((carriage-mode-include-plain-text-context nil))
      (should-not (string-match-p "In plain:" (carriage-typedblocks-build-payload (current-buffer)))))
    (let ((carriage-mode-include-plain-text-context t))
-     (should (string-match-p "In plain:\nhello" (carriage-typedblocks-build-payload (current-buffer))))))
+     (should (string-match-p "In plain:\nhello" (carriage-typedblocks-build-payload (current-buffer)))))))
 
 (ert-deftest typedblocks/payload-question-answer ()
   "Question/answer blocks are included by default."
@@ -57,7 +57,7 @@
    "#+begin_question\nQ?\n#+end_question\n#+begin_answer\nA!\n#+end_answer\n"
    (let ((payload (carriage-typedblocks-build-payload (current-buffer))))
      (should (string-match-p "In question:\nQ\\?" payload))
-     (should (string-match-p "In answer:\nA!" payload))))
+     (should (string-match-p "In answer:\nA!" payload)))))
 
 (provide 'typedblocks-tests)
 ;;; typedblocks-tests.el ends here

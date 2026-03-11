@@ -1812,6 +1812,103 @@ Order (fastest-first, with short timeouts):
         (insert "…\n")
         (cons (buffer-string) t)))))
 
+(defun carriage-context--project-map--validate-root (r)
+  "Helper for project-map: check root directory R for validity."
+  (cond
+   ((or (null r) (not (stringp r)) (string-empty-p r))
+    (list :ok nil :reason 'no-root))
+   ((file-remote-p r)
+    (list :ok nil :reason 'remote))
+   (t nil)))
+
+(defun carriage-context--project-map--maybe-cache-get-ok (r ttl)
+  "If there is a fresh Project Map cache entry for R (and TTL), return full result plist, else nil."
+  (let ((ce (carriage-context--project-map--cache-get r)))
+    (when (and ce (carriage-context--project-map--cache-fresh-p ce ttl))
+      (append (list :ok t) ce))))
+
+(defun carriage-context--project-map--not-allowed-result ()
+  "Return result plist for Project Map when computation is not allowed."
+  (list :ok nil :reason 'not-allowed))
+
+(defun carriage-context--project-map--empty-result (why method elapsed)
+  "Return result plist if no files could be found for Project Map."
+  (list :ok nil :reason (or why 'empty) :method method :elapsed elapsed))
+
+(defun carriage-context--project-map--assemble-block-details (files method elapsed)
+  "Build trie, render, possibly truncate, and return (plist rec block-details)."
+  (let* ((maxp (max 0 (or carriage-context-project-map-max-paths 0)))
+         (maxb (max 0 (or carriage-context-project-map-max-bytes 0)))
+         (all (sort (copy-sequence files) #'string<))
+         (paths (if (and (numberp maxp) (> maxp 0) (> (length all) maxp))
+                    (cl-subseq all 0 maxp)
+                  all))
+         (trunc-paths (and (numberp maxp) (> maxp 0) (> (length all) maxp)))
+         (root-node (carriage-context--project-map--node-make)))
+    (dolist (p paths)
+      (when (and (stringp p) (not (string-empty-p p)))
+        (carriage-context--project-map--insert root-node p)))
+    (let* ((lines (carriage-context--project-map--render root-node 0))
+           (body (string-join lines "\n"))
+           (block (concat "#+begin_map\n" body "\n#+end_map\n"))
+           (tb (carriage-context--project-map--truncate-bytes block maxb))
+           (text (car tb))
+           (trunc-bytes (cdr tb))
+           (trunc (or trunc-paths trunc-bytes))
+           (rec (list :time (float-time)
+                      :text text
+                      :paths (length paths)
+                      :truncated (if trunc t nil)
+                      :method method
+                      :elapsed elapsed)))
+      (when trunc
+        (carriage-context--dbg "project-map: truncated (method=%s paths=%s bytes=%s)"
+                               method trunc-paths trunc-bytes))
+      (carriage-context--dbg "project-map: built method=%s paths=%d bytes=%d elapsed=%.3fs"
+                             method (length paths) (string-bytes (or text "")) (or elapsed 0.0))
+      (carriage-context--project-map--cache-put (carriage-context--project-root) rec)
+      (list :ok t
+            :text text
+            :paths (length paths)
+            :truncated (if trunc t nil)
+            :method method
+            :elapsed elapsed))))
+
+(defun carriage-context--project-map--validate-root-or-return (root f)
+  "Validate ROOT directory and call F if valid. If not valid, returns invalid-root result plist."
+  (let ((invalid-root-result (carriage-context--project-map--validate-root root)))
+    (if invalid-root-result
+        invalid-root-result
+      (funcall f))))
+
+(defun carriage-context--project-map--maybe-get-cache-or-return (root ttl f)
+  "Retrieve Project Map from cache if fresh, else call F.
+If a fresh cache record is found, returns it early."
+  (let ((maybe-cache (carriage-context--project-map--maybe-cache-get-ok root ttl)))
+    (if maybe-cache
+        maybe-cache
+      (funcall f))))
+
+(defun carriage-context--project-map--maybe-allow-compute-or-return (f)
+  "If project map computation is allowed, call F, else return not-allowed result."
+  (if carriage-context--project-map-allow-compute
+      (funcall f)
+    (carriage-context--project-map--not-allowed-result)))
+
+(defun carriage-context--project-map--build-or-empty (lr r)
+  "Given result LR (from files) and root R, either assemble details or return empty result."
+  (let ((ok (plist-get lr :ok))
+        (files (plist-get lr :files))
+        (method (plist-get lr :method))
+        (elapsed (plist-get lr :elapsed))
+        (why (plist-get lr :reason)))
+    (if (and ok (listp files) (> (length files) 0))
+        (carriage-context--project-map--assemble-block-details files method elapsed)
+      (progn
+        (carriage-context--dbg "project-map: omitted reason=%s method=%s elapsed=%.3fs root=%s"
+                               why method (or elapsed 0.0) r)
+        (carriage-context--project-map--empty-result why method elapsed)))))
+
 (defun carriage-context-project-map-build (&optional root)
   "Build Project Map record plist for ROOT (or project root).
 
@@ -1827,71 +1924,18 @@ Best-effort; never signals.
 Important perf rule:
 - When `carriage-context--project-map-allow-compute` is nil, this function MUST NOT
   spawn processes or traverse directories. It may return a fresh cached value."
-  (let* ((r (or root (carriage-context--project-root))))
-    (cond
-     ((or (null r) (not (stringp r)) (string-empty-p r))
-      (list :ok nil :reason 'no-root))
-     ((file-remote-p r)
-      (list :ok nil :reason 'remote))
-     (t
-      (let* ((ttl (or carriage-context-project-map-cache-ttl 0.0))
-             (ce (carriage-context--project-map--cache-get r)))
-        ;; Always allow returning cached value (UI-safe).
-        (when (and ce (carriage-context--project-map--cache-fresh-p ce ttl))
-          (cl-return-from carriage-context-project-map-build
-            (append (list :ok t) ce)))
-        ;; Do not compute on redisplay/timers.
-        (unless carriage-context--project-map-allow-compute
-          (cl-return-from carriage-context-project-map-build
-            (list :ok nil :reason 'not-allowed)))
-        (let* ((lr (carriage-context--project-map--files r))
-               (ok (plist-get lr :ok))
-               (files (plist-get lr :files))
-               (method (plist-get lr :method))
-               (elapsed (plist-get lr :elapsed))
-               (why (plist-get lr :reason)))
-          (unless (and ok (listp files) (> (length files) 0))
-            (carriage-context--dbg "project-map: omitted reason=%s method=%s elapsed=%.3fs root=%s"
-                                   why method (or elapsed 0.0) r)
-            (cl-return-from carriage-context-project-map-build
-              (list :ok nil :reason (or why 'empty) :method method :elapsed elapsed)))
-          (let* ((maxp (max 0 (or carriage-context-project-map-max-paths 0)))
-                 (maxb (max 0 (or carriage-context-project-map-max-bytes 0)))
-                 (all (sort (copy-sequence files) #'string<))
-                 (paths (if (and (numberp maxp) (> maxp 0) (> (length all) maxp))
-                            (cl-subseq all 0 maxp)
-                          all))
-                 (trunc-paths (and (numberp maxp) (> maxp 0) (> (length all) maxp)))
-                 (root-node (carriage-context--project-map--node-make)))
-            (dolist (p paths)
-              (when (and (stringp p) (not (string-empty-p p)))
-                (carriage-context--project-map--insert root-node p)))
-            (let* ((lines (carriage-context--project-map--render root-node 0))
-                   (body (string-join lines "\n"))
-                   (block (concat "#+begin_map\n" body "\n#+end_map\n"))
-                   (tb (carriage-context--project-map--truncate-bytes block maxb))
-                   (text (car tb))
-                   (trunc-bytes (cdr tb))
-                   (trunc (or trunc-paths trunc-bytes))
-                   (rec (list :time (float-time)
-                              :text text
-                              :paths (length paths)
-                              :truncated (if trunc t nil)
-                              :method method
-                              :elapsed elapsed)))
-              (when trunc
-                (carriage-context--dbg "project-map: truncated (method=%s paths=%s bytes=%s)"
-                                       method trunc-paths trunc-bytes))
-              (carriage-context--dbg "project-map: built method=%s paths=%d bytes=%d elapsed=%.3fs"
-                                     method (length paths) (string-bytes (or text "")) (or elapsed 0.0))
-              (carriage-context--project-map--cache-put r rec)
-              (list :ok t
-                    :text text
-                    :paths (length paths)
-                    :truncated (if trunc t nil)
-                    :method method
-                    :elapsed elapsed)))))))))
-
+  (let* ((r (or root (carriage-context--project-root)))
+         (ttl (or carriage-context-project-map-cache-ttl 0.0)))
+    (carriage-context--project-map--validate-root-or-return
+     r
+     (lambda ()
+       (carriage-context--project-map--maybe-get-cache-or-return
+        r ttl
+        (lambda ()
+          (carriage-context--project-map--maybe-allow-compute-or-return
+           (lambda ()
+             (let* ((lr (carriage-context--project-map--files r)))
+               (carriage-context--project-map--build-or-empty lr r))))))))))
 (defun carriage-context-project-map-block (&optional root)
   "Return a `#+begin_map … #+end_map` block string for ROOT (or current project), or nil.
 

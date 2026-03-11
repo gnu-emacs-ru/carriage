@@ -2484,6 +2484,157 @@ May include :context-text and :context-target per v1.1."
 
 ;;; Commands (stubs/minimal implementations)
 
+(defcustom carriage-mode-send-async-context t
+  "When non-nil, build payload/context and prompt in a background thread before dispatching.
+
+Goal: keep UI responsive when context collection is expensive (doc files, patched-files,
+project map). The request is dispatched ONLY after preparation completes.
+
+Notes:
+- In batch/noninteractive sessions this option is ignored; preparation is synchronous.
+- When Emacs threads are unavailable, preparation is synchronous."
+  :type 'boolean
+  :group 'carriage)
+
+(defvar-local carriage--send-prep-thread nil
+  "Thread object for the in-flight Send preparation, or nil.")
+
+(defvar-local carriage--send-prep-job-id 0
+  "Monotonic job id for Send preparation in this buffer.")
+
+(defvar-local carriage--send-prep-cancelled nil
+  "Non-nil when the current Send preparation was cancelled.")
+
+(defun carriage--send-prep-async-enabled-p ()
+  "Return non-nil when Send preparation may run asynchronously in this session."
+  (and (boundp 'carriage-mode-send-async-context)
+       carriage-mode-send-async-context
+       (not (bound-and-true-p noninteractive))
+       (fboundp 'make-thread)))
+
+(defun carriage--send-prep-cancel (job-id)
+  "Cancel Send preparation for JOB-ID (best-effort)."
+  (when (= job-id (or carriage--send-prep-job-id 0))
+    (setq carriage--send-prep-cancelled t)
+    (let ((thr carriage--send-prep-thread))
+      (when (and (threadp thr) (thread-live-p thr))
+        (ignore-errors (thread-signal thr 'quit nil))))
+    (setq carriage--send-prep-thread nil)
+    (carriage-log "send: prep cancelled job=%s" job-id)
+    t))
+
+(defun carriage--send-dispatch-with-prompt (source srcbuf backend model intent suite pr sys insert-marker)
+  "Dispatch a prepared request for SOURCE/SRCBUF using PR/SYS and INSERT-MARKER.
+Runs in the main thread (timer callback)."
+  (when (buffer-live-p srcbuf)
+    (with-current-buffer srcbuf
+      (carriage-ui-set-state 'dispatch)
+      (carriage-log "send-%s: intent=%s suite=%s backend=%s model=%s"
+                    (or source 'buffer) intent suite backend model)
+      (when (and carriage-mode-auto-open-log (not (bound-and-true-p noninteractive)))
+        (ignore-errors (carriage-show-log)))
+      (when (and carriage-mode-auto-open-traffic (not (bound-and-true-p noninteractive)))
+        (ignore-errors (carriage-show-traffic)))
+      (carriage--ensure-transport)
+      (let* ((unreg (carriage-transport-begin)))
+        (ignore unreg)
+        (carriage-traffic-log 'out "request begin: source=%s backend=%s model=%s"
+                              source backend model)
+        (condition-case err
+            (progn
+              (carriage-transport-dispatch :source source
+                                           :backend backend
+                                           :model model
+                                           :prompt pr
+                                           :system sys
+                                           :buffer srcbuf
+                                           :mode (symbol-name (buffer-local-value 'major-mode srcbuf))
+                                           :insert-marker insert-marker)
+              t)
+          (quit
+           ;; Do not leave UI stuck if user aborts during dispatch.
+           (carriage-log "send-%s: keyboard-quit; aborting" (or source 'buffer))
+           (ignore-errors (carriage-abort-current))
+           (ignore-errors (carriage-transport-complete t))
+           (ignore-errors (carriage-ui-set-state 'idle))
+           nil)
+          (error
+           (carriage-log "send-%s error: %s" (or source 'buffer) (error-message-string err))
+           (ignore-errors (carriage-transport-complete t))
+           (ignore-errors (carriage-ui-set-state 'idle))
+           nil))))))
+
+(defun carriage--send-prepare-and-dispatch (source srcbuf backend model intent suite insert-marker)
+  "Prepare payload/context+prompt for SOURCE and dispatch once ready.
+
+When async is enabled, preparation runs in a background thread; otherwise runs
+synchronously (still outside the immediate interactive command tick)."
+  (when (buffer-live-p srcbuf)
+    (with-current-buffer srcbuf
+      (setq carriage--send-prep-cancelled nil)
+      (setq carriage--send-prep-job-id (1+ (or carriage--send-prep-job-id 0)))
+      (let* ((job-id carriage--send-prep-job-id))
+        ;; Install an abort handler for the PREP phase (transport will override it later).
+        (carriage-register-abort-handler
+         (lambda ()
+           (carriage--send-prep-cancel job-id)))
+        (if (carriage--send-prep-async-enabled-p)
+            (progn
+              (setq carriage--send-prep-thread
+                    (make-thread
+                     (lambda ()
+                       (let* ((res
+                               (condition-case e
+                                   (let* ((t0 (float-time))
+                                          (ctx (carriage--build-context source srcbuf))
+                                          (built (carriage-build-prompt intent suite ctx))
+                                          (sys (plist-get built :system))
+                                          (pr  (plist-get built :prompt))
+                                          (dt (- (float-time) t0)))
+                                     (list :ok t :system sys :prompt pr :elapsed dt))
+                                 (quit (list :ok nil :quit t))
+                                 (error (list :ok nil :error (error-message-string e))))))
+                         (run-at-time
+                          0 nil
+                          (lambda ()
+                            (when (buffer-live-p srcbuf)
+                              (with-current-buffer srcbuf
+                                (when (= job-id (or carriage--send-prep-job-id 0))
+                                  (setq carriage--send-prep-thread nil)
+                                  (cond
+                                   ((or carriage--send-prep-cancelled
+                                        (plist-get res :quit))
+                                    (carriage-log "send: prep finished but cancelled job=%s" job-id)
+                                    (ignore-errors (carriage--preloader-stop))
+                                    (ignore-errors (carriage-ui-set-state 'idle)))
+                                   ((plist-get res :ok)
+                                    (carriage-traffic-log 'out
+                                                          "send: prep ok source=%s elapsed=%.3fs"
+                                                          source (or (plist-get res :elapsed) 0.0))
+                                    (carriage--send-dispatch-with-prompt
+                                     source srcbuf backend model intent suite
+                                     (plist-get res :prompt)
+                                     (plist-get res :system)
+                                     insert-marker))
+                                   (t
+                                    (carriage-log "send: prep failed source=%s job=%s err=%s"
+                                                  source job-id (or (plist-get res :error) "-"))
+                                    (ignore-errors (carriage--preloader-stop))
+                                    (ignore-errors (carriage-ui-set-state 'idle))
+                                    (when (not (bound-and-true-p noninteractive))
+                                      (message "Carriage: подготовка запроса не удалась: %s"
+                                               (or (plist-get res :error) "unknown error")))))))))))))
+                    (format "carriage-send-prep-%s" job-id)))
+          t)
+        ;; Sync preparation (still in deferred tick; may block UI)
+        (let* ((ctx (carriage--build-context source srcbuf))
+               (built (carriage-build-prompt intent suite ctx))
+               (sys (plist-get built :system))
+               (pr  (plist-get built :prompt)))
+          (carriage--send-dispatch-with-prompt
+           source srcbuf backend model intent suite pr sys insert-marker)
+          t)))))
+
 ;;;###autoload
 (defun carriage-send-buffer ()
   "Send entire buffer to LLM according to current Intent/Suite."
@@ -2529,53 +2680,17 @@ May include :context-text and :context-target per v1.1."
      (lambda ()
        (let ((current-prefix-arg prefix))
          (with-current-buffer srcbuf
-           (let* ((backend carriage-mode-backend)
-                  (model   carriage-mode-model)
-                  (intent  carriage-mode-intent)
-                  (suite   carriage-mode-suite)
-                  (ctx nil)
-                  (built nil) (sys nil) (pr nil))
-             ;; Build context after immediate UI feedback
-             (setq ctx (carriage--build-context 'buffer srcbuf))
-             (setq built (carriage-build-prompt intent suite ctx)
-                   sys   (plist-get built :system)
-                   pr    (plist-get built :prompt))
-             (carriage-ui-set-state 'dispatch)
-             (carriage-log "send-buffer: intent=%s suite=%s backend=%s model=%s"
-                           intent suite backend model)
-             (when (and carriage-mode-auto-open-log (not (bound-and-true-p noninteractive)))
-               (ignore-errors (carriage-show-log)))
-             (when (and carriage-mode-auto-open-traffic (not (bound-and-true-p noninteractive)))
-               (ignore-errors (carriage-show-traffic)))
-
-             (carriage--ensure-transport)
-             (let* ((unreg (carriage-transport-begin)))
-               (carriage-traffic-log 'out "request begin: source=buffer backend=%s model=%s"
-                                     backend model)
-               (condition-case err
-                   (progn
-                     ;; Dispatch via transport (placeholder will log error if no adapter).
-                     (carriage-transport-dispatch :source 'buffer
-                                                  :backend backend
-                                                  :model model
-                                                  :prompt pr
-                                                  :system sys
-                                                  :buffer srcbuf
-                                                  :mode (symbol-name (buffer-local-value 'major-mode srcbuf))
-                                                  :insert-marker (or (and (markerp carriage--stream-origin-marker)
-                                                                          (buffer-live-p (marker-buffer carriage--stream-origin-marker))
-                                                                          carriage--stream-origin-marker)
-                                                                     origin-marker))
-                     t)
-                 (quit
-                  (carriage-log "send-buffer: keyboard-quit; aborting")
-                  (ignore-errors (carriage-abort-current))
-                  (ignore-errors (carriage-transport-complete t))
-                  (carriage-ui-set-state 'idle)
-                  nil)
-                 (error
-                  (carriage-log "send-buffer error: %s" (error-message-string err))
-                  (carriage-transport-complete t)))))))))))
+           (carriage--send-prepare-and-dispatch
+            'buffer
+            srcbuf
+            carriage-mode-backend
+            carriage-mode-model
+            carriage-mode-intent
+            carriage-mode-suite
+            (or (and (markerp carriage--stream-origin-marker)
+                     (buffer-live-p (marker-buffer carriage--stream-origin-marker))
+                     carriage--stream-origin-marker)
+                origin-marker))))))))
 
 ;;;###autoload
 (defun carriage-send-subtree ()
@@ -2588,25 +2703,21 @@ May include :context-text and :context-target per v1.1."
     (ignore-errors (carriage-ui-apply-reset)))
   ;; Give redisplay a chance right away
   (sit-for 0)
-  (let* ((backend carriage-mode-backend)
-         (model   carriage-mode-model)
-         (intent  carriage-mode-intent)
-         (suite   carriage-mode-suite)
-         (srcbuf  (current-buffer))
-         (origin-marker
-          (copy-marker
-           (progn
-             ;; Ensure Send always starts on a fresh line *below* the current one.
-             (when (or (not (bolp))
-                       (save-excursion
-                         (beginning-of-line)
-                         (re-search-forward "[^ \t]" (line-end-position) t)))
-               (end-of-line)
-               (insert "\n"))
-             (point))
-           t))
-         (ctx nil)
-         (built nil) (sys nil) (pr nil))
+  ;; Defer heavy preparation to the next tick so UI updates (spinner/state) are visible instantly.
+  (let ((srcbuf (current-buffer))
+        (prefix current-prefix-arg)
+        (origin-marker
+         (copy-marker
+          (progn
+            ;; Ensure Send always starts on a fresh line *below* the current one.
+            (when (or (not (bolp))
+                      (save-excursion
+                        (beginning-of-line)
+                        (re-search-forward "[^ \t]" (line-end-position) t)))
+              (end-of-line)
+              (insert "\n"))
+            (point))
+          t)))
     ;; Prepare stream origin and preloader; insert only the fingerprint line (no inline iteration-id line).
     (carriage-stream-reset origin-marker)
     (when (fboundp 'carriage-begin-iteration)
@@ -2615,47 +2726,23 @@ May include :context-text and :context-target per v1.1."
       (ignore-errors (carriage-insert-inline-fingerprint-now)))
     (when (fboundp 'carriage--preloader-start)
       (ignore-errors (carriage--preloader-start)))
-    ;; Keep spinner/active feedback during context build, then build context
-    (carriage-ui-set-state 'sending)
-    (setq ctx (carriage--build-context 'subtree srcbuf))
-    (setq built (carriage-build-prompt intent suite ctx)
-          sys   (plist-get built :system)
-          pr    (plist-get built :prompt))
-    (carriage-ui-set-state 'dispatch)
-    (carriage-log "send-subtree: intent=%s suite=%s backend=%s model=%s"
-                  intent suite backend model)
-    ;; Best-effort derive a small payload boundary for logs
-    (when (derived-mode-p 'org-mode)
-      (carriage-log "send-subtree: org-mode detected; using subtree-at-point as payload"))
-    (when (and carriage-mode-auto-open-log (not (bound-and-true-p noninteractive)))
-      (ignore-errors (carriage-show-log)))
-    (when (and carriage-mode-auto-open-traffic (not (bound-and-true-p noninteractive)))
-      (ignore-errors (carriage-show-traffic)))
-
-    (carriage--ensure-transport)
-    (let* ((unreg (carriage-transport-begin)))
-      (carriage-traffic-log 'out "request begin: source=subtree backend=%s model=%s"
-                            backend model)
-      (condition-case err
-          (progn
-            (carriage-transport-dispatch :source 'subtree
-                                         :backend backend
-                                         :model model
-                                         :prompt pr
-                                         :system sys
-                                         :buffer srcbuf
-                                         :mode (symbol-name (buffer-local-value 'major-mode srcbuf))
-                                         ;; Keep consistent with `carriage-send-buffer': when we inserted inline marker
-                                         ;; and fingerprint, `carriage--stream-origin-marker' was advanced to start
-                                         ;; strictly below them. Use it when available.
-                                         :insert-marker (or (and (markerp carriage--stream-origin-marker)
-                                                                 (buffer-live-p (marker-buffer carriage--stream-origin-marker))
-                                                                 carriage--stream-origin-marker)
-                                                            origin-marker))
-            t)
-        (error
-         (carriage-log "send-subtree error: %s" (error-message-string err))
-         (carriage-transport-complete t))))))
+    (run-at-time
+     0 nil
+     (lambda ()
+       (let ((current-prefix-arg prefix))
+         (when (buffer-live-p srcbuf)
+           (with-current-buffer srcbuf
+             (carriage--send-prepare-and-dispatch
+              'subtree
+              srcbuf
+              carriage-mode-backend
+              carriage-mode-model
+              carriage-mode-intent
+              carriage-mode-suite
+              (or (and (markerp carriage--stream-origin-marker)
+                       (buffer-live-p (marker-buffer carriage--stream-origin-marker))
+                       carriage--stream-origin-marker)
+                  origin-marker)))))))))
 
 ;;;###autoload
 (defun carriage-dry-run-at-point ()

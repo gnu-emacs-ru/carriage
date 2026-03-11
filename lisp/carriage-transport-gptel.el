@@ -723,12 +723,18 @@ Returns plist with :watchdog-fired :code :reqn :procs0."
   (carriage-transport-gptel--finalize--maybe-run
    origin-buffer id final resp info requested-model internal-error))
 
-(defun carriage-transport-gptel--finalize
-    (origin-buffer id final resp info requested-model &optional internal-error)
-  "Finalize request and update UI. FINAL is one of 'done 'abort 'error 'timeout."
+(defun carriage-transport-gptel--finalize--normalize-and-call
+    (origin-buffer id final resp info requested-model internal-error)
+  "Normalize FINAL and call internal finalize implementation."
   (let ((final2 (carriage-transport-gptel--finalize--normalize-final id final)))
     (carriage-transport-gptel--finalize--call
      origin-buffer id final2 resp info requested-model internal-error)))
+
+(defun carriage-transport-gptel--finalize
+    (origin-buffer id final resp info requested-model &optional internal-error)
+  "Finalize request and update UI. FINAL is one of 'done 'abort 'error 'timeout."
+  (carriage-transport-gptel--finalize--normalize-and-call
+   origin-buffer id final resp info requested-model internal-error))
 
 ;; ---------------------------------------------------------------------
 ;; Callback
@@ -888,16 +894,20 @@ This is in addition to always auto-attaching binary files."
                 (goto-char (point-max)))))
           (nreverse (delete-dups (delq nil paths))))))))
 
-(defun carriage-transport-gptel--resolve-path (buffer p)
-  "Resolve P (string) relative to project root when possible; otherwise to buffer's default-directory.
+(defun carriage-transport-gptel--buffer-root (buffer)
+  "Return best-effort project root for BUFFER (string)."
+  (with-current-buffer buffer
+    (or (and (fboundp 'carriage-project-root)
+             (ignore-errors (carriage-project-root)))
+        default-directory)))
+
+(defun carriage-transport-gptel--resolve-path (buffer p &optional root)
+  "Resolve P (string) relative to ROOT when provided; otherwise use BUFFER root.
 Return truename or nil if remote/non-existent."
   (when (and (stringp p) (not (string-empty-p (string-trim p))))
     (let* ((p (string-trim p)))
       (unless (file-remote-p p)
-        (let* ((root (with-current-buffer buffer
-                       (or (and (fboundp 'carriage-project-root)
-                                (ignore-errors (carriage-project-root)))
-                           default-directory)))
+        (let* ((root (or root (carriage-transport-gptel--buffer-root buffer)))
                (abs (if (file-name-absolute-p p)
                         p
                       (expand-file-name p (or root default-directory))))
@@ -929,7 +939,28 @@ Manual:
 Auto:
 - paths from #+begin_context blocks only if binary or larger than
   `carriage-transport-gptel-auto-attach-size-threshold'."
-  (let* ((manual-lines
+  (let* ((root (carriage-transport-gptel--buffer-root buffer))
+         ;; Per-dispatch caches: avoid repeating I/O (file-attributes / reads).
+         (size-cache (make-hash-table :test 'equal))
+         (bin-cache (make-hash-table :test 'equal))
+         (get-size
+          (lambda (p)
+            (let ((v (gethash p size-cache :missing)))
+              (if (eq v :missing)
+                  (let ((sz (carriage-transport-gptel--file-size p)))
+                    (puthash p sz size-cache)
+                    sz)
+                v))))
+         (get-bin
+          (lambda (p)
+            (let ((v (gethash p bin-cache :missing)))
+              (if (eq v :missing)
+                  (let ((b (carriage-transport-gptel--file-binary-p p)))
+                    (puthash p b bin-cache)
+                    b)
+                v))))
+         (resolve (lambda (p) (carriage-transport-gptel--resolve-path buffer p root)))
+         (manual-lines
           (carriage-transport-gptel--read-block-path-lines
            buffer
            "^[ \t]*#\\+begin_attachments\\b.*$"
@@ -940,36 +971,47 @@ Auto:
            "^[ \t]*#\\+begin_context\\b.*$"
            "^[ \t]*#\\+end_context\\b.*$"))
          (manual-paths
-          (delq nil (mapcar (lambda (p) (carriage-transport-gptel--resolve-path buffer p))
-                            manual-lines)))
+          (delq nil (mapcar resolve manual-lines)))
+         (context-paths
+          (delq nil (mapcar resolve context-lines)))
          (auto-paths
-          (cl-loop
-           for p in (delq nil (mapcar (lambda (x) (carriage-transport-gptel--resolve-path buffer x))
-                                      context-lines))
-           for sz = (carriage-transport-gptel--file-size p)
-           when (or (carriage-transport-gptel--file-binary-p p)
-                    (and (numberp sz)
-                         (numberp carriage-transport-gptel-auto-attach-size-threshold)
-                         (> sz carriage-transport-gptel-auto-attach-size-threshold)))
-           collect p))
+          (let ((acc '()))
+            (dolist (p context-paths)
+              (let* ((sz (funcall get-size p))
+                     (bin (funcall get-bin p)))
+                (when (or bin
+                          (and (numberp sz)
+                               (numberp carriage-transport-gptel-auto-attach-size-threshold)
+                               (> sz carriage-transport-gptel-auto-attach-size-threshold)))
+                  (push p acc))))
+            (nreverse acc)))
          (all (delete-dups (append manual-paths auto-paths))))
-    (carriage-log "Transport[gptel] ATTACH-COLLECT manual-lines=%d manual-paths=%d auto-paths=%d total=%d"
-                  (length manual-lines) (length manual-paths) (length auto-paths) (length all))
+    (carriage-log "Transport[gptel] ATTACH-COLLECT root=%s manual-lines=%d manual-paths=%d context-paths=%d auto-paths=%d total=%d"
+                  (or root "—")
+                  (length manual-lines) (length manual-paths)
+                  (length context-paths) (length auto-paths)
+                  (length all))
     (cl-loop
      for p in all
-     for sz = (carriage-transport-gptel--file-size p)
+     for sz = (funcall get-size p)
+     for bin = (funcall get-bin p)
      collect (list :path p
                    :mime (carriage-transport-gptel--attachment-mime p)
                    :size-bytes (and (numberp sz) sz)
                    :reason (cond
                             ((member p manual-paths) 'manual)
-                            ((carriage-transport-gptel--file-binary-p p) 'binary)
+                            (bin 'binary)
                             (t 'size-limit))))))
 
 (defun carriage-transport-gptel--attachment-mime (path)
-  "Return MIME type for PATH, or nil."
+  "Return MIME type for PATH, or nil.
+
+IMPORTANT: do not force `(require 'mailcap)` on the hot path, because loading and
+parsing mailcap may cause a noticeable stall on the first request. Media upload
+path (`carriage-transport-gptel--attachments->gptel-context`) will `require`
+mailcap when needed."
   (and (stringp path)
-       (require 'mailcap nil t)
+       (fboundp 'mailcap-file-name-to-mime-type)
        (mailcap-file-name-to-mime-type path)))
 
 (defun carriage-transport-gptel--attachment-image-p (mime)
@@ -1391,8 +1433,10 @@ FN is called as (FN MODEL-SYM EFFECTIVE-MODEL)."
     (carriage-transport-gptel--dispatch--with-effective-model
      model
      (lambda (model-sym effective-model)
-       (let* ((request (carriage-transport-gptel--dispatch--build-request
+       (let* ((t0 (float-time))
+              (request (carriage-transport-gptel--dispatch--build-request
                         prompt2 system2 attachments effective-model))
+              (t1 (float-time))
               ;; Best-effort: inject supported image/media attachments into gptel-context.
               (gptel-context (plist-get request :context)))
          (carriage-transport-gptel--dispatch--log-request
@@ -1401,18 +1445,31 @@ FN is called as (FN MODEL-SYM EFFECTIVE-MODEL)."
           (plist-get request :prompt)
           (plist-get request :system)
           buffer
-          cb))))))
+          cb)
+         (when carriage-transport-gptel-diagnostics
+           (carriage-log "Transport[gptel] PERF id=%s build-request=%.3fs call-gptel=%.3fs"
+                         id
+                         (- t1 t0)
+                         (- (float-time) t1))))))))
+
+(defun carriage-transport-gptel--dispatch-invoke--try (buffer id prompt2 system2 cb model attachments)
+  "Attempt to start a GPTel request. Errors are handled by caller."
+  (carriage-transport-gptel--dispatch--invoke-run
+   buffer id prompt2 system2 cb model attachments))
+
+(defun carriage-transport-gptel--dispatch-invoke--handle-start-error (buffer id model err)
+  "Handle ERR when GPTel request could not be started."
+  (carriage-log "Transport[gptel] START-ERROR id=%s err=%s" id (error-message-string err))
+  (carriage-transport-gptel--finalize buffer id 'error nil (list :status "start-error") model err))
 
 (defun carriage-transport-gptel--dispatch-invoke (buffer id prompt2 system2 cb model attachments)
   "Invoke GPTel request with prepared PROMPT2/SYSTEM2 and requested MODEL.
 Finalizes with error on startup failures."
   (condition-case err
-      (carriage-transport-gptel--dispatch--invoke-run
+      (carriage-transport-gptel--dispatch-invoke--try
        buffer id prompt2 system2 cb model attachments)
     (error
-     ;; Request could not be started at all.
-     (carriage-log "Transport[gptel] START-ERROR id=%s err=%s" id (error-message-string err))
-     (carriage-transport-gptel--finalize buffer id 'error nil (list :status "start-error") model err)))
+     (carriage-transport-gptel--dispatch-invoke--handle-start-error buffer id model err)))
   t)
 
 ;;;###autoload
@@ -1433,14 +1490,25 @@ This implementation is minimal and callback-driven, with watchdog + cleanup."
            (id      (carriage-transport-gptel--new-id)))
       (carriage-transport-gptel--dispatch-validate backend buffer)
       (with-current-buffer buffer
-        (let* ((cb (carriage-transport-gptel--make-callback buffer id model))
+        (let* ((t0 (float-time))
+               (cb (carriage-transport-gptel--make-callback buffer id model))
                (abort-fn (carriage-transport-gptel--dispatch-make-abort buffer id))
+               (t1 (float-time))
                (attachments (carriage-transport-gptel--collect-attachments buffer))
+               (t2 (float-time))
                (pair (carriage-transport-gptel--dispatch-prepare-payload prompt system))
+               (t3 (float-time))
                (prompt2 (car pair))
                (system2 (cdr pair))
                (system3 (carriage-transport-gptel--maybe-append-attachments-note
                          system2 attachments)))
+          (when carriage-transport-gptel-diagnostics
+            (carriage-log "Transport[gptel] PERF id=%s make-cb+abort=%.3fs collect-attachments=%.3fs prepare-payload=%.3fs preinvoke-total=%.3fs"
+                          id
+                          (- t1 t0)
+                          (- t2 t1)
+                          (- t3 t2)
+                          (- t3 t0)))
           (carriage-transport-gptel--dispatch-init buffer id model source prompt abort-fn)
           (carriage-transport-gptel--dispatch-start-watchdog buffer id abort-fn)
           (carriage-transport-gptel--dispatch-invoke buffer id prompt2 system3 cb model attachments)))

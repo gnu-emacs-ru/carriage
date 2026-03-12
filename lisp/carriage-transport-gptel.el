@@ -1535,5 +1535,145 @@ This implementation is minimal and callback-driven, with watchdog + cleanup."
           (carriage-transport-gptel--dispatch-invoke buffer id prompt2 system3 cb model attachments)))
       t))
 
-  (provide 'carriage-transport-gptel)
+  ;; --- gptel accounting hooks --------------------------------------------------
+;; We avoid changing gptel internals and instead wrap callbacks used by Carriage
+;; buffers (carriage-mode).  This lets UI show:
+;; - cost when known,
+;; - otherwise tokens or bytes,
+;; - and HTTP error code/text in status tooltip.
+
+(require 'cl-lib)
+(require 'subr-x)
+
+(defun carriage-transport-gptel--int-or-nil (x)
+  "Convert X to non-negative integer, or nil when unknown."
+  (cond
+   ((null x) nil)
+   ((eq x :null) nil)
+   ((integerp x) (and (>= x 0) x))
+   ((stringp x)
+    (when (string-match-p "\\`[0-9]+\\'" x)
+      (string-to-number x)))
+   (t nil)))
+
+(defun carriage-transport-gptel--prompt-bytes (prompt)
+  "Best-effort byte size of PROMPT (string/list), or nil."
+  (cond
+   ((stringp prompt) (string-bytes prompt))
+   ((consp prompt)
+    (cl-loop for s in prompt
+             when (stringp s) sum (string-bytes s) into n
+             finally return (and (numberp n) n)))
+   (t nil)))
+
+(defun carriage-transport-gptel--status->code+text (info)
+  "Best-effort parse of HTTP status code/text from GPTel INFO.
+Returns plist (:code INT|nil :text STRING|nil)."
+  (let* ((code-raw (plist-get info :http-status))
+         (status (plist-get info :status))
+         (code (carriage-transport-gptel--int-or-nil code-raw))
+         (text nil))
+    (when (and (null code) (stringp status))
+      (when (string-match "\\b\\([0-9][0-9][0-9]\\)\\b\\(.*\\)\\'" status)
+        (setq code (carriage-transport-gptel--int-or-nil (match-string 1 status)))
+        (setq text (string-trim (match-string 2 status)))))
+    (when (and (null text) (stringp status))
+      (setq text (string-trim status)))
+    (list :code code :text (and (stringp text) (not (string-empty-p text)) text))))
+
+(defun carriage-transport-gptel--error->string (info)
+  "Extract a short backend error/status message from INFO, or nil."
+  (let ((e (plist-get info :error))
+        (s (plist-get info :status)))
+    (cond
+     ((and (stringp e) (not (string-empty-p e))) e)
+     ((and e (not (stringp e))) (format "%S" e))
+     ((and (stringp s) (not (string-empty-p s))) s)
+     (t nil))))
+
+(defun carriage-transport-gptel--model-id-from-info (info)
+  "Extract model id/name from gptel INFO (best-effort), return string or nil."
+  (when-let* ((data-buf (plist-get info :data))
+              ((bufferp data-buf))
+              (m (with-current-buffer data-buf
+                   (and (boundp 'gptel-model) gptel-model))))
+    (format "%s" m)))
+
+(defun carriage-transport-gptel--note-metrics (buf response info bytes-in)
+  "Update BUF-local accounting vars from RESPONSE/INFO (best-effort)."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (bound-and-true-p carriage-mode)
+        ;; HTTP status/error
+        (let* ((st (carriage-transport-gptel--status->code+text info))
+               (code (plist-get st :code))
+               (text (plist-get st :text))
+               (err (carriage-transport-gptel--error->string info)))
+          (setq-local carriage--last-http-status (and code (number-to-string code)))
+          (setq-local carriage--last-http-status-text text)
+          (setq-local carriage--last-backend-error err))
+        ;; Model id (for tooltip/debug)
+        (setq-local carriage--last-model-id (carriage-transport-gptel--model-id-from-info info))
+        ;; Bytes out accounting (stream-safe)
+        (cond
+         ((stringp response)
+          (setq-local carriage--last-bytes-out-acc
+                      (+ (or carriage--last-bytes-out-acc 0)
+                         (string-bytes response))))
+         ((eq response t)
+          ;; end of streaming: nothing to add, accumulator already has the total
+          nil)
+         (t nil))
+        ;; Tokens (if gptel provides them; keep nil when unknown)
+        (let* ((tin  (or (carriage-transport-gptel--int-or-nil (plist-get info :input-tokens))
+                         (carriage-transport-gptel--int-or-nil (plist-get info :prompt-tokens))))
+               (tout (or (carriage-transport-gptel--int-or-nil (plist-get info :output-tokens))
+                         (carriage-transport-gptel--int-or-nil (plist-get info :completion-tokens))))
+               (bout (cond
+                      ((stringp response) (string-bytes response))
+                      ((eq response t) (carriage-transport-gptel--int-or-nil carriage--last-bytes-out-acc))
+                      (t nil)))
+               (usage (list :tokens-in tin
+                            :tokens-out tout
+                            :bytes-in (carriage-transport-gptel--int-or-nil bytes-in)
+                            :bytes-out (carriage-transport-gptel--int-or-nil bout))))
+          (setq-local carriage--last-usage usage))))))
+
+(defun carriage-transport-gptel--wrap-callback (orig-cb buf bytes-in)
+  "Wrap ORIG-CB so we can capture metrics for BUF.
+BYTES-IN is the prompt byte size estimate (may be nil)."
+  (lambda (response info)
+    ;; Capture metrics first, then delegate.
+    (condition-case _e
+        (carriage-transport-gptel--note-metrics buf response info bytes-in)
+      (error nil))
+    (when (functionp orig-cb)
+      (funcall orig-cb response info))))
+
+(with-eval-after-load 'gptel-request
+  (when (fboundp 'gptel-request)
+    (unless (advice-member-p 'carriage-transport-gptel--advice-gptel-request
+                             'gptel-request)
+      (defun carriage-transport-gptel--advice-gptel-request (orig &rest args)
+        "Around-advice for `gptel-request' to capture metrics for Carriage buffers."
+        (let* ((prompt (car args))
+               (rest (cdr args))
+               (buf (or (plist-get rest :buffer) (current-buffer)))
+               (cb  (plist-get rest :callback)))
+          ;; Only wrap when Carriage is active AND a callback is provided.
+          ;; (If we force a callback when CB is nil, we would break gptel's default insertion.)
+          (when (and (buffer-live-p buf)
+                     (functionp cb)
+                     (with-current-buffer buf (bound-and-true-p carriage-mode)))
+            ;; Reset streaming accumulator at request start.
+            (with-current-buffer buf
+              (setq-local carriage--last-bytes-out-acc 0))
+            (let ((bytes-in (carriage-transport-gptel--prompt-bytes prompt)))
+              (setq rest (plist-put rest :callback
+                                    (carriage-transport-gptel--wrap-callback cb buf bytes-in)))))
+          (apply orig (append (list prompt) rest))))
+      (advice-add 'gptel-request :around
+                  #'carriage-transport-gptel--advice-gptel-request))))
+
+(provide 'carriage-transport-gptel)
 ;;; carriage-transport-gptel.el ends here

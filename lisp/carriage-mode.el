@@ -4135,5 +4135,35 @@ Token plist:
 (with-eval-after-load 'carriage-mode
   (ignore-errors (carriage-mode--install-send-prepare-advice)))
 
+;; --- Last request accounting (UI/pricing/status) -----------------------------
+;; These are buffer-local so each Carriage session buffer keeps its own counters.
+
+(defvar-local carriage--last-model-id nil
+  "Last model id/name used for the request (string), for UI/pricing display.")
+
+(defvar-local carriage--last-usage nil
+  "Last request usage plist.
+Keys:
+:tokens-in  integer or nil
+:tokens-out integer or nil
+:bytes-in   integer or nil
+:bytes-out  integer or nil")
+
+(defvar-local carriage--last-cost nil
+  "Last computed cost plist returned by pricing, or nil.
+Expected keys include :known (boolean) and :cost-total-u (integer or nil).")
+
+(defvar-local carriage--last-bytes-out-acc 0
+  "Accumulator for streamed response bytes for the current in-flight request.")
+
+(defvar-local carriage--last-http-status nil
+  "Last HTTP status code as string (e.g. \"402\") for the request, if available.")
+
+(defvar-local carriage--last-http-status-text nil
+  "Last HTTP status text/line (e.g. \"Payment Required\" or full status), if available.")
+
+(defvar-local carriage--last-backend-error nil
+  "Last backend error message (short string), if available.")
+
 (provide 'carriage-mode)
 ;;; carriage-mode.el ends here

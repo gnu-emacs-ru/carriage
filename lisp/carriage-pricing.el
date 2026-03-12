@@ -331,5 +331,31 @@ Returns path string on success, or nil."
         (write-region (point-min) (point-max) path))
       path)))
 
+;; --- Normalization layer -----------------------------------------------------
+;; Some transports/UI historically coerced missing usage into 0.
+;; This makes UI show "0" instead of "unknown".  Normalize the pricing result:
+;; if cost is not known -> keep :cost-total-u nil (never 0-by-default).
+
+(defun carriage-pricing--normalize-result (res)
+  "Normalize pricing result RES so that unknown cost is represented as nil.
+This is intentionally conservative: it only changes values when RES indicates
+unknown cost."
+  (if (not (listp res))
+      res
+    (let* ((known (or (plist-get res :known)
+                      (plist-get res :cost-known)))
+           (total (plist-get res :cost-total-u)))
+      (when (and (not known)
+                 (integerp total)
+                 (= total 0))
+        (setq res (plist-put res :cost-total-u nil)))
+      res)))
+
+(when (fboundp 'carriage-pricing-compute)
+  (unless (advice-member-p #'carriage-pricing--normalize-result
+                           'carriage-pricing-compute)
+    (advice-add 'carriage-pricing-compute :filter-return
+                #'carriage-pricing--normalize-result)))
+
 (provide 'carriage-pricing)
 ;;; carriage-pricing.el ends here

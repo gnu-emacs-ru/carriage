@@ -6046,5 +6046,218 @@ Updates context badge and refreshes the modeline."
     (ignore-errors (carriage-ui--invalidate-ml-cache)))
   (force-mode-line-update t))
 
+;; --- Final UI overrides: pricing fallback + HTTP error status ----------------
+;; Keep redisplay/modeline O(1): read cached buffer-local fields only.
+
+(defun carriage-ui--format-cost-or-usage ()
+  "Return short cost label.
+
+Policy:
+- If pricing is known, show money.
+- If pricing is unknown (or looks like unknown-but-zero), show tokens if available.
+- Otherwise show bytes, as a minimum fallback."
+  (let* ((cost (and (boundp 'carriage--last-cost) carriage--last-cost))
+         (usage (and (boundp 'carriage--last-usage) carriage--last-usage))
+         (known (and (listp cost)
+                     (or (plist-get cost :known)
+                         (plist-get cost :cost-known))))
+         (total (and (listp cost) (plist-get cost :cost-total-u)))
+         (tin (and (listp usage) (plist-get usage :tokens-in)))
+         (tout (and (listp usage) (plist-get usage :tokens-out)))
+         (bin (and (listp usage) (plist-get usage :bytes-in)))
+         (bout (and (listp usage) (plist-get usage :bytes-out)))
+         (has-tokens (or (integerp tin) (integerp tout)))
+         (has-bytes (or (integerp bin) (integerp bout)))
+         ;; Treat (known && total==0 && no usage) as "unknown" to avoid a misleading 0.
+         (looks-unknown-zero (and known (integerp total) (zerop total)
+                                  (not has-tokens) (not has-bytes))))
+    (cond
+     ((and known (integerp total) (not looks-unknown-zero))
+      (if (fboundp 'carriage-pricing-format-money)
+          (carriage-pricing-format-money total)
+        (format "cost:%s" total)))
+     (has-tokens
+      (format "tok:%s/%s"
+              (if (integerp tin) tin "—")
+              (if (integerp tout) tout "—")))
+     (has-bytes
+      (format "bytes:%s/%s"
+              (if (integerp bin) bin "—")
+              (if (integerp bout) bout "—")))
+     (t "—"))))
+
+
+(defun carriage-ui--cost-tooltip ()
+  "Build tooltip for cost/usage segment."
+  (let* ((cost (and (boundp 'carriage--last-cost) carriage--last-cost))
+         (usage (and (boundp 'carriage--last-usage) carriage--last-usage))
+         (known (and (listp cost)
+                     (or (plist-get cost :known)
+                         (plist-get cost :cost-known))))
+         (total (and (listp cost) (plist-get cost :cost-total-u)))
+         (mid (and (boundp 'carriage--last-model-id) carriage--last-model-id))
+         (tin (and (listp usage) (plist-get usage :tokens-in)))
+         (tout (and (listp usage) (plist-get usage :tokens-out)))
+         (bin (and (listp usage) (plist-get usage :bytes-in)))
+         (bout (and (listp usage) (plist-get usage :bytes-out)))
+         (has-tokens (or (integerp tin) (integerp tout)))
+         (has-bytes (or (integerp bin) (integerp bout)))
+         ;; Mirrors `carriage-ui--format-cost-or-usage'.
+         (looks-unknown-zero (and known (integerp total) (zerop total)
+                                  (not has-tokens) (not has-bytes))))
+    (string-join
+     (delq nil
+           (list
+            (and (stringp mid) (not (string-empty-p mid)) (format "Model: %s" mid))
+            (cond
+             ((and known (integerp total) (not looks-unknown-zero))
+              (format "Cost: %s" total))
+             (t
+              (concat
+               "Cost: unknown"
+               (cond
+                (has-tokens " (fallback: tokens)")
+                (has-bytes  " (fallback: bytes)")
+                (t          "")))))
+            (and (or tin tout)
+                 (format "Tokens: in=%s out=%s"
+                         (if (integerp tin) tin "—")
+                         (if (integerp tout) tout "—")))
+            (and (or bin bout)
+                 (format "Bytes: in=%s out=%s"
+                         (if (integerp bin) bin "—")
+                         (if (integerp bout) bout "—")))))
+     "\n")))
+
+
+(defun carriage-ui--ml-seg-cost ()
+  "Modeline segment: cost (with tokens/bytes fallback)."
+  (let* ((lbl (carriage-ui--format-cost-or-usage))
+         (tip (carriage-ui--cost-tooltip)))
+    (propertize lbl
+                'help-echo (and (stringp tip) (not (string-empty-p tip)) tip)
+                'mouse-face 'mode-line-highlight)))
+
+(defun carriage-ui--status-label ()
+  "Short status label for modeline, including HTTP code on errors."
+  (let* ((st (and (boundp 'carriage--ui-state) carriage--ui-state))
+         (code0 (and (boundp 'carriage--last-http-status) carriage--last-http-status))
+         (txt0 (and (boundp 'carriage--last-http-status-text) carriage--last-http-status-text))
+         (be0  (and (boundp 'carriage--last-backend-error) carriage--last-backend-error))
+         (code
+          (cond
+           ((integerp code0) (number-to-string code0))
+           ((and (stringp code0) (not (string-empty-p code0))) code0)
+           ;; Best-effort fallback: sometimes code is only present in status/error text.
+           ((and (stringp txt0)
+                 (string-match "\\b\\([0-9][0-9][0-9]\\)\\b" txt0))
+            (match-string 1 txt0))
+           ((and (stringp be0)
+                 (string-match "\\b\\([0-9][0-9][0-9]\\)\\b" be0))
+            (match-string 1 be0))
+           (t nil))))
+    (cond
+     ((and (eq st 'error) (stringp code) (not (string-empty-p code)))
+      (format "Error: %s" code))
+     ((eq st 'error) "Error")
+     ((eq st 'sending) "Sending")
+     ((eq st 'streaming) "Streaming")
+     ((eq st 'reasoning) "Reasoning")
+     ((eq st 'idle) "Idle")
+     (st (format "%s" st))
+     (t "—"))))
+
+
+(defun carriage-ui--status-tooltip ()
+  "Tooltip for status segment: HTTP code/text + backend message."
+  (let* ((code0 (and (boundp 'carriage--last-http-status) carriage--last-http-status))
+         (code (cond
+                ((integerp code0) (number-to-string code0))
+                ((stringp code0) code0)
+                (t nil)))
+         (txt  (and (boundp 'carriage--last-http-status-text) carriage--last-http-status-text))
+         (be   (and (boundp 'carriage--last-backend-error) carriage--last-backend-error))
+         (mid  (and (boundp 'carriage--last-model-id) carriage--last-model-id)))
+    (string-join
+     (delq nil
+           (list
+            (and (stringp code)
+                 (not (string-empty-p code))
+                 (format "HTTP: %s%s"
+                         code
+                         (if (and (stringp txt) (not (string-empty-p txt)))
+                             (format " — %s" txt)
+                           "")))
+            ;; If HTTP code is missing but we still have a status text, show it anyway.
+            (and (or (null code) (and (stringp code) (string-empty-p code)))
+                 (stringp txt) (not (string-empty-p txt))
+                 (format "HTTP: %s" txt))
+            (and (stringp be) (not (string-empty-p be)) (format "Backend: %s" be))
+            (and (stringp mid) (not (string-empty-p mid)) (format "Model: %s" mid))))
+     "\n")))
+
+(defun carriage-ui--ml-seg-status ()
+  "Modeline segment: status with HTTP error tooltip."
+  (let* ((lbl (carriage-ui--status-label))
+         (tip (carriage-ui--status-tooltip)))
+    (propertize lbl
+                'help-echo (and (stringp tip) (not (string-empty-p tip)) tip)
+                'mouse-face 'mode-line-highlight)))
+
+;; Ensure modeline cache reacts to status/cost updates (still O(1)).
+(defun carriage-ui--ml-cache-key ()
+  "Compute modeline cache key (O(1), no scans/IO).
+Includes ctx badge version, status/error fields and cost/usage label."
+  (let* ((uicons (and (fboundp 'carriage-ui--icons-available-p)
+                      (carriage-ui--icons-available-p)))
+         (blocks (if (and (boundp 'carriage-ui-modeline-blocks)
+                          (listp carriage-ui-modeline-blocks)
+                          carriage-ui-modeline-blocks)
+                     carriage-ui-modeline-blocks
+                   (and (boundp 'carriage-ui--modeline-default-blocks)
+                        carriage-ui--modeline-default-blocks)))
+         (state  (and (boundp 'carriage--ui-state) carriage--ui-state))
+         (spin   (and (boundp 'carriage-ui-enable-spinner) carriage-ui-enable-spinner
+                      (memq state '(sending streaming dispatch waiting reasoning))
+                      (fboundp 'carriage-ui--spinner-char)
+                      (carriage-ui--spinner-char)))
+         (ctx-ver (and (memq 'context blocks)
+                       (boundp 'carriage-ui--ctx-badge-version)
+                       carriage-ui--ctx-badge-version))
+         (patch-count (and (memq 'patch blocks)
+                           (not (memq state '(sending streaming dispatch waiting reasoning)))
+                           (numberp (and (boundp 'carriage-ui--patch-count-cache)
+                                         carriage-ui--patch-count-cache))
+                           carriage-ui--patch-count-cache))
+         ;; Include error and cost label (cheap) so changes invalidate cached modeline string.
+         (http-code (and (boundp 'carriage--last-http-status) carriage--last-http-status))
+         (http-txt  (and (boundp 'carriage--last-http-status-text) carriage--last-http-status-text))
+         (be        (and (boundp 'carriage--last-backend-error) carriage--last-backend-error))
+         (costlbl   (ignore-errors (carriage-ui--format-cost-or-usage))))
+    (list uicons
+          state spin
+          ctx-ver patch-count
+          http-code http-txt be
+          costlbl
+          blocks
+          (and (boundp 'carriage-mode-intent) carriage-mode-intent)
+          (and (boundp 'carriage-mode-suite) carriage-mode-suite)
+          (and (boundp 'carriage-mode-model) carriage-mode-model)
+          (and (boundp 'carriage-mode-backend) carriage-mode-backend)
+          (and (boundp 'carriage-mode-provider) carriage-mode-provider)
+          (and (boundp 'carriage-apply-engine) carriage-apply-engine)
+          (and (boundp 'carriage-git-branch-policy) carriage-git-branch-policy)
+          (and (boundp 'carriage-mode-include-gptel-context)
+               carriage-mode-include-gptel-context)
+          (and (boundp 'carriage-mode-include-doc-context)
+               carriage-mode-include-doc-context)
+          (and (boundp 'carriage-mode-include-visible-context)
+               carriage-mode-include-visible-context)
+          (and (boundp 'carriage-mode-include-patched-files)
+               carriage-mode-include-patched-files)
+          (and (boundp 'carriage-doc-context-scope) carriage-doc-context-scope)
+          (and (boundp 'carriage-ui-context-badge-refresh-interval)
+               carriage-ui-context-badge-refresh-interval))))
+
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

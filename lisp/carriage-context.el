@@ -45,6 +45,23 @@
   :type 'boolean
   :group 'carriage-context)
 
+(defcustom carriage-context-collect-async-timeout-seconds 12.0
+  "Timeout in seconds for `carriage-context-collect-async'.
+
+If non-nil and >0, a watchdog timer ensures CALLBACK is invoked even if the async
+collector stalls or never calls back. On timeout, CALLBACK receives a minimal
+empty context with a warning."
+  :type '(choice (const :tag "No timeout" nil) number)
+  :group 'carriage-context)
+
+(defcustom carriage-context-collect-async-slice-seconds 0.02
+  "Time budget per tick (seconds) for incremental `carriage-context-collect-async'.
+
+When >0, the async collector performs work in small slices scheduled via timers,
+so UI stays responsive even when many files are included in context."
+  :type 'number
+  :group 'carriage-context)
+
 (defcustom carriage-context-file-cache-ttl 5.0
   "TTL in seconds for cached file contents used during context collection.
 When nil, cache entries are considered valid until file size or mtime changes."
@@ -186,7 +203,10 @@ This function is designed to be O(1) per edit."
             ;; Buffer-local hook; O(1) per edit and only marks dirty when patch lines touched.
             (add-hook 'after-change-functions
                       #'carriage-context--patched-files-mark-dirty
-                      nil t)))
+                      nil t)
+            ;; Opportunistically warm Project Map cache on idle to reduce Send latency.
+            (when (fboundp 'carriage-context-project-map-warm-ensure)
+              (ignore-errors (carriage-context-project-map-warm-ensure)))))
 
 ;;;###autoload
 (defun carriage-toggle-include-patched-files ()
@@ -865,6 +885,211 @@ and size limits:
          (config (carriage-context--collect-config buf root)))
     (carriage-context--collect-exec buf config)))
 
+(defun carriage-context-collect-async (callback &optional buffer root)
+  "Collect context asynchronously and invoke CALLBACK with CTX on the main thread.
+Returns a token plist: (:timer TIMER), plus :watchdog timer when enabled.
+Token also includes :cancel-fn which cancels pending work.
+
+Best-effort: never signals.
+
+Important:
+- This implementation is incremental (timer-driven) to avoid blocking the UI.
+- It does NOT rely on Lisp threads, because file I/O in a thread can still block
+  the Emacs UI in practice."
+  (let* ((buf (or buffer (current-buffer)))
+         (timeout carriage-context-collect-async-timeout-seconds)
+         (slice (or carriage-context-collect-async-slice-seconds 0.02))
+         (done nil)
+         (watchdog nil)
+         (timer nil)
+         (queue nil)
+         (state nil)
+         (token (list :timer nil :watchdog nil :cancel-fn nil)))
+    (cl-labels
+        ((empty-ctx (why)
+           (list :files '()
+                 :warnings (list (format "CTX_TIMEOUT: %s" (or why "context collection timed out")))
+                 :omitted 0
+                 :stats (list :total-bytes 0 :included 0 :skipped 0)))
+         (finish (ctx &optional why)
+           ;; Ensure callback is invoked once; always pass a plist-shaped CTX.
+           (unless done
+             (setq done t)
+             (when (timerp watchdog)
+               (ignore-errors (cancel-timer watchdog))
+               (setq watchdog nil))
+             (when (timerp timer)
+               (ignore-errors (cancel-timer timer))
+               (setq timer nil))
+             (setf (plist-get token :timer) nil)
+             (setf (plist-get token :watchdog) nil)
+             (let ((ctx2 (if (listp ctx) ctx (empty-ctx why))))
+               (run-at-time 0 nil
+                            (lambda ()
+                              (when (functionp callback)
+                                (ignore-errors (funcall callback ctx2))))))))
+         (cancel ()
+           (finish (empty-ctx "cancelled") "cancelled")
+           t)
+         (inc-patched-p ()
+           (with-current-buffer buf
+             (and (boundp 'carriage-mode-include-patched-files)
+                  carriage-mode-include-patched-files)))
+         (visible-items ()
+           "Return list of visible work items for BUF.
+Items are either (:kind path :value STRING) or (:kind visible-buffer :buffer BUF)."
+           (let ((items '()))
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (let ((seen (make-hash-table :test 'eq))
+                       (ignored-modes (and (boundp 'carriage-visible-ignore-modes) carriage-visible-ignore-modes))
+                       (ignored-names (and (boundp 'carriage-visible-ignore-buffer-regexps) carriage-visible-ignore-buffer-regexps)))
+                   (walk-windows
+                    (lambda (w)
+                      (let ((b (window-buffer w)))
+                        (unless (gethash b seen)
+                          (puthash b t seen)
+                          (with-current-buffer b
+                            (let* ((nm (buffer-name b))
+                                   (mm major-mode)
+                                   (skip
+                                    (or (and (boundp 'carriage-visible-exclude-current-buffer)
+                                             carriage-visible-exclude-current-buffer
+                                             (eq b buf))
+                                        (minibufferp b)
+                                        (eq mm 'exwm-mode)
+                                        (and (listp ignored-modes) (memq mm ignored-modes))
+                                        (and (listp ignored-names)
+                                             (seq-some (lambda (rx) (and (stringp rx) (string-match-p rx nm)))
+                                                       ignored-names)))))
+                              (unless skip
+                                (let ((bf (buffer-file-name b)))
+                                  (cond
+                                   ((and (stringp bf) (not (file-remote-p bf)))
+                                    (push (list :kind 'path :value bf) items))
+                                   (t
+                                    (push (list :kind 'visible-buffer :buffer b) items))))))))))
+                    nil (selected-frame)))))
+             (nreverse items)))
+         (process-visible-buffer (vb)
+           "Include a visible non-file buffer VB into STATE (budgeted)."
+           (when (buffer-live-p vb)
+             (with-current-buffer vb
+               (let* ((nm (buffer-name vb))
+                      (mm major-mode)
+                      (rel (format "visible:/%s" nm))
+                      (tail (or (and (boundp 'carriage-visible-terminal-tail-lines)
+                                     carriage-visible-terminal-tail-lines)
+                                256))
+                      (is-term (or (derived-mode-p 'comint-mode)
+                                   (derived-mode-p 'eshell-mode)
+                                   (derived-mode-p 'term-mode)
+                                   (ignore-errors (derived-mode-p 'vterm-mode))
+                                   (derived-mode-p 'compilation-mode)
+                                   (eq mm 'messages-buffer-mode)
+                                   (string= nm "*Messages*")))
+                      (text
+                       (save-excursion
+                         (save-restriction
+                           (widen)
+                           (if (not is-term)
+                               (buffer-substring-no-properties (point-min) (point-max))
+                             (goto-char (point-max))
+                             (forward-line (- tail))
+                             (buffer-substring-no-properties (point) (point-max))))))
+                      (sz (string-bytes (or text "")))
+                      (max-bytes (plist-get state :max-bytes))
+                      (total (plist-get state :total-bytes)))
+                 (if (and (numberp max-bytes) (> (+ total sz) max-bytes))
+                     (progn
+                       (setq state (carriage-context--push-warning
+                                    (format "limit reached, include path only: %s" rel) state))
+                       (setq state (carriage-context--push-file
+                                    (list :rel rel :true nil :content nil :reason 'size-limit)
+                                    state))
+                       (setq state (plist-put state :skipped (1+ (plist-get state :skipped)))))
+                   (setq state (carriage-context--push-file
+                                (list :rel rel :true nil :content text)
+                                state))
+                   (setq state (plist-put state :total-bytes (+ total sz)))
+                   (setq state (plist-put state :included (1+ (plist-get state :included))))))))))
+         (build-queue ()
+           (let* ((config (carriage-context--collect-config buf root))
+                  (inc-doc (plist-get config :include-doc))
+                  (inc-gpt (plist-get config :include-gptel))
+                  (inc-vis (plist-get config :include-visible))
+                  (inc-pat (inc-patched-p))
+                  (pat (when inc-pat (ignore-errors (carriage-context--patched-files buf))))
+                  (doc (when inc-doc (ignore-errors (carriage-context--doc-paths buf))))
+                  (vis (when inc-vis (ignore-errors (visible-items))))
+                  (gpt (when inc-gpt (ignore-errors (carriage-context--maybe-gptel-files))))
+                  (q '()))
+             ;; Same preference ordering as sync collector:
+             ;; patched → doc → visible → gptel.
+             (dolist (p (or pat '()))
+               (when (stringp p) (push (list :kind 'path :value p) q)))
+             (dolist (p (or doc '()))
+               (when (stringp p) (push (list :kind 'path :value p) q)))
+             (dolist (it (or vis '()))
+               (when (listp it) (push it q)))
+             (dolist (p (or gpt '()))
+               (when (stringp p) (push (list :kind 'path :value p) q)))
+             (setq queue (nreverse q))
+             (setq state (carriage-context--collect-init-state config))))
+         (step ()
+           (condition-case e
+               (progn
+                 (when (or done (not (buffer-live-p buf)))
+                   (finish (empty-ctx "buffer not live") "buffer not live"))
+                 (when (and (not done) (listp state))
+                   (let* ((t0 (float-time))
+                          (budget (max 0.001 (float (or slice 0.02)))))
+                     (while (and (not done)
+                                 (consp queue)
+                                 (carriage-context--state-under-file-limit-p state)
+                                 (< (- (float-time) t0) budget))
+                       (let* ((it (pop queue))
+                              (kind (plist-get it :kind)))
+                         (pcase kind
+                           ('path
+                            (let ((p (plist-get it :value)))
+                              (when (and (stringp p) (not (string-empty-p p)))
+                                (setq state (carriage-context--collect-process-path p state)))))
+                           ('visible-buffer
+                            (let ((vb (plist-get it :buffer)))
+                              (process-visible-buffer vb)))
+                           (_ nil)))
+                       ;; Yield to keep UI responsive between items.
+                       (sit-for 0))
+                     (cond
+                      ((or done (not (carriage-context--state-under-file-limit-p state)) (null queue))
+                       (finish (carriage-context--collect-finalize state)))
+                      (t
+                       (setq timer (run-at-time 0 nil #'step))
+                       (setf (plist-get token :timer) timer))))))
+             (error
+              (finish (empty-ctx (error-message-string e)) (error-message-string e))))))
+      ;; Init token cancel-fn
+      (setf (plist-get token :cancel-fn) #'cancel)
+
+      ;; Watchdog: prevents "Send" from hanging forever if prepare stalls.
+      (when (and (numberp timeout) (> timeout 0))
+        (setq watchdog (run-at-time timeout nil (lambda () (finish nil "context collection timed out"))))
+        (setf (plist-get token :watchdog) watchdog))
+
+      ;; Build initial queue/state (fast; no file reads).
+      (condition-case e
+          (build-queue)
+        (error
+         (finish (empty-ctx (error-message-string e)) (error-message-string e))))
+
+      ;; Kick the incremental worker.
+      (unless done
+        (setq timer (run-at-time 0 nil #'step))
+        (setf (plist-get token :timer) timer))
+
+      token))
+
 (defun carriage-context--guess-lang (path)
   "Guess language token for Org src block by PATH extension."
   (let ((ext (downcase (file-name-extension path ""))))
@@ -1517,6 +1742,50 @@ Best-effort: never signals. Returns non-nil."
 This MUST be nil on redisplay/modeline/timer paths. The send pipeline binds it to t
 around Project Map generation.")
 
+(defcustom carriage-context-project-map-warm-on-idle t
+  "When non-nil, warm Project Map cache in the background (idle timer) for buffers with `carriage-mode' enabled.
+This reduces perceived latency on Send when project map context is enabled."
+  :type 'boolean
+  :group 'carriage-context)
+
+(defcustom carriage-context-project-map-warm-idle-seconds 1.0
+  "Seconds of idle time before warming Project Map cache."
+  :type 'number
+  :group 'carriage-context)
+
+(defvar-local carriage-context--project-map-warm-timer nil
+  "Idle timer used to warm Project Map cache for the current buffer (best-effort).")
+
+(defun carriage-context-project-map-warm-ensure (&optional root)
+  "Schedule a best-effort Project Map cache warm-up on idle.
+Never signals. Returns non-nil."
+  (let ((want (and (boundp 'carriage-context-project-map-warm-on-idle)
+                   carriage-context-project-map-warm-on-idle))
+        (map-on (if (boundp 'carriage-mode-include-project-map)
+                    carriage-mode-include-project-map
+                  t)))
+    (when (and want map-on (not (timerp carriage-context--project-map-warm-timer)))
+      (let* ((buf (current-buffer))
+             (r (or root (carriage-context--project-root)))
+             (delay (max 0.1 (float (or carriage-context-project-map-warm-idle-seconds 1.0)))))
+        (setq carriage-context--project-map-warm-timer
+              (run-with-idle-timer
+               delay nil
+               (lambda ()
+                 (when (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (setq carriage-context--project-map-warm-timer nil)
+                     (let ((carriage-context--project-map-allow-compute t))
+                       (cond
+                        ;; Prefer nonblocking async warm to avoid idle-time UI stalls.
+                        ((fboundp 'carriage-context-project-map-build-async)
+                         (ignore-errors
+                           (carriage-context-project-map-build-async
+                            r (lambda (&rest _x) nil) (lambda (&rest _x) nil))))
+                        (t
+                         (ignore-errors (carriage-context-project-map-build r)))))))))))))
+  t)
+
 (defun carriage-context--project-map--node-make ()
   "Make an empty trie node.
 Node is a plist: (:dirs HASH :files HASH)."
@@ -1630,6 +1899,8 @@ Best-effort: never signals."
                                    (setq done t)))))
               (while (and (processp proc) (not done) (< (float-time) deadline))
                 (accept-process-output proc 0.03)
+                ;; Yield to let timers/redisplay run (reduce perceived UI freezes).
+                (sit-for 0)
                 (when (and (not done)
                            (memq (process-status proc) '(exit signal failed)))
                   (setq exit-code (condition-case _
@@ -1835,8 +2106,8 @@ Order (fastest-first, with short timeouts):
   "Return result plist if no files could be found for Project Map."
   (list :ok nil :reason (or why 'empty) :method method :elapsed elapsed))
 
-(defun carriage-context--project-map--assemble-block-details (files method elapsed)
-  "Build trie, render, possibly truncate, and return (plist rec block-details)."
+(defun carriage-context--project-map--assemble-block-details (files method elapsed root)
+  "Build trie, render, possibly truncate, and cache the result for ROOT."
   (let* ((maxp (max 0 (or carriage-context-project-map-max-paths 0)))
          (maxb (max 0 (or carriage-context-project-map-max-bytes 0)))
          (all (sort (copy-sequence files) #'string<))
@@ -1866,7 +2137,7 @@ Order (fastest-first, with short timeouts):
                                method trunc-paths trunc-bytes))
       (carriage-context--dbg "project-map: built method=%s paths=%d bytes=%d elapsed=%.3fs"
                              method (length paths) (string-bytes (or text "")) (or elapsed 0.0))
-      (carriage-context--project-map--cache-put (carriage-context--project-root) rec)
+      (carriage-context--project-map--cache-put root rec)
       (list :ok t
             :text text
             :paths (length paths)
@@ -1903,7 +2174,7 @@ If a fresh cache record is found, returns it early."
         (elapsed (plist-get lr :elapsed))
         (why (plist-get lr :reason)))
     (if (and ok (listp files) (> (length files) 0))
-        (carriage-context--project-map--assemble-block-details files method elapsed)
+        (carriage-context--project-map--assemble-block-details files method elapsed r)
       (progn
         (carriage-context--dbg "project-map: omitted reason=%s method=%s elapsed=%.3fs root=%s"
                                why method (or elapsed 0.0) r)

@@ -85,6 +85,8 @@ about the lifecycle (spawn, wait ticks, timeout/exit) to help diagnose stalls."
                 (progn
                   (while (and (not done) (< (float-time) deadline))
                     (accept-process-output proc 0.05)
+                    ;; Yield to let timers/redisplay run (reduce perceived UI freezes).
+                    (sit-for 0)
                     ;; Robustness: if the process already exited but sentinel didn't flip DONE
                     ;; (can happen in some edge cases), stop waiting immediately.
                     (when (and (processp proc)

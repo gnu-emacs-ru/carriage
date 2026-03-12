@@ -2484,7 +2484,7 @@ May include :context-text and :context-target per v1.1."
 
 ;;; Commands (stubs/minimal implementations)
 
-(defcustom carriage-mode-send-async-context t
+(defcustom carriage-mode-send-async-context nil
   "When non-nil, build payload/context and prompt in a background thread before dispatching.
 
 Goal: keep UI responsive when context collection is expensive (doc files, patched-files,
@@ -2571,6 +2571,10 @@ When async is enabled, preparation runs in a background thread; otherwise runs
 synchronously (still outside the immediate interactive command tick)."
   (when (buffer-live-p srcbuf)
     (with-current-buffer srcbuf
+      (carriage-log "send: start source=%s async=%s backend=%s model=%s intent=%s suite=%s"
+                    source
+                    (if (carriage--send-prep-async-enabled-p) "yes" "no")
+                    backend model intent suite)
       (setq carriage--send-prep-cancelled nil)
       (setq carriage--send-prep-job-id (1+ (or carriage--send-prep-job-id 0)))
       (let* ((job-id carriage--send-prep-job-id))
@@ -2578,6 +2582,8 @@ synchronously (still outside the immediate interactive command tick)."
         (carriage-register-abort-handler
          (lambda ()
            (carriage--send-prep-cancel job-id)))
+        ;; Keep UI responsive and show activity while we prepare.
+        (carriage-ui-set-state 'sending)
         (if (carriage--send-prep-async-enabled-p)
             (progn
               (setq carriage--send-prep-thread
@@ -2604,10 +2610,13 @@ synchronously (still outside the immediate interactive command tick)."
                                   (cond
                                    ((or carriage--send-prep-cancelled
                                         (plist-get res :quit))
-                                    (carriage-log "send: prep finished but cancelled job=%s" job-id)
+                                    (carriage-log "send: prep done but cancelled source=%s job=%s"
+                                                  source job-id)
                                     (ignore-errors (carriage--preloader-stop))
                                     (ignore-errors (carriage-ui-set-state 'idle)))
                                    ((plist-get res :ok)
+                                    (carriage-log "send: prep ok source=%s job=%s elapsed=%.3fs"
+                                                  source job-id (or (plist-get res :elapsed) 0.0))
                                     (carriage-traffic-log 'out
                                                           "send: prep ok source=%s elapsed=%.3fs"
                                                           source (or (plist-get res :elapsed) 0.0))
@@ -2623,17 +2632,17 @@ synchronously (still outside the immediate interactive command tick)."
                                     (ignore-errors (carriage-ui-set-state 'idle))
                                     (when (not (bound-and-true-p noninteractive))
                                       (message "Carriage: подготовка запроса не удалась: %s"
-                                               (or (plist-get res :error) "unknown error")))))))))))))
-                    (format "carriage-send-prep-%s" job-id)))
-          t)
-        ;; Sync preparation (still in deferred tick; may block UI)
-        (let* ((ctx (carriage--build-context source srcbuf))
-               (built (carriage-build-prompt intent suite ctx))
-               (sys (plist-get built :system))
-               (pr  (plist-get built :prompt)))
-          (carriage--send-dispatch-with-prompt
-           source srcbuf backend model intent suite pr sys insert-marker)
-          t)))))
+                                               (or (plist-get res :error) "unknown error"))))))))))))))
+              (format "carriage-send-prep-%s" job-id))))
+      t)
+    ;; Sync preparation fallback (still in deferred tick; may block UI)
+    (let* ((ctx (carriage--build-context source srcbuf))
+           (built (carriage-build-prompt intent suite ctx))
+           (sys (plist-get built :system))
+           (pr  (plist-get built :prompt)))
+      (carriage--send-dispatch-with-prompt
+       source srcbuf backend model intent suite pr sys insert-marker)
+      t)))
 
 ;;;###autoload
 (defun carriage-send-buffer ()
@@ -2680,6 +2689,8 @@ synchronously (still outside the immediate interactive command tick)."
      (lambda ()
        (let ((current-prefix-arg prefix))
          (with-current-buffer srcbuf
+           (carriage-log "send-buffer: deferred tick; starting prepare (backend=%s model=%s)"
+                         carriage-mode-backend carriage-mode-model)
            (carriage--send-prepare-and-dispatch
             'buffer
             srcbuf
@@ -2732,6 +2743,8 @@ synchronously (still outside the immediate interactive command tick)."
        (let ((current-prefix-arg prefix))
          (when (buffer-live-p srcbuf)
            (with-current-buffer srcbuf
+             (carriage-log "send-subtree: deferred tick; starting prepare (backend=%s model=%s)"
+                           carriage-mode-backend carriage-mode-model)
              (carriage--send-prepare-and-dispatch
               'subtree
               srcbuf
@@ -3967,6 +3980,160 @@ Idempotent:
               (insert abs "\n")))))))
   (force-mode-line-update t)
   (message "Attached: %s" (file-name-nondirectory (file-truename (expand-file-name path)))))
+
+(defgroup carriage-send-performance nil
+  "Performance knobs for Send pipeline (prepare/warm steps)."
+  :group 'carriage
+  :prefix "carriage-mode-send-")
+
+(defcustom carriage-mode-send-prepare-async t
+  "When non-nil, pre-warm expensive context computations asynchronously before dispatch.
+
+Goal:
+- Avoid UI freezes during Send by moving file I/O / project-map generation into
+  timer/process-driven async preflight.
+- After preflight completes (or times out), the original send command is invoked.
+
+Notes:
+- In batch/noninteractive sessions this is forced off for determinism."
+  :type 'boolean
+  :group 'carriage-send-performance)
+
+(defcustom carriage-mode-send-prepare-timeout-seconds 3.0
+  "Timeout in seconds for async Send preflight (context/map warm).
+When exceeded, Send proceeds with best-effort (original command is invoked anyway)."
+  :type 'number
+  :group 'carriage-send-performance)
+
+(defvar-local carriage-mode--send-prepare-token nil
+  "Current async Send preflight token for this buffer (or nil).
+
+Token plist:
+  :cancelled BOOL
+  :ctx TOKEN (from `carriage-context-collect-async')
+  :map TOKEN (from `carriage-context-project-map-build-async')
+  :cancel-fn FN")
+
+(defun carriage-mode--send-prepare-cancel ()
+  "Cancel pending async Send preflight for current buffer (best-effort)."
+  (when (listp carriage-mode--send-prepare-token)
+    (let ((cf (plist-get carriage-mode--send-prepare-token :cancel-fn)))
+      (when (functionp cf) (ignore-errors (funcall cf)))))
+  (setq carriage-mode--send-prepare-token nil)
+  t)
+
+(defun carriage-mode--send-prepare--start (buf root on-ready)
+  "Start async preflight for BUF/ROOT, invoke ON-READY once on completion/timeout."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (carriage-mode--send-prepare-cancel)
+      (let* ((cancelled nil)
+             (ctx-done nil)
+             (map-done t)   ;; becomes nil if map task is started
+             (fired nil)
+             (ctx-token nil)
+             (map-token nil)
+             (wd nil)
+             (token (list :cancelled nil :ctx nil :map nil :cancel-fn nil)))
+        (cl-labels
+            ((finish ()
+               (when (and (not fired) ctx-done map-done (not cancelled))
+                 (setq fired t)
+                 (when (timerp wd) (ignore-errors (cancel-timer wd)) (setq wd nil))
+                 (setq carriage-mode--send-prepare-token nil)
+                 (when (functionp on-ready)
+                   (run-at-time 0 nil (lambda () (funcall on-ready))))))
+             (cancel ()
+               (setq cancelled t)
+               (setf (plist-get token :cancelled) t)
+               (when (timerp wd) (ignore-errors (cancel-timer wd)) (setq wd nil))
+               (when (listp ctx-token)
+                 (let ((cf (plist-get ctx-token :cancel-fn)))
+                   (when (functionp cf) (ignore-errors (funcall cf)))))
+               (when (listp map-token)
+                 (let ((cf (plist-get map-token :cancel-fn)))
+                   (when (functionp cf) (ignore-errors (funcall cf)))))
+               (setq carriage-mode--send-prepare-token nil)
+               t))
+          (setf (plist-get token :cancel-fn) #'cancel)
+          (setq carriage-mode--send-prepare-token token)
+
+          ;; Watchdog: never wait forever; proceed to original send.
+          (let ((tmo (or carriage-mode-send-prepare-timeout-seconds 3.0)))
+            (when (and (numberp tmo) (> tmo 0))
+              (setq wd (run-at-time tmo nil
+                                    (lambda ()
+                                      (setq ctx-done t map-done t)
+                                      (finish))))))
+
+          ;; Warm Project Map cache if enabled.
+          (when (and (boundp 'carriage-mode-include-project-map)
+                     carriage-mode-include-project-map
+                     (require 'carriage-context nil t)
+                     (fboundp 'carriage-context-project-map-build-async))
+            (setq map-done nil)
+            (let ((carriage-context--project-map-allow-compute t))
+              (setq map-token
+                    (ignore-errors
+                      (carriage-context-project-map-build-async
+                       root
+                       (lambda (&rest _r) (setq map-done t) (finish))
+                       (lambda (&rest _e) (setq map-done t) (finish))))))
+            (setf (plist-get token :map) map-token))
+
+          ;; Warm context file cache (doc/visible/gptel/patched) using the async collector.
+          (when (require 'carriage-context nil t)
+            (let ((carriage-context-collect-async-timeout-seconds
+                   (min (or carriage-mode-send-prepare-timeout-seconds 3.0)
+                        (or carriage-context-collect-async-timeout-seconds 12.0))))
+              (setq ctx-token
+                    (ignore-errors
+                      (carriage-context-collect-async
+                       (lambda (_ctx) (setq ctx-done t) (finish))
+                       buf root)))))
+          (setf (plist-get token :ctx) ctx-token)
+          ;; If async collector couldn't start, don't block Send.
+          (when (null ctx-token)
+            (setq ctx-done t)
+            (finish))
+          token)))))
+
+(defun carriage-mode--send-prepare-async-around (orig &rest args)
+  "Advice around Send commands: async warm context/map, then call ORIG."
+  (if (or noninteractive
+          (not carriage-mode-send-prepare-async)
+          ;; If async collector is unavailable, fall back to original.
+          (not (require 'carriage-context nil t))
+          (not (fboundp 'carriage-context-collect-async)))
+      (apply orig args)
+    (let* ((buf (current-buffer))
+           (root (or (and (fboundp 'carriage-project-root) (ignore-errors (carriage-project-root)))
+                     default-directory))
+           (orig-fn orig)
+           (orig-args (copy-sequence args)))
+      ;; Start preflight; dispatch only after warm completes (or times out).
+      (carriage-mode--send-prepare--start
+       buf root
+       (lambda ()
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (ignore-errors (apply orig-fn orig-args)))))))))
+
+(defvar carriage-mode--send-prepare-advice-installed nil
+  "Non-nil when async Send prepare advice was installed.")
+
+(defun carriage-mode--install-send-prepare-advice ()
+  "Install async Send preflight advice for available send commands (best-effort)."
+  (unless carriage-mode--send-prepare-advice-installed
+    (setq carriage-mode--send-prepare-advice-installed t)
+    (dolist (fn '(carriage-send-buffer carriage-send-region carriage-send))
+      (when (and (symbolp fn) (fboundp fn))
+        (advice-add fn :around #'carriage-mode--send-prepare-async-around)))))
+
+;; Install immediately (functions are defined in this file), and also after reloads.
+(ignore-errors (carriage-mode--install-send-prepare-advice))
+(with-eval-after-load 'carriage-mode
+  (ignore-errors (carriage-mode--install-send-prepare-advice)))
 
 (provide 'carriage-mode)
 ;;; carriage-mode.el ends here

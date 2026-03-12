@@ -2038,11 +2038,24 @@ This function is best-effort and must never signal."
                             money))))
         (unless (markerp marker)
           (cl-return-from carriage-fingerprint-note-usage-and-cost nil))
-        ;; Usage keys (always upsert, even if nil)
-        (setq pl (plist-put pl :CAR_TOKENS_IN tin))
-        (setq pl (plist-put pl :CAR_TOKENS_OUT tout))
-        (setq pl (plist-put pl :CAR_BYTES_IN bin))
-        (setq pl (plist-put pl :CAR_BYTES_OUT bout))
+        ;; Usage keys (always upsert, even if nil).
+        ;;
+        ;; Display/UX policy:
+        ;; - When token usage is unavailable (common in streaming), fall back to bytes so
+        ;;   fingerprint folds / summaries don't stay at "in:- out:-".
+        ;; - Preserve raw bytes in dedicated keys regardless.
+        (let* ((tin2 (if (integerp tin) tin (and (integerp bin) bin)))
+               (tout2 (if (integerp tout) tout (and (integerp bout) bout)))
+               (unit (cond
+                      ((or (integerp tin) (integerp tout)) 'tokens)
+                      ((or (integerp bin) (integerp bout)) 'bytes)
+                      (t nil))))
+          (setq pl (plist-put pl :CAR_TOKENS_IN tin2))
+          (setq pl (plist-put pl :CAR_TOKENS_OUT tout2))
+          (setq pl (plist-put pl :CAR_BYTES_IN bin))
+          (setq pl (plist-put pl :CAR_BYTES_OUT bout))
+          (when unit
+            (setq pl (plist-put pl :CAR_USAGE_UNIT unit))))
         (setq pl (plist-put pl :CAR_AUDIO_IN ain))
         (setq pl (plist-put pl :CAR_AUDIO_OUT aout))
         ;; Cost keys (best-effort)

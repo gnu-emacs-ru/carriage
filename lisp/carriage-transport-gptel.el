@@ -623,12 +623,30 @@ Also merges bytes-in/out captured by our `gptel-request' wrapper when available.
              (pl (if carriage-transport-gptel-result-include-model
                      (plist-put pl :CAR_MODEL (or model-str ""))
                    pl))
-             ;; Always include usage keys (even when nil) so UI/fold code can render “-”
-             ;; and/or fall back to bytes.
-             (pl (plist-put pl :CAR_TOKENS_IN (plist-get usage :tokens-in)))
-             (pl (plist-put pl :CAR_TOKENS_OUT (plist-get usage :tokens-out)))
-             (pl (plist-put pl :CAR_BYTES_IN (plist-get usage :bytes-in)))
-             (pl (plist-put pl :CAR_BYTES_OUT (plist-get usage :bytes-out)))
+             ;; Always include usage keys (even when nil).
+             ;;
+             ;; Display/UX policy:
+             ;; - When token usage is unavailable, also fill in/out with bytes so
+             ;;   result summaries don't stay empty ("in:- out:-").
+             ;; - Preserve raw bytes in dedicated keys regardless.
+             (pl
+              (let* ((tin (plist-get usage :tokens-in))
+                     (tout (plist-get usage :tokens-out))
+                     (bin (plist-get usage :bytes-in))
+                     (bout (plist-get usage :bytes-out))
+                     (unit (cond
+                            ((or (integerp tin) (integerp tout)) 'tokens)
+                            ((or (integerp bin) (integerp bout)) 'bytes)
+                            (t nil)))
+                     (tin2 (if (integerp tin) tin (and (integerp bin) bin)))
+                     (tout2 (if (integerp tout) tout (and (integerp bout) bout))))
+                (setq pl (plist-put pl :CAR_TOKENS_IN tin2))
+                (setq pl (plist-put pl :CAR_TOKENS_OUT tout2))
+                (setq pl (plist-put pl :CAR_BYTES_IN bin))
+                (setq pl (plist-put pl :CAR_BYTES_OUT bout))
+                (when unit
+                  (setq pl (plist-put pl :CAR_USAGE_UNIT unit)))
+                pl))
              (pl (if (and cost (plist-get cost :cost-in-u))
                      (plist-put pl :CAR_COST_IN_U (plist-get cost :cost-in-u))
                    pl))
@@ -691,11 +709,9 @@ Also merges bytes-in/out captured by our `gptel-request' wrapper when available.
           (when (fboundp 'carriage-ui--invalidate-ml-cache)
             (carriage-ui--invalidate-ml-cache))
           (force-mode-line-update t)))
-      (when (and (fboundp 'carriage-fingerprint-note-usage-and-cost)
-                 (or (plist-get usage :tokens-in)
-                     (plist-get usage :tokens-out)
-                     (plist-get usage :bytes-in)
-                     (plist-get usage :bytes-out)))
+      ;; Always try to upsert fingerprint with usage/bytes (even when all values are nil),
+      ;; so the fingerprint line gains stable keys for UI/fold renderers.
+      (when (fboundp 'carriage-fingerprint-note-usage-and-cost)
         (ignore-errors
           (carriage-fingerprint-note-usage-and-cost usage 'gptel nil model-str)))
       (carriage-transport-gptel--finalize--insert-result-line

@@ -477,7 +477,15 @@ It MUST be idempotent."
      (if http (format "%s" http) "—")
      resp-kind
      (if (numberp reqn) (number-to-string reqn) "—")
-     (length procs0))))
+     (length procs0))
+    (when (fboundp 'carriage-traffic-log)
+      (carriage-traffic-log
+       'in
+       "gptel: end id=%s final=%s code=%s http=%s status=%s err=%s"
+       id final code
+       (if http (format "%s" http) "—")
+       (if status (carriage-transport-gptel--snip status 120) "—")
+       (carriage-transport-gptel--snip (and (listp info) (plist-get info :error)) 120)))))
 
 (defun carriage-transport-gptel--finalize--log-last (id final resp info)
   "Log LAST diagnostics for FINAL request kinds."
@@ -497,6 +505,50 @@ It MUST be idempotent."
                   (carriage-transport-gptel--snip internal-error 600))
     (when-let* ((bt (carriage-transport-gptel--maybe-backtrace-string)))
       (carriage-log "Transport[gptel] INTERNAL id=%s backtrace:\n%s" id bt))))
+
+(defun carriage-transport-gptel--finalize--note-error-class (origin-buffer final code info)
+  "Update buffer-local last error classification fields for UI (best-effort)."
+  (when (buffer-live-p origin-buffer)
+    (with-current-buffer origin-buffer
+      (if (eq final 'done)
+          (progn
+            (setq-local carriage--last-error-class nil)
+            (setq-local carriage--last-error-detail nil))
+        (let* ((st (and (fboundp 'carriage-transport-gptel--status->code+text)
+                        (listp info)
+                        (carriage-transport-gptel--status->code+text info)))
+               (http (and (listp st) (plist-get st :code)))
+               (http-s (and (integerp http) (number-to-string http)))
+               (detail
+                (or http-s
+                    (pcase final
+                      ('timeout "timeout")
+                      ('abort "abort")
+                      (_ nil))
+                    (pcase code
+                      ('LLM_E_NETWORK "network")
+                      ('LLM_E_PROVIDER "provider")
+                      ('LLM_E_INTERNAL "internal")
+                      ('LLM_E_TIMEOUT "timeout")
+                      ('LLM_E_ABORT "abort")
+                      (_ "error")))))
+          (setq-local carriage--last-error-class code)
+          (setq-local carriage--last-error-detail detail)
+          ;; Ensure http status vars even when GPTel callback never fired.
+          (when http-s
+            (setq-local carriage--last-http-status http-s))
+          (when (and (listp st) (stringp (plist-get st :text)))
+            (setq-local carriage--last-http-status-text (plist-get st :text)))
+          ;; Backend error string best-effort.
+          (when (and (fboundp 'carriage-transport-gptel--error->string)
+                     (listp info))
+            (let ((e (carriage-transport-gptel--error->string info)))
+              (when (stringp e)
+                (setq-local carriage--last-backend-error e))))
+          ;; Ensure modeline reflects updated error details promptly (best-effort).
+          (when (fboundp 'carriage-ui--invalidate-ml-cache)
+            (ignore-errors (carriage-ui--invalidate-ml-cache)))
+          (ignore-errors (force-mode-line-update t)))))))
 
 (defun carriage-transport-gptel--finalize--maybe-cleanup (origin-buffer id final procs0)
   "Abort and cleanup processes/state best-effort for non-successful FINAL.
@@ -755,6 +807,7 @@ Returns plist with :watchdog-fired :code :reqn :procs0."
     (carriage-transport-gptel--finalize--log-end id final code info resp reqn procs0)
     (carriage-transport-gptel--finalize--log-last id final resp info)
     (carriage-transport-gptel--finalize--log-internal-error id internal-error)
+    (carriage-transport-gptel--finalize--note-error-class origin-buffer final code info)
     (carriage-transport-gptel--finalize--maybe-cleanup origin-buffer id final procs0)
     (carriage-transport-gptel--finalize--stream-and-complete origin-buffer final)
     (carriage-transport-gptel--finalize--record-result origin-buffer id final info requested-model)))
@@ -1541,48 +1594,48 @@ Finalizes with error on startup failures."
   t)
 
 ;;;###autoload
-  (defun carriage-transport-gptel-v2-dispatch (&rest args)
-    "Dispatch Carriage request via GPTel.
+(defun carriage-transport-gptel-v2-dispatch (&rest args)
+  "Dispatch Carriage request via GPTel.
 
 ARGS is a plist with keys like:
 :backend :model :source :buffer :mode :prompt :system :insert-marker
 
 This implementation is minimal and callback-driven, with watchdog + cleanup."
-    (let* ((backend (plist-get args :backend))
-           (model   (plist-get args :model))
-           (source  (or (plist-get args :source) 'buffer))
-           (buffer  (or (plist-get args :buffer) (current-buffer)))
-           (prompt  (plist-get args :prompt))
-           (system  (plist-get args :system))
-           (_mode   (plist-get args :mode))
-           (id      (carriage-transport-gptel--new-id)))
-      (carriage-transport-gptel--dispatch-validate backend buffer)
-      (with-current-buffer buffer
-        (let* ((t0 (float-time))
-               (cb (carriage-transport-gptel--make-callback buffer id model))
-               (abort-fn (carriage-transport-gptel--dispatch-make-abort buffer id))
-               (t1 (float-time))
-               (attachments (carriage-transport-gptel--collect-attachments buffer))
-               (t2 (float-time))
-               (pair (carriage-transport-gptel--dispatch-prepare-payload prompt system))
-               (t3 (float-time))
-               (prompt2 (car pair))
-               (system2 (cdr pair))
-               (system3 (carriage-transport-gptel--maybe-append-attachments-note
-                         system2 attachments)))
-          (when carriage-transport-gptel-diagnostics
-            (carriage-log "Transport[gptel] PERF id=%s make-cb+abort=%.3fs collect-attachments=%.3fs prepare-payload=%.3fs preinvoke-total=%.3fs"
-                          id
-                          (- t1 t0)
-                          (- t2 t1)
-                          (- t3 t2)
-                          (- t3 t0)))
-          (carriage-transport-gptel--dispatch-init buffer id model source prompt abort-fn)
-          (carriage-transport-gptel--dispatch-start-watchdog buffer id abort-fn)
-          (carriage-transport-gptel--dispatch-invoke buffer id prompt2 system3 cb model attachments)))
-      t))
+  (let* ((backend (plist-get args :backend))
+         (model   (plist-get args :model))
+         (source  (or (plist-get args :source) 'buffer))
+         (buffer  (or (plist-get args :buffer) (current-buffer)))
+         (prompt  (plist-get args :prompt))
+         (system  (plist-get args :system))
+         (_mode   (plist-get args :mode))
+         (id      (carriage-transport-gptel--new-id)))
+    (carriage-transport-gptel--dispatch-validate backend buffer)
+    (with-current-buffer buffer
+      (let* ((t0 (float-time))
+             (cb (carriage-transport-gptel--make-callback buffer id model))
+             (abort-fn (carriage-transport-gptel--dispatch-make-abort buffer id))
+             (t1 (float-time))
+             (attachments (carriage-transport-gptel--collect-attachments buffer))
+             (t2 (float-time))
+             (pair (carriage-transport-gptel--dispatch-prepare-payload prompt system))
+             (t3 (float-time))
+             (prompt2 (car pair))
+             (system2 (cdr pair))
+             (system3 (carriage-transport-gptel--maybe-append-attachments-note
+                       system2 attachments)))
+        (when carriage-transport-gptel-diagnostics
+          (carriage-log "Transport[gptel] PERF id=%s make-cb+abort=%.3fs collect-attachments=%.3fs prepare-payload=%.3fs preinvoke-total=%.3fs"
+                        id
+                        (- t1 t0)
+                        (- t2 t1)
+                        (- t3 t2)
+                        (- t3 t0)))
+        (carriage-transport-gptel--dispatch-init buffer id model source prompt abort-fn)
+        (carriage-transport-gptel--dispatch-start-watchdog buffer id abort-fn)
+        (carriage-transport-gptel--dispatch-invoke buffer id prompt2 system3 cb model attachments)))
+    t))
 
-  ;; --- gptel accounting hooks --------------------------------------------------
+;; --- gptel accounting hooks --------------------------------------------------
 ;; We avoid changing gptel internals and instead wrap callbacks used by Carriage
 ;; buffers (carriage-mode).  This lets UI show:
 ;; - cost when known,

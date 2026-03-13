@@ -155,15 +155,121 @@ headers (subject to limits). Patch block bodies are never used as prompt context
   :group 'carriage-context)
 (make-variable-buffer-local 'carriage-mode-include-patched-files)
 
+(defcustom carriage-context-secret-path-policy 'warn-skip
+  "Policy for handling secret-like files during context collection.
+
+Values:
+- 'warn-skip — do NOT include file contents; include path only and emit a warning.
+- 'allow     — include contents normally (no extra warning).
+
+This is a safety rail to reduce accidental leakage of credentials into prompts."
+  :type '(choice
+          (const :tag "Warn and include path only" warn-skip)
+          (const :tag "Allow including contents" allow))
+  :group 'carriage-context)
+
+(defcustom carriage-context-secret-path-regexps
+  '("\\(?:\\`\\|/\\)\\.env\\(?:\\..*\\)?\\'"
+    "\\(?:\\`\\|/\\)\\.authinfo\\(?:\\.gpg\\)?\\'"
+    "\\(?:\\`\\|/\\)authinfo\\(?:\\.gpg\\)?\\'"
+    "\\(?:\\`\\|/\\)id_rsa\\'"
+    "\\(?:\\`\\|/\\)id_ed25519\\'"
+    "\\.pem\\'"
+    "\\.key\\'"
+    "\\.p12\\'"
+    "\\.pfx\\'"
+    "\\(?:\\`\\|/\\)secrets?\\.[^/]*\\'"
+    "\\(?:\\`\\|/\\)credentials\\(?:\\.[^/]*\\)?\\'")
+  "List of regexps that indicate a secret-like path.
+
+The regexps are matched against repo-relative path (REL) and the truename (TRUE).
+Matching is case-insensitive.
+
+Note: This is intentionally conservative and may be tuned per user/project."
+  :type '(repeat string)
+  :group 'carriage-context)
+
+(defun carriage-context--secret-path-p (rel tru)
+  "Return non-nil when REL/TRU look like a secret-like path (denylist match)."
+  (let ((rxs carriage-context-secret-path-regexps)
+        (case-fold-search t)
+        (r (or rel ""))
+        (t0 (or tru "")))
+    (and (listp rxs)
+         (cl-some (lambda (rx)
+                    (and (stringp rx) (not (string-empty-p rx))
+                         (or (and (stringp r) (string-match-p rx r))
+                             (and (stringp t0) (string-match-p rx t0)))))
+                  rxs))))
+
 (defvar-local carriage-context--doc-paths-cache nil
   "Cache of doc-context paths for the current buffer.
 Plist keys:
-  :tick  — `buffer-chars-modified-tick' at the time of computation
-  :scope — value of `carriage-doc-context-scope'
-  :paths — list of path strings extracted from doc context blocks.
+  :scope    — value of `carriage-doc-context-scope'
+  :paths    — list of path strings extracted from doc context blocks
+  :warnings — list of warning strings produced while parsing begin_context blocks.
 
-This cache exists to make context counting cheap when UI refreshes frequently.
-It is invalidated automatically when the buffer changes (tick changes) or when scope changes.")
+Performance note:
+We intentionally do NOT invalidate this cache on every buffer edit
+(`buffer-chars-modified-tick'), because most edits do not affect
+#+begin_context blocks and full rescans can be expensive on large documents.
+
+Instead, we use a dedicated dirty-flag that is marked only when edits
+touch begin/end_context lines or occur inside a begin_context block.")
+
+(defvar-local carriage-context--doc-paths-dirty t
+  "When non-nil, doc-context paths cache must be recomputed for the current buffer.
+
+Perf invariant:
+- We avoid tying invalidation to `buffer-chars-modified-tick', because ordinary typing
+  would force O(buffer) rescans at inopportune moments (e.g., Send).
+- Instead, we mark dirty only when edits likely affect begin_context blocks.")
+
+(defconst carriage-context--re-begin-context-line
+  "^[ \t]*#\\+begin_context[ \t]*$"
+  "Regexp matching a *directive-only* begin_context marker line.
+
+Important:
+We intentionally require end-of-line to avoid false positives such as prose lines:
+  \"#+begin_context blocks and full rescans...\"")
+
+(defconst carriage-context--re-end-context-line
+  "^[ \t]*#\\+end_context[ \t]*$"
+  "Regexp matching a *directive-only* end_context marker line.")
+
+(defun carriage-context--pos-in-doc-context-block-p (pos)
+  "Return non-nil when POS is inside a #+begin_context...#+end_context block.
+Best-effort and designed to be cheap enough for after-change usage."
+  (when (number-or-marker-p pos)
+    (save-excursion
+      (let ((case-fold-search t))
+        (goto-char pos)
+        (let ((b (save-excursion
+                   (re-search-backward carriage-context--re-begin-context-line nil t)))
+              (e (save-excursion
+                   (re-search-backward carriage-context--re-end-context-line nil t))))
+          (and b (or (null e) (> b e))))))))
+
+(defun carriage-context--doc-paths-mark-dirty (beg end _len)
+  "Mark doc-paths cache dirty if edit touches begin/end_context lines or occurs inside a begin_context block.
+This function is designed to be O(1) in the common case."
+  (when (and (number-or-marker-p beg) (number-or-marker-p end))
+    (save-excursion
+      (let ((case-fold-search t)
+            (hit nil))
+        (goto-char beg)
+        (beginning-of-line)
+        (setq hit (or (looking-at-p carriage-context--re-begin-context-line)
+                      (looking-at-p carriage-context--re-end-context-line)
+                      (carriage-context--pos-in-doc-context-block-p (point))))
+        (unless hit
+          (goto-char end)
+          (beginning-of-line)
+          (setq hit (or (looking-at-p carriage-context--re-begin-context-line)
+                        (looking-at-p carriage-context--re-end-context-line)
+                        (carriage-context--pos-in-doc-context-block-p (point)))))
+        (when hit
+          (setq carriage-context--doc-paths-dirty t))))))
 
 (defvar-local carriage-context--patched-files-cache nil
   "Cache of patched-files paths (from applied begin_patch blocks) for the current buffer.
@@ -203,6 +309,10 @@ This function is designed to be O(1) per edit."
             ;; Buffer-local hook; O(1) per edit and only marks dirty when patch lines touched.
             (add-hook 'after-change-functions
                       #'carriage-context--patched-files-mark-dirty
+                      nil t)
+            ;; Buffer-local hook; mark doc-context cache dirty only when edits can affect begin_context.
+            (add-hook 'after-change-functions
+                      #'carriage-context--doc-paths-mark-dirty
                       nil t)
             ;; Opportunistically warm Project Map cache on idle to reduce Send latency.
             (when (fboundp 'carriage-context-project-map-warm-ensure)
@@ -451,37 +561,67 @@ Uses a small cache with TTL and invalidation by file size/mtime."
                     carriage-context--file-cache)
            (cons nil reason)))))))
 
-(defun carriage-context--find-context-block-in-region (beg end)
-  "Return list of path lines found between #+begin_context and #+end_context within BEG..END."
+(defun carriage-context--doc-blocks-in-region (beg end)
+  "Parse begin_context blocks within BEG..END and return plist:
+  (:paths PATHS :warnings WARNS :blocks N :unterminated M).
+
+Policy:
+- Markers must be directive-only lines (see `carriage-context--re-begin-context-line').
+  This avoids false positives in prose such as:
+    \"#+begin_context blocks and full rescans...\"
+- Unterminated blocks (missing #+end_context) are ignored (no \"consume till end\")
+  and produce a warning, to avoid accidentally swallowing large parts of a document."
   (save-excursion
     (save-restriction
       (narrow-to-region beg end)
       (goto-char (point-min))
-      (let ((paths '()))
-        (while (re-search-forward "^[ \t]*#\\+begin_context\\b" nil t)
-          (let ((block-beg (line-end-position)))
-            (if (re-search-forward "^[ \t]*#\\+end_context\\b" nil t)
-                (let ((block-end (line-beginning-position)))
-                  (save-excursion
-                    (goto-char block-beg)
-                    (while (< (point) block-end)
-                      (let ((ln (buffer-substring-no-properties
-                                 (line-beginning-position) (line-end-position))))
-                        (unless (or (string-match-p "^[ \t]*\\(#\\|$\\)" ln))
-                          (push (string-trim ln) paths)))
-                      (forward-line 1))))
-              ;; no end marker, consume till end
-              (save-excursion
-                (goto-char block-beg)
-                (while (not (eobp))
-                  (let ((ln (buffer-substring-no-properties
-                             (line-beginning-position) (line-end-position))))
-                    (unless (or (string-match-p "^[ \t]*\\(#\\|$\\)" ln))
-                      (push (string-trim ln) paths)))
-                  (forward-line 1))))))
-        (nreverse (let ((res (delete-dups (delq nil paths))))
-                    (carriage-context--dbg "doc-paths: %s (first=%s)" (length res) (car res))
-                    res))))))
+      (let ((paths '())
+            (warns '())
+            (blocks 0)
+            (unterminated 0)
+            (case-fold-search t))
+        (while (re-search-forward carriage-context--re-begin-context-line nil t)
+          (setq blocks (1+ blocks))
+          (let* ((beg-pos (match-beginning 0))
+                 (beg-ln (line-number-at-pos beg-pos))
+                 (block-beg (progn (forward-line 1) (point))))
+            (if (not (re-search-forward carriage-context--re-end-context-line nil t))
+                (progn
+                  (setq unterminated (1+ unterminated))
+                  (push (format "doc-context: unterminated begin_context at line %d (ignored)" beg-ln) warns)
+                  ;; Stop scanning this unterminated block safely:
+                  ;; move point to end to avoid repeated matches in the same block.
+                  (goto-char (point-max)))
+              (let ((block-end (line-beginning-position)))
+                (save-excursion
+                  (goto-char block-beg)
+                  (while (< (point) block-end)
+                    (let ((ln (buffer-substring-no-properties
+                               (line-beginning-position) (line-end-position))))
+                      (unless (or (string-match-p "^[ \t]*\\(#\\|;\\|$\\)" ln))
+                        (push (string-trim ln) paths)))
+                    (forward-line 1)))))))
+        (let ((res (delete-dups (delq nil (nreverse paths)))))
+          (carriage-context--dbg "doc-paths: %s (first=%s) blocks=%s unterminated=%s"
+                                 (length res) (car res) blocks unterminated)
+          (list :paths res
+                :warnings (nreverse warns)
+                :blocks blocks
+                :unterminated unterminated))))))
+
+(defun carriage-context--find-context-block-in-region (beg end)
+  "Return list of path lines found between #+begin_context and #+end_context within BEG..END."
+  (let* ((r (carriage-context--doc-blocks-in-region beg end)))
+    (or (plist-get r :paths) '())))
+
+(defun carriage-context--doc-warnings (buffer)
+  "Return warnings collected during doc-context parsing for BUFFER.
+
+Ensures doc-context cache is populated first (best-effort)."
+  (with-current-buffer buffer
+    (ignore-errors (carriage-context--doc-paths buffer))
+    (let ((cache carriage-context--doc-paths-cache))
+      (or (and (listp cache) (plist-get cache :warnings)) '()))))
 
 (defun carriage-context--doc-paths (buffer)
   "Collect paths from #+begin_context blocks in BUFFER per `carriage-doc-context-scope'.
@@ -489,50 +629,51 @@ Uses a small cache with TTL and invalidation by file size/mtime."
 Scope rules:
 - 'all  (default): collect paths from all #+begin_context blocks in the buffer.
 - 'last: collect paths only from the LAST #+begin_context block in the buffer
-         (tail-most; independent of point)."
+         (tail-most; independent of point).
+
+Performance:
+- Uses a dirty flag `carriage-context--doc-paths-dirty' to avoid O(buffer) rescans
+  on unrelated edits."
   (with-current-buffer buffer
     (save-excursion
       (let* ((scope (or (and (boundp 'carriage-doc-context-scope)
                              carriage-doc-context-scope)
                         'all))
-             (tick (buffer-chars-modified-tick))
              (cache carriage-context--doc-paths-cache)
-             (cache-ok (and (listp cache)
+             (cache-ok (and (not carriage-context--doc-paths-dirty)
+                            (listp cache)
                             (eq (plist-get cache :scope) scope)
-                            (numberp (plist-get cache :tick))
-                            (= (plist-get cache :tick) tick)
                             (listp (plist-get cache :paths)))))
         (if cache-ok
             (plist-get cache :paths)
-          (let ((paths
-                 (pcase scope
-                   ('all
-                    (delete-dups
-                     (delq nil
-                           (carriage-context--find-context-block-in-region (point-min) (point-max)))))
-                   (_
-                    ;; Tail-most block in the buffer (independent of point).
-                    ;; Optimization: scan from end to find the last begin_context.
-                    (let (last-beg last-end)
-                      (save-excursion
-                        (goto-char (point-max))
-                        (let ((case-fold-search t))
-                          (when (re-search-backward "^[ \t]*#\\+begin_context\\b" nil t)
-                            (setq last-beg (match-beginning 0))
-                            (goto-char last-beg)
-                            (setq last-end
-                                  (if (re-search-forward "^[ \t]*#\\+end_context\\b" nil t)
-                                      (line-end-position)
-                                    (point-max))))))
-                      (if (and (numberp last-beg) (numberp last-end) (> last-end last-beg))
-                          (delete-dups
-                           (delq nil
-                                 (carriage-context--find-context-block-in-region last-beg last-end)))
-                        '()))))))
+          (let* ((parsed
+                  (pcase scope
+                    ('all
+                     (carriage-context--doc-blocks-in-region (point-min) (point-max)))
+                    (_
+                     ;; Tail-most block in the buffer (independent of point).
+                     ;; Scan from end to find the last begin_context directive line.
+                     (let (last-beg last-end)
+                       (save-excursion
+                         (goto-char (point-max))
+                         (let ((case-fold-search t))
+                           (when (re-search-backward carriage-context--re-begin-context-line nil t)
+                             (setq last-beg (match-beginning 0))
+                             (goto-char last-beg)
+                             (setq last-end
+                                   (if (re-search-forward carriage-context--re-end-context-line nil t)
+                                       (line-end-position)
+                                     ;; Unterminated block: ignore it and warn.
+                                     (point-max))))))
+                       (if (and (numberp last-beg) (numberp last-end) (> last-end last-beg))
+                           (carriage-context--doc-blocks-in-region last-beg last-end)
+                         (list :paths '() :warnings '()))))))
+                 (paths (or (plist-get parsed :paths) '()))
+                 (warns (or (plist-get parsed :warnings) '())))
             (setq carriage-context--doc-paths-cache
-                  (list :tick tick :scope scope :paths paths))
+                  (list :scope scope :paths paths :warnings warns))
+            (setq carriage-context--doc-paths-dirty nil)
             paths))))))
-
 
 (defun carriage-context--maybe-gptel-files ()
   "Collect absolute file paths from gptel context (best-effort).
@@ -704,52 +845,63 @@ Returns updated STATE."
              (true (plist-get norm :true)))
         (if (not (carriage-context--state-mark-seen true state))
             state
-          (let* ((attrs (ignore-errors (file-attributes true)))
-                 (sb0 (and attrs (nth 7 attrs)))
-                 (total (plist-get state :total-bytes)))
-            ;; If we know the file size and it would exceed the budget, skip reading content.
-            (if (and (numberp sb0) (> (+ total sb0) max-bytes))
-                (progn
-                  (setq state (carriage-context--push-warning
-                               (format "limit reached, include path only: %s" rel)
-                               state))
-                  (setq state (carriage-context--push-file
-                               (list :rel rel :true true :content nil :reason 'size-limit)
-                               state))
-                  (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
-                  (carriage-context--dbg "collect: size-limit (pre) for %s (sb=%s total=%s)" rel sb0 total)
-                  state)
-              ;; Otherwise read (cached) content and re-check with actual bytes.
-              (let* ((rd (carriage-context--read-file-safe true)))
-                (if (not (car rd))
-                    (progn
-                      (setq state (carriage-context--push-file
-                                   (list :rel rel :true true :content nil :reason (cdr rd))
-                                   state))
-                      (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
-                      (carriage-context--dbg "collect: omit %s reason=%s" rel (cdr rd))
-                      state)
-                  (let* ((s (cdr rd))
-                         (sb (string-bytes s))
-                         (total2 (plist-get state :total-bytes)))
-                    (if (> (+ total2 sb) max-bytes)
-                        (progn
-                          (setq state (carriage-context--push-warning
-                                       (format "limit reached, include path only: %s" rel)
-                                       state))
-                          (setq state (carriage-context--push-file
-                                       (list :rel rel :true true :content nil :reason 'size-limit)
-                                       state))
-                          (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
-                          (carriage-context--dbg "collect: size-limit for %s (sb=%s total=%s)" rel sb total2)
-                          state)
-                      (setq state (plist-put state :total-bytes (+ total2 sb)))
-                      (setq state (carriage-context--push-file
-                                   (list :rel rel :true true :content s)
-                                   state))
-                      (setq state (plist-put state :included (1+ (plist-get state :included))))
-                      (carriage-context--dbg "collect: include %s (bytes=%s total=%s)" rel sb (+ total2 sb))
-                      state)))))))))))
+          (if (and (eq carriage-context-secret-path-policy 'warn-skip)
+                   (carriage-context--secret-path-p rel true))
+              (progn
+                (setq state (carriage-context--push-warning
+                             (format "secret-path, include path only: %s" rel)
+                             state))
+                (setq state (carriage-context--push-file
+                             (list :rel rel :true true :content nil :reason 'secret-path)
+                             state))
+                (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+                state)
+            (let* ((attrs (ignore-errors (file-attributes true)))
+                   (sb0 (and attrs (nth 7 attrs)))
+                   (total (plist-get state :total-bytes)))
+              ;; If we know the file size and it would exceed the budget, skip reading content.
+              (if (and (numberp sb0) (> (+ total sb0) max-bytes))
+                  (progn
+                    (setq state (carriage-context--push-warning
+                                 (format "limit reached, include path only: %s" rel)
+                                 state))
+                    (setq state (carriage-context--push-file
+                                 (list :rel rel :true true :content nil :reason 'size-limit)
+                                 state))
+                    (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+                    (carriage-context--dbg "collect: size-limit (pre) for %s (sb=%s total=%s)" rel sb0 total)
+                    state)
+                ;; Otherwise read (cached) content and re-check with actual bytes.
+                (let* ((rd (carriage-context--read-file-safe true)))
+                  (if (not (car rd))
+                      (progn
+                        (setq state (carriage-context--push-file
+                                     (list :rel rel :true true :content nil :reason (cdr rd))
+                                     state))
+                        (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+                        (carriage-context--dbg "collect: omit %s reason=%s" rel (cdr rd))
+                        state)
+                    (let* ((s (cdr rd))
+                           (sb (string-bytes s))
+                           (total2 (plist-get state :total-bytes)))
+                      (if (> (+ total2 sb) max-bytes)
+                          (progn
+                            (setq state (carriage-context--push-warning
+                                         (format "limit reached, include path only: %s" rel)
+                                         state))
+                            (setq state (carriage-context--push-file
+                                         (list :rel rel :true true :content nil :reason 'size-limit)
+                                         state))
+                            (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+                            (carriage-context--dbg "collect: size-limit for %s (sb=%s total=%s)" rel sb total2)
+                            state)
+                        (setq state (plist-put state :total-bytes (+ total2 sb)))
+                        (setq state (carriage-context--push-file
+                                     (list :rel rel :true true :content s)
+                                     state))
+                        (setq state (plist-put state :included (1+ (plist-get state :included))))
+                        (carriage-context--dbg "collect: include %s (bytes=%s total=%s)" rel sb (+ total2 sb))
+                        state))))))))))))
 
 (defun carriage-context--collect-finalize (state)
   "Finalize STATE into result plist compatible with carriage-context-collect."
@@ -792,6 +944,10 @@ Return updated STATE."
           (setq state (carriage-context--collect-iterate pat-cands state)))))
     ;; 1b) DOC candidates (highest preference among primary sources)
     (when (and include-doc (carriage-context--state-under-file-limit-p state))
+      ;; Include parsing warnings (e.g., unterminated begin_context) into the final ctx warnings.
+      (dolist (w (ignore-errors (carriage-context--doc-warnings buf)))
+        (when (and (stringp w) (not (string-empty-p w)))
+          (setq state (carriage-context--push-warning w state))))
       (let ((doc-cands (ignore-errors (carriage-context--doc-paths buf))))
         (when doc-cands
           (setq state (carriage-context--collect-iterate doc-cands state)))))
@@ -904,6 +1060,15 @@ Important:
          (timer nil)
          (queue nil)
          (state nil)
+         ;; Queue-build is intentionally incremental (across multiple timer ticks)
+         ;; to avoid starving UI timers (spinner) after Send.
+         (config nil)
+         (build-phase 'init)
+         (pat nil)
+         (doc nil)
+         (vis nil)
+         (gpt nil)
+         (built nil)
          (token (list :timer nil :watchdog nil :cancel-fn nil)))
     (cl-labels
         ((empty-ctx (why)
@@ -1013,82 +1178,145 @@ Items are either (:kind path :value STRING) or (:kind visible-buffer :buffer BUF
                                 state))
                    (setq state (plist-put state :total-bytes (+ total sz)))
                    (setq state (plist-put state :included (1+ (plist-get state :included))))))))))
-         (build-queue ()
-           (let* ((config (carriage-context--collect-config buf root))
-                  (inc-doc (plist-get config :include-doc))
-                  (inc-gpt (plist-get config :include-gptel))
-                  (inc-vis (plist-get config :include-visible))
-                  (inc-pat (inc-patched-p))
-                  (pat (when inc-pat (ignore-errors (carriage-context--patched-files buf))))
-                  (doc (when inc-doc (ignore-errors (carriage-context--doc-paths buf))))
-                  (vis (when inc-vis (ignore-errors (visible-items))))
-                  (gpt (when inc-gpt (ignore-errors (carriage-context--maybe-gptel-files))))
-                  (q '()))
-             ;; Same preference ordering as sync collector:
-             ;; patched → doc → visible → gptel.
-             (dolist (p (or pat '()))
-               (when (stringp p) (push (list :kind 'path :value p) q)))
-             (dolist (p (or doc '()))
-               (when (stringp p) (push (list :kind 'path :value p) q)))
-             (dolist (it (or vis '()))
-               (when (listp it) (push it q)))
-             (dolist (p (or gpt '()))
-               (when (stringp p) (push (list :kind 'path :value p) q)))
-             (setq queue (nreverse q))
-             (setq state (carriage-context--collect-init-state config))))
-         (step ()
-           (condition-case e
-               (progn
-                 (when (or done (not (buffer-live-p buf)))
-                   (finish (empty-ctx "buffer not live") "buffer not live"))
-                 (when (and (not done) (listp state))
-                   (let* ((t0 (float-time))
-                          (budget (max 0.001 (float (or slice 0.02)))))
-                     (while (and (not done)
-                                 (consp queue)
-                                 (carriage-context--state-under-file-limit-p state)
-                                 (< (- (float-time) t0) budget))
-                       (let* ((it (pop queue))
-                              (kind (plist-get it :kind)))
-                         (pcase kind
-                           ('path
-                            (let ((p (plist-get it :value)))
-                              (when (and (stringp p) (not (string-empty-p p)))
-                                (setq state (carriage-context--collect-process-path p state)))))
-                           ('visible-buffer
-                            (let ((vb (plist-get it :buffer)))
-                              (process-visible-buffer vb)))
-                           (_ nil)))
-                       ;; Yield to keep UI responsive between items.
-                       (sit-for 0))
-                     (cond
-                      ((or done (not (carriage-context--state-under-file-limit-p state)) (null queue))
-                       (finish (carriage-context--collect-finalize state)))
-                      (t
-                       (setq timer (run-at-time 0 nil #'step))
-                       (setf (plist-get token :timer) timer))))))
-             (error
-              (finish (empty-ctx (error-message-string e)) (error-message-string e))))))
-      ;; Init token cancel-fn
-      (setf (plist-get token :cancel-fn) #'cancel)
+      (build-queue ()
+                   "Incrementally build initial work queue across multiple timer ticks.
+Returns non-nil when the queue is fully built and STATE is initialized.
 
-      ;; Watchdog: prevents "Send" from hanging forever if prepare stalls.
-      (when (and (numberp timeout) (> timeout 0))
-        (setq watchdog (run-at-time timeout nil (lambda () (finish nil "context collection timed out"))))
-        (setf (plist-get token :watchdog) watchdog))
+Rationale:
+- Some sources (doc-context scan, walk-windows, gptel context) can be heavy.
+- Splitting them across separate timer ticks gives UI/spinner timers more chances to run."
+                   (let* ((cfg (or config (setq config (carriage-context--collect-config buf root))))
+                          (inc-doc (plist-get cfg :include-doc))
+                          (inc-gpt (plist-get cfg :include-gptel))
+                          (inc-vis (plist-get cfg :include-visible))
+                          (inc-pat (inc-patched-p)))
+                     (pcase build-phase
+                       ('init
+                        (setq state (carriage-context--collect-init-state cfg))
+                        (setq build-phase
+                              (cond
+                               (inc-pat 'patched)
+                               (inc-doc 'doc)
+                               (inc-vis 'visible)
+                               (inc-gpt 'gptel)
+                               (t 'finalize)))
+                        (sit-for 0)
+                        nil)
+                       ('patched
+                        (setq pat (ignore-errors (carriage-context--patched-files buf)))
+                        (setq build-phase
+                              (cond
+                               (inc-doc 'doc)
+                               (inc-vis 'visible)
+                               (inc-gpt 'gptel)
+                               (t 'finalize)))
+                        (sit-for 0)
+                        nil)
+                       ('doc
+                        (setq doc (ignore-errors (carriage-context--doc-paths buf)))
+                        (setq build-phase
+                              (cond
+                               (inc-vis 'visible)
+                               (inc-gpt 'gptel)
+                               (t 'finalize)))
+                        (sit-for 0)
+                        nil)
+                       ('visible
+                        (setq vis (ignore-errors (visible-items)))
+                        (setq build-phase
+                              (cond
+                               (inc-gpt 'gptel)
+                               (t 'finalize)))
+                        (sit-for 0)
+                        nil)
+                       ('gptel
+                        (setq gpt (ignore-errors (carriage-context--maybe-gptel-files)))
+                        (setq build-phase 'finalize)
+                        (sit-for 0)
+                        nil)
+                       ('finalize
+                        (let ((q '()))
+                          ;; Same preference ordering as sync collector:
+                          ;; patched → doc → visible → gptel.
+                          (dolist (p (or pat '()))
+                            (when (stringp p) (push (list :kind 'path :value p) q)))
+                          (dolist (p (or doc '()))
+                            (when (stringp p) (push (list :kind 'path :value p) q)))
+                          (dolist (it (or vis '()))
+                            (when (listp it) (push it q)))
+                          (dolist (p (or gpt '()))
+                            (when (stringp p) (push (list :kind 'path :value p) q)))
+                          (setq queue (nreverse q))
+                          (setq build-phase 'done))
+                        (sit-for 0)
+                        t)
+                       ('done t)
+                       (_
+                        (setq build-phase 'finalize)
+                        (sit-for 0)
+                        nil))))
+      (step ()
+            (condition-case e
+                (progn
+                  (when (or done (not (buffer-live-p buf)))
+                    (finish (empty-ctx "buffer not live") "buffer not live"))
+                  ;; IMPORTANT: build initial queue/state incrementally across timer ticks,
+                  ;; not synchronously in the caller, so UI (spinner) can start immediately.
+                  (when (and (not done) (not built))
+                    (condition-case e2
+                        (setq built (build-queue))
+                      (error
+                       (finish (empty-ctx (error-message-string e2)) (error-message-string e2))))
+                    ;; Not ready yet → reschedule and exit this tick.
+                    (unless (or done built)
+                      (setq timer (run-at-time 0 nil #'step))
+                      (setf (plist-get token :timer) timer)))
+                  (when (and (not done) built (listp state))
+                    (let* ((t0 (float-time))
+                           (budget (max 0.001 (float (or slice 0.02)))))
+                      (while (and (not done)
+                                  (consp queue)
+                                  (carriage-context--state-under-file-limit-p state)
+                                  (< (- (float-time) t0) budget))
+                        (let* ((it (pop queue))
+                               (kind (plist-get it :kind)))
+                          (pcase kind
+                            ('path
+                             (let ((p (plist-get it :value)))
+                               (when (and (stringp p) (not (string-empty-p p)))
+                                 (setq state (carriage-context--collect-process-path p state)))))
+                            ('visible-buffer
+                             (let ((vb (plist-get it :buffer)))
+                               (process-visible-buffer vb)))
+                            (_ nil)))
+                        ;; Yield to keep UI responsive between items.
+                        (sit-for 0))
+                      (cond
+                       ((or done (not (carriage-context--state-under-file-limit-p state)) (null queue))
+                        (finish (carriage-context--collect-finalize state)))
+                       (t
+                        (setq timer (run-at-time 0 nil #'step))
+                        (setf (plist-get token :timer) timer))))))
+              (error
+               (finish (empty-ctx (error-message-string e)) (error-message-string e))))))
+    ;; Init token cancel-fn
+    (setf (plist-get token :cancel-fn) #'cancel)
 
-      ;; Build initial queue/state (fast; no file reads).
-      (condition-case e
-          (build-queue)
-        (error
-         (finish (empty-ctx (error-message-string e)) (error-message-string e))))
+    ;; Watchdog: prevents "Send" from hanging forever if prepare stalls.
+    (when (and (numberp timeout) (> timeout 0))
+      (setq watchdog (run-at-time timeout nil (lambda () (finish nil "context collection timed out"))))
+      (setf (plist-get token :watchdog) watchdog))
 
-      ;; Kick the incremental worker.
-      (unless done
-        (setq timer (run-at-time 0 nil #'step))
-        (setf (plist-get token :timer) timer))
+    ;; Kick the incremental worker immediately, but prefer idle timer in interactive
+    ;; sessions so UI can render/animate (spinner) before we start scanning buffers/windows.
+    ;; NOTE: build-queue is deferred to the first step tick to avoid blocking the caller/UI.
+    (unless done
+      (setq timer (if noninteractive
+                      (run-at-time 0 nil #'step)
+                    (run-with-idle-timer 0 nil #'step)))
+      (setf (plist-get token :timer) timer))
 
-      token))
+    token))
 
 (defun carriage-context--guess-lang (path)
   "Guess language token for Org src block by PATH extension."
@@ -1420,36 +1648,47 @@ SOURCE is used only for source classification maps."
           ;; Source classification must apply even when the file is omitted by limits,
           ;; so we mark it immediately after dedupe.
           (setq state (carriage-context--count-fast--mark-source source true state))
-          (let* ((attrs (ignore-errors (file-attributes true)))
-                 (sb (and attrs (nth 7 attrs)))
-                 (total (plist-get state :total-bytes)))
-            (cond
-             ;; Missing/unstat'able file.
-             ((null attrs)
-              (setq state (carriage-context--count-fast-push-file
-                           (list :rel rel :true true :included nil :reason 'missing)
-                           state))
-              (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
-              state)
-             ;; Size limit (pre-check only; no reads).
-             ((and (numberp sb) (> (+ total sb) max-bytes))
-              (setq state (carriage-context--count-fast-push-warning
-                           (format "limit reached, include path only: %s" rel)
-                           state))
-              (setq state (carriage-context--count-fast-push-file
-                           (list :rel rel :true true :included nil :reason 'size-limit)
-                           state))
-              (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
-              state)
-             ;; Include (planned).
-             (t
-              (when (numberp sb)
-                (setq state (plist-put state :total-bytes (+ total sb))))
-              (setq state (carriage-context--count-fast-push-file
-                           (list :rel rel :true true :included t)
-                           state))
-              (setq state (plist-put state :included (1+ (plist-get state :included))))
-              state))))))))
+          (if (and (eq carriage-context-secret-path-policy 'warn-skip)
+                   (carriage-context--secret-path-p rel true))
+              (progn
+                (setq state (carriage-context--count-fast-push-warning
+                             (format "secret-path, include path only: %s" rel)
+                             state))
+                (setq state (carriage-context--count-fast-push-file
+                             (list :rel rel :true true :included nil :reason 'secret-path)
+                             state))
+                (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+                state)
+            (let* ((attrs (ignore-errors (file-attributes true)))
+                   (sb (and attrs (nth 7 attrs)))
+                   (total (plist-get state :total-bytes)))
+              (cond
+               ;; Missing/unstat'able file.
+               ((null attrs)
+                (setq state (carriage-context--count-fast-push-file
+                             (list :rel rel :true true :included nil :reason 'missing)
+                             state))
+                (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+                state)
+               ;; Size limit (pre-check only; no reads).
+               ((and (numberp sb) (> (+ total sb) max-bytes))
+                (setq state (carriage-context--count-fast-push-warning
+                             (format "limit reached, include path only: %s" rel)
+                             state))
+                (setq state (carriage-context--count-fast-push-file
+                             (list :rel rel :true true :included nil :reason 'size-limit)
+                             state))
+                (setq state (plist-put state :skipped (1+ (plist-get state :skipped))))
+                state)
+               ;; Include (planned).
+               (t
+                (when (numberp sb)
+                  (setq state (plist-put state :total-bytes (+ total sb))))
+                (setq state (carriage-context--count-fast-push-file
+                             (list :rel rel :true true :included t)
+                             state))
+                (setq state (plist-put state :included (1+ (plist-get state :included))))
+                state)))))))))
 
 (defun carriage-context--count-fast-process-visible-buffer (buf state)
   "Process a visible non-file buffer BUF into STATE (size-based budgeting, no file reads)."
@@ -1502,6 +1741,10 @@ SOURCE is used only for source classification maps."
             (setq state (carriage-context--count-fast-process-path p state 'doc))))))
     ;; 1b) Doc paths
     (when (and inc-doc (carriage-context--count-fast-under-file-limit-p state))
+      ;; Carry doc parse warnings into count warnings so UI explains inflated Ctx.
+      (dolist (w (ignore-errors (carriage-context--doc-warnings buf)))
+        (when (and (stringp w) (not (string-empty-p w)))
+          (setq state (carriage-context--count-fast-push-warning w state))))
       (let ((doc (ignore-errors (carriage-context--doc-paths buf))))
         (dolist (p doc)
           (when (carriage-context--count-fast-under-file-limit-p state)
@@ -1715,16 +1958,6 @@ Cache record plist keys: :time :text :paths :truncated."
 (defvar carriage-context--project-map-cache (make-hash-table :test 'equal)
   "Cache mapping project root → Project Map record plist.
 Record keys: :time :text :paths :truncated.")
-
-;;;###autoload
-(defun carriage-context-project-map-invalidate (&optional root)
-  "Invalidate cached Project Map for ROOT or current project root.
-Best-effort: never signals. Returns non-nil."
-  (let ((r (or root (carriage-context--project-root))))
-    (when (and (hash-table-p carriage-context--project-map-cache)
-               (stringp r) (not (string-empty-p r)))
-      (remhash r carriage-context--project-map-cache))
-    t))
 
 ;;;###autoload
 (defun carriage-context-project-map-invalidate (&optional root)

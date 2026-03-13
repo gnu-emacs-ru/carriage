@@ -253,10 +253,13 @@ CTX may contain keys like :payload, :context-text, :context-target, :delim, :fil
     (pcase intent
       ('Ask
        (let* ((intent-note (carriage--resolve-intent-fragment 'Ask ctx))
+              ;; Org structure is a separate toggle (not tied to typedblocks).
+              ;; Inject it early (system), so it isn't drowned by long context tails.
+              (org-note (plist-get ctx :org-structure-note))
               (system (if (and (eq ctx-target 'system)
                                (stringp ctx-text) (not (string-empty-p ctx-text)))
-                          (carriage--join-nonempty (list intent-note ctx-text) "\n")
-                        intent-note))
+                          (carriage--join-nonempty (list org-note intent-note ctx-text) "\n")
+                        (carriage--join-nonempty (list org-note intent-note) "\n")))
               (prompt (if (and (eq ctx-target 'user)
                                (stringp ctx-text) (not (string-empty-p ctx-text)))
                           (concat ctx-text "\n" payload)

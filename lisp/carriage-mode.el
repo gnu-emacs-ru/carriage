@@ -414,7 +414,7 @@ Default is t (include plain segments by default; toggle to focus only on typed b
 
 ;; -------------------------------------------------------------------
 ;; Typed-blocks structure hint (controls Ask/Hybrid system guidance)
-(defcustom carriage-mode-typedblocks-structure-hint nil
+(defcustom carriage-mode-typedblocks-structure-hint t
   "When non-nil, Ask/Hybrid system prompts include a compact \"Typed Blocks (v1)\" guidance
 asking the model to wrap key information into begin_<type> blocks (task, analysis, plan, verify, commands,
 question, answer, context; notes is optional). Turning it off keeps the intent semantics intact
@@ -2470,6 +2470,67 @@ Best-effort: never signal."
           ctx-text))
     (error nil)))
 
+(defun carriage--org-structure--nearest-heading-level (&optional pos)
+  "Return level (number of stars) of the nearest Org heading above POS (or point), or nil.
+
+Best-effort:
+- Prefers simple regexp scan (no Org dependency in the send pipeline).
+- Never signals."
+  (condition-case _e
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char (or pos (point)))
+          (let ((case-fold-search nil))
+            (when (re-search-backward "^[ \t]*\\(\\*+\\)\\s-+\\S-" nil t)
+              (length (match-string 1))))))
+    (error nil)))
+
+(defun carriage--org-structure--target-prefix (&optional buffer)
+  "Return exact heading prefix string like \"*** \" for the next answer in BUFFER.
+
+Rule:
+- If there is a heading above POS → use level (L+1)
+- If there is no heading above → use level 1"
+  (with-current-buffer (or buffer (current-buffer))
+    (let* ((pos (cond
+                 ((and (boundp 'carriage--stream-origin-marker)
+                       (markerp carriage--stream-origin-marker)
+                       (buffer-live-p (marker-buffer carriage--stream-origin-marker)))
+                  (marker-position carriage--stream-origin-marker))
+                 (t (point))))
+           (lvl (carriage--org-structure--nearest-heading-level pos))
+           (n (max 1 (if (integerp lvl) (1+ lvl) 1))))
+      (concat (make-string n ?*) " "))))
+
+(defun carriage--org-structure--prompt-note (&optional buffer)
+  "Return prompt guidance string for Org-structure compliance, or empty string.
+
+This is injected into the common system context (not UI; not suite-specific).
+It is controlled by `carriage-mode-org-structure-hint' (buffer-local)."
+  (with-current-buffer (or buffer (current-buffer))
+    (if (not (and (boundp 'carriage-mode-org-structure-hint)
+                  carriage-mode-org-structure-hint))
+        ""
+      (let* ((prefix (carriage--org-structure--target-prefix (current-buffer))))
+        (string-join
+         (list
+          ""
+          "ORG STRUCTURE (STRICT):"
+          "- Output MUST be valid Org-mode (no Markdown/HTML)."
+          "- Do NOT use Markdown fences like ```."
+          "- The FIRST non-empty line of your answer MUST be an Org heading."
+          (format "- Start that heading with EXACTLY this prefix: %S" prefix)
+          "- Heading format: \"<STARS><SPACE><TITLE>\"."
+          "- TITLE requirements:"
+          "  - 4–12 words (or <= 80 chars),"
+          "  - no trailing dot/colon/semicolon,"
+          "  - must briefly describe the essence of THIS iteration given the context."
+          "- If there are headings of the same level above, follow their style (language, TODO, tags) but do not invent new tags."
+          "- After the heading, add a blank line, then the body."
+          "- Code/commands/output must use Org src blocks: #+begin_src <lang> ... #+end_src.")
+         "\n")))))
+
 (defun carriage--build-context (source buffer)
   "Return context plist for prompt builder with at least :payload.
 SOURCE is 'buffer or 'subtree. BUFFER is the source buffer.
@@ -4181,6 +4242,58 @@ Expected keys include :known (boolean) and :cost-total-u (integer or nil).")
 
 (defvar-local carriage--last-backend-error nil
   "Last backend error message (short string), if available.")
+
+(defvar-local carriage--last-error-class nil
+  "Last request error class symbol (e.g., LLM_E_TIMEOUT/LLM_E_NETWORK), if available.")
+
+(defvar-local carriage--last-error-detail nil
+  "Last request error detail string for UI (e.g., \"402\", \"timeout\", \"network\"), if available.")
+
+;; -----------------------------------------------------------------------------
+;; Org structure compliance (\"Соблюдать структуру\") — prompt/UI toggle
+;;
+;; Default: ON.
+;; Purpose: guide the model to keep Org heading hierarchy and start answers with
+;; a properly leveled Org heading.
+;;
+;; NOTE: The prompt injection itself is implemented in carriage-typedblocks.el.
+;; UI modeline segment is implemented in carriage-ui.el.
+(defcustom carriage-mode-org-structure-hint t
+  "When non-nil, Carriage adds strict Org-structure guidance to the prompt.
+
+User-facing label: \"Соблюдать структуру\".
+
+Semantics (strict):
+- Answer MUST be valid Org-mode (no Markdown fences).
+- The FIRST non-empty line MUST be an Org heading.
+- Heading level policy: if there is an Org heading above → use level (L+1),
+  otherwise start at top level (1).
+- Heading title MUST briefly describe the essence of this iteration (from context)
+  and follow the style of headings of the same level above when present.
+
+This variable is intended to be buffer-local and persisted via doc-state."
+  :type 'boolean
+  :group 'carriage)
+(make-variable-buffer-local 'carriage-mode-org-structure-hint)
+
+;; Ensure default is ON for new buffers (even if an older build had it OFF).
+(setq-default carriage-mode-org-structure-hint t)
+
+;;;###autoload
+(defun carriage-toggle-org-structure-hint ()
+  "Toggle Org structure compliance (\"Соблюдать структуру\") in the current buffer."
+  (interactive)
+  (setq-local carriage-mode-org-structure-hint
+              (not (and (boundp 'carriage-mode-org-structure-hint)
+                        carriage-mode-org-structure-hint)))
+  ;; Best-effort UI refresh
+  (when (fboundp 'carriage-ui--invalidate-ml-cache)
+    (ignore-errors (carriage-ui--invalidate-ml-cache)))
+  (when (fboundp 'carriage-ui--invalidate-icon-cache)
+    (ignore-errors (carriage-ui--invalidate-icon-cache)))
+  (force-mode-line-update t)
+  (message "Соблюдать структуру: %s"
+           (if carriage-mode-org-structure-hint "ON" "OFF")))
 
 (provide 'carriage-mode)
 ;;; carriage-mode.el ends here

@@ -564,6 +564,7 @@ Disabling this eliminates periodic redisplay work during active phases."
   '(
     intent
     toggle-typed
+    structure
     model
     state
     apply-status
@@ -1465,7 +1466,7 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                                                     :v-adjust (- carriage-mode-icon-v-adjust 0.1)
                                                     :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-yellow-face)))))
                  ('profile (when (fboundp 'all-the-icons-material)
-                             (all-the-icons-material "account_box"
+                             (all-the-icons-material "line_weight"
                                                      :height carriage-mode-icon-height
                                                      :v-adjust carriage-mode-icon-v-adjust
                                                      :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face)))))
@@ -2085,6 +2086,24 @@ Important: the cache key includes label's text properties to ensure visual updat
                                             :v-adjust (- carriage-mode-icon-v-adjust 0.12)
                                             :face fplist))
                     (t nil)))
+                  ('structure
+                   (cond
+                    ((fboundp 'all-the-icons-material)
+                     (all-the-icons-material "line_weight"
+                                             :height carriage-mode-icon-height
+                                             :v-adjust (- carriage-mode-icon-v-adjust 0.12)
+                                             :face fplist))
+                    ((fboundp 'all-the-icons-faicon)
+                     (all-the-icons-faicon "tree"
+                                           :height carriage-mode-icon-height
+                                           :v-adjust carriage-mode-icon-v-adjust
+                                           :face fplist))
+                    ((fboundp 'all-the-icons-octicon)
+                     (all-the-icons-octicon "repo"
+                                            :height carriage-mode-icon-height
+                                            :v-adjust carriage-mode-icon-v-adjust
+                                            :face fplist))
+                    (t nil)))
                   (_ nil))))
           (when (stringp res)
             (puthash ckey res cache))
@@ -2229,6 +2248,12 @@ Uses pulse.el when available, otherwise temporary overlays."
          (be-err (and (memq 'state blocks)
                       (boundp 'carriage--last-backend-error)
                       carriage--last-backend-error))
+         (err-class (and (memq 'state blocks)
+                         (boundp 'carriage--last-error-class)
+                         carriage--last-error-class))
+         (err-detail (and (memq 'state blocks)
+                          (boundp 'carriage--last-error-detail)
+                          carriage--last-error-detail))
          ;; Last request cost/usage snapshot for req-cost block.
          (req-cost-key
           (and (memq 'req-cost blocks)
@@ -2265,7 +2290,7 @@ Uses pulse.el when available, otherwise temporary overlays."
          (branch-t (and (memq 'branch blocks) carriage-ui--branch-cache-time))
          (abortp (and (boundp 'carriage--abort-handler) carriage--abort-handler)))
     (list uicons
-          state spin state-tt-ver http-code http-text be-err
+          state spin state-tt-ver http-code http-text be-err err-class err-detail
           ctx-ver apply-ver doc-cost-ver req-cost-key
           patch-count has-last abortp blocks
           (and (boundp 'carriage-mode-intent)  carriage-mode-intent)
@@ -2416,10 +2441,29 @@ This segment represents *request/transport* state."
          (http-text (and (boundp 'carriage--last-http-status-text) carriage--last-http-status-text))
          (be-err (and (boundp 'carriage--last-backend-error) carriage--last-backend-error))
          (mid (and (boundp 'carriage--last-model-id) carriage--last-model-id))
+         (err-detail
+          (cond
+           ((and (stringp http-code) (not (string-empty-p http-code))) http-code)
+           ((and (boundp 'carriage--last-error-detail)
+                 (stringp carriage--last-error-detail)
+                 (not (string-empty-p carriage--last-error-detail)))
+            carriage--last-error-detail)
+           ((and (boundp 'carriage--last-error-class)
+                 (symbolp carriage--last-error-class))
+            (pcase carriage--last-error-class
+              ('LLM_E_TIMEOUT "timeout")
+              ('LLM_E_ABORT "abort")
+              ('LLM_E_NETWORK "network")
+              ('LLM_E_PROVIDER "provider")
+              ('LLM_E_INTERNAL "internal")
+              (_ "error")))
+           (t nil)))
          (label
-          (if (and (eq st 'error) http-code)
-              (format "Error: %s" http-code)
-            (carriage-ui--state-label st)))
+          (cond
+           ((and (eq st 'error) (stringp err-detail) (not (string-empty-p err-detail)))
+            (format "Error: %s" err-detail))
+           (t
+            (carriage-ui--state-label st))))
          (txt (format "%s%s"
                       label
                       (if (and carriage-ui-enable-spinner
@@ -2434,10 +2478,12 @@ This segment represents *request/transport* state."
                  (_ nil)))
          (help0 (and (boundp 'carriage--ui-state-tooltip) carriage--ui-state-tooltip))
          (help-http
-          (when (or http-code http-text be-err mid)
+          (when (or http-code http-text be-err mid err-detail)
             (string-join
              (delq nil
                    (list
+                    (and (stringp err-detail) (not (string-empty-p err-detail))
+                         (format "Error class: %s" err-detail))
                     (and http-code
                          (format "HTTP: %s%s"
                                  http-code
@@ -2862,6 +2908,15 @@ If cache is empty/uninitialized, schedule an async refresh and show a placeholde
                      (or (plist-get cost :known)
                          (plist-get cost :cost-known))))
          (total-u (and (listp cost) (plist-get cost :cost-total-u)))
+         (unit0 (and (listp usage)
+                     (or (plist-get usage :usage-unit)
+                         (plist-get usage :unit)
+                         (plist-get usage :CAR_USAGE_UNIT))))
+         (unit (cond
+                ((eq unit0 'bytes) 'bytes)
+                ((eq unit0 'tokens) 'tokens)
+                ((stringp unit0) (intern (downcase unit0)))
+                (t nil)))
          (tin (and (listp usage) (plist-get usage :tokens-in)))
          (tout (and (listp usage) (plist-get usage :tokens-out)))
          (bin (and (listp usage) (plist-get usage :bytes-in)))
@@ -2869,6 +2924,23 @@ If cache is empty/uninitialized, schedule an async refresh and show a placeholde
     (cond
      ((and known (integerp total-u) (> total-u 0))
       (format "Req:%s" (carriage-ui--format-money-suffix total-u)))
+
+     ;; IMPORTANT: when usage is explicitly marked as bytes, do not present it as tokens
+     ;; even if (:tokens-in/:tokens-out) are filled with byte counts by transport.
+     ((eq unit 'bytes)
+      (cond
+       ((or (integerp bin) (integerp bout))
+        (format "bytes:%s/%s"
+                (if (integerp bin) bin "—")
+                (if (integerp bout) bout "—")))
+       ;; Fallback (if bytes are missing but tokens are present for some reason)
+       ((or (integerp tin) (integerp tout))
+        (format "tok:%s/%s"
+                (if (integerp tin) tin "—")
+                (if (integerp tout) tout "—")))
+       (t "Req:—")))
+
+     ;; Default policy: tokens first, then bytes.
      ((or (integerp tin) (integerp tout))
       (format "tok:%s/%s"
               (if (integerp tin) tin "—")
@@ -2939,6 +3011,7 @@ If cache is empty/uninitialized, schedule an async refresh and show a placeholde
     ('toggle-visible (carriage-ui--ml-seg-toggle-visible))
     ('toggle-plain   (carriage-ui--ml-seg-toggle-plain))
     ('toggle-typed   (carriage-ui--ml-seg-toggle-typed))
+    ('structure     (carriage-ui--ml-seg-structure))
     ('abort         (carriage-ui--ml-seg-abort))
     ('report        (carriage-ui--ml-seg-report))
     ('toggle-ctx    (carriage-ui--ml-seg-toggle-ctx))
@@ -2954,10 +3027,11 @@ If cache is empty/uninitialized, schedule an async refresh and show a placeholde
   (let ((pre nil))
     (if (and (stringp pre) (not carriage-ui--ml-stale-p))
         pre
-      (let* ((blocks (if (and (listp carriage-ui-modeline-blocks)
-                              carriage-ui-modeline-blocks)
-                         carriage-ui-modeline-blocks
-                       carriage-ui--modeline-default-blocks)))
+      (let* ((blocks0 (if (and (listp carriage-ui-modeline-blocks)
+                               carriage-ui-modeline-blocks)
+                          carriage-ui-modeline-blocks
+                        carriage-ui--modeline-default-blocks))
+             (blocks (carriage-ui--modeline-blocks-normalize blocks0)))
         ;; Compute once per render; Dry/Apply removed, snapshot unused.
         (setq carriage-ui--apply-visible-snapshot nil)
         (let* ((key (carriage-ui--ml-cache-key)))
@@ -6116,6 +6190,98 @@ Robustness:
            (apply orig args)
          nil)))))
 
+
+;; -----------------------------------------------------------------------------
+;; Modeline toggle: \"Соблюдать структуру\" (Org hierarchy / outline compliance)
+;;
+;; IMPORTANT:
+;; - This toggle is independent from TypedBlocks guidance.
+;; - Prompt integration is done outside UI (see carriage-mode / typedblocks layers).
+
+(defun carriage-ui--modeline-blocks-normalize (blocks)
+  "Normalize modeline BLOCKS order:
+- Ensure 'structure appears immediately after 'toggle-typed when 'toggle-typed exists.
+- Otherwise, insert 'structure immediately before 'model when 'model exists.
+- Otherwise, append 'structure to the end.
+Idempotent."
+  (let* ((bs (delete-dups (copy-sequence (or blocks '()))))
+         (bs (delq 'structure bs)))
+    (cond
+     ((memq 'toggle-typed bs)
+      (let ((out '()))
+        (dolist (b bs (nreverse out))
+          (push b out)
+          (when (eq b 'toggle-typed)
+            (push 'structure out)))))
+     ((memq 'model bs)
+      (let ((out '()))
+        (dolist (b bs (nreverse out))
+          (when (eq b 'model)
+            (push 'structure out))
+          (push b out))))
+     (t
+      (append bs (list 'structure))))))
+
+(defun carriage-ui--structure-toggle-icon (&optional enabled)
+  "Return a \"tree\" icon string for the structure toggle.
+ENABLED controls color: ON → cyan-ish, OFF → grey.
+Must not break nerd-icons/all-the-icons glyph properties."
+  (let* ((ico
+          (cond
+           ;; Prefer nerd-icons (Nerd Font)
+           ((and (require 'nerd-icons nil t)
+                 (fboundp 'nerd-icons-mdicon))
+            (or (ignore-errors (nerd-icons-mdicon "nf-md-file_tree_outline"))
+                (ignore-errors (nerd-icons-mdicon "nf-md-file_tree"))
+                (ignore-errors (nerd-icons-mdicon "nf-md-file_tree_outline"))
+                "T"))
+           ;; Fallback to all-the-icons
+           ((and (require 'all-the-icons nil t)
+                 (fboundp 'all-the-icons-material))
+            (or (ignore-errors (all-the-icons-material "line_weight" :height 0.95 :v-adjust 0.0))
+                (ignore-errors (and (fboundp 'all-the-icons-faicon)
+                                    (all-the-icons-faicon "sitemap" :height 0.95 :v-adjust 0.0)))
+                "T"))
+           ;; Plain fallback
+           (t "T")))
+         ;; Preserve glyph text-properties (font family/face) by copying.
+         (s (if (stringp ico) (copy-sequence ico) (copy-sequence (format "%s" ico))))
+         ;; Choose a color face and *append* it to keep icon font face intact.
+         (on-face (cond ((facep 'nerd-icons-cyan) 'nerd-icons-cyan)
+                        ((facep 'all-the-icons-blue) 'all-the-icons-blue)
+                        (t 'link)))
+         (off-face (cond ((facep 'nerd-icons-silver) 'nerd-icons-silver)
+                         ((facep 'all-the-icons-silver) 'all-the-icons-silver)
+                         (t 'shadow))))
+    (add-face-text-property 0 (length s) (if enabled on-face off-face) 'append s)
+    ;; Extra safety: ensure disabled is grey even if the icon already has strong foreground.
+    (unless enabled
+      (add-face-text-property 0 (length s) 'shadow 'append s))
+    s))
+
+(defun carriage-ui--ml-seg-structure ()
+  "Build modeline segment for Org structure compliance toggle."
+  (let* ((_ (require 'carriage-i18n nil t))
+         (help
+          (string-join
+           '("Соблюдать структуру (Org)"
+             ""
+             "Когда включено, Carriage добавляет строгие правила формата ответа:"
+             "- Ответ должен быть валидным Org (без Markdown fences ```)"
+             "- Первая непустая строка — заголовок Org нужного уровня (L+1 или уровень 1)"
+             "- Заголовок кратко описывает суть итерации из контекста"
+             ""
+             "mouse-1: переключить")
+           "\n")))
+    ;; Render like other toggles (Typed/Map/Plain): icon-only in GUI, text in TTY.
+    ;; ON  -> accent-blue (same as other context toggles)
+    ;; OFF -> muted grey, without breaking icon glyph properties.
+    (carriage-ui--toggle
+     "Struct"
+     'carriage-mode-org-structure-hint
+     #'carriage-toggle-org-structure-hint
+     help
+     'structure)))
 
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

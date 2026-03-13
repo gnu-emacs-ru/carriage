@@ -233,9 +233,9 @@ The fragment enforces:
             (let ((b (ignore-errors (org-back-to-heading t))))
               (when b
                 (setq lvl (ignore-errors (org-outline-level)))))))))
-    ;; If we found a heading level L, we want L+1 (nest under current section).
+    ;; If we found a heading level L, we want L (same level as the nearest heading).
     ;; Otherwise start at top level (1).
-    (let ((n (max 1 (if (numberp lvl) (1+ lvl) 1))))
+    (let ((n (max 1 (if (numberp lvl) lvl 1))))
       (make-string n ?*))))
 
 (defun carriage-typedblocks--org-structure--hint ()
@@ -690,7 +690,7 @@ Policy:
   "Return target Org heading level for the next assistant answer."
   (let* ((lvl (or (carriage-typedblocks--org-nearest-heading-level) 0)))
     (cond
-     ((> lvl 0) (min 20 (1+ lvl)))
+     ((> lvl 0) (min 20 lvl))
      (t 1))))
 
 (defun carriage-typedblocks--org-structure-rules ()

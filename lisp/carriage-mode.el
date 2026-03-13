@@ -2490,7 +2490,7 @@ Best-effort:
   "Return exact heading prefix string like \"*** \" for the next answer in BUFFER.
 
 Rule:
-- If there is a heading above POS → use level (L+1)
+- If there is a heading above POS → use level (L)
 - If there is no heading above → use level 1"
   (with-current-buffer (or buffer (current-buffer))
     (let* ((pos (cond
@@ -2500,7 +2500,7 @@ Rule:
                   (marker-position carriage--stream-origin-marker))
                  (t (point))))
            (lvl (carriage--org-structure--nearest-heading-level pos))
-           (n (max 1 (if (integerp lvl) (1+ lvl) 1))))
+           (n (max 1 (if (integerp lvl) lvl 1))))
       (concat (make-string n ?*) " "))))
 
 (defun carriage--org-structure--prompt-note (&optional buffer)

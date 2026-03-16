@@ -26,6 +26,12 @@
 (require 'carriage-errors)
 (carriage-define-errors)
 
+;; Abort handler must be buffer-local so abort commands affect only the
+;; request started from the current Carriage buffer (no cross-buffer bleed).
+(defvar-local carriage--abort-handler nil
+  "Buffer-local function that aborts the active request in the current Carriage buffer.
+When nil, there is no active abortable request associated with this buffer.")
+
 (require 'carriage-logging)
 (require 'carriage-utils)
 (require 'carriage-git)

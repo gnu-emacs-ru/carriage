@@ -89,6 +89,38 @@ Default is nil to avoid duplication with FINGERPRINT and reduce UI drift."
   :type 'boolean
   :group 'carriage-transport-gptel)
 
+(defcustom carriage-transport-gptel-trace-chunks nil
+  "When non-nil, log every GPTel callback event (kind + size) for Carriage requests.
+
+This is intentionally very verbose. Use it to debug cases where:
+- streaming is announced, but no chunks reach `carriage-insert-stream-chunk',
+- only reasoning boundary events arrive, or
+- the request appears to \"finish ok\" and then \"finish error\" due to a race."
+  :type 'boolean
+  :group 'carriage-transport-gptel)
+
+(defun carriage-transport-gptel--trace-callback (id resp info &optional note)
+  "Trace GPTel callback events for request ID when enabled. Never signals."
+  (when carriage-transport-gptel-trace-chunks
+    (condition-case _e
+        (let* ((kind (carriage-transport-gptel--response-kind resp))
+               (len (cond
+                     ((stringp resp) (string-bytes resp))
+                     ((and (consp resp) (stringp (cdr resp))) (string-bytes (cdr resp)))
+                     (t 0)))
+               (http (and (listp info)
+                          (or (plist-get info :http-status)
+                              (plist-get info :http_status))))
+               (status (and (listp info) (plist-get info :status)))
+               (status1 (and (stringp status)
+                             (if (> (length status) 120) (substring status 0 120) status))))
+          (carriage-log "Transport[gptel] TRACE id=%s kind=%s len=%s http=%s status=%s%s"
+                        id kind len
+                        (or http "—")
+                        (or status1 "—")
+                        (if note (format " note=%s" note) "")))
+      (error nil))))
+
 ;; ---------------------------------------------------------------------
 ;; Utilities
 
@@ -385,6 +417,22 @@ Returns COST plist (or nil) with keys like :cost-total-u."
 (defvar-local carriage-transport-gptel--finalized-kind nil
   "Final kind symbol used for the last finalize in this buffer.")
 
+;; Chunk diagnostics (per-request, per-buffer)
+(defvar-local carriage-transport-gptel--chunks-text 0
+  "Number of plain text chunks observed in GPTel callback for current request.")
+(defvar-local carriage-transport-gptel--bytes-text 0
+  "Total bytes of plain text chunks observed in GPTel callback for current request.")
+(defvar-local carriage-transport-gptel--chunks-reasoning 0
+  "Number of reasoning chunks observed in GPTel callback for current request.")
+(defvar-local carriage-transport-gptel--bytes-reasoning 0
+  "Total bytes of reasoning chunks observed in GPTel callback for current request.")
+(defvar-local carriage-transport-gptel--chunk-first-at nil
+  "Float-time of first callback event observed for current request, or nil.")
+(defvar-local carriage-transport-gptel--chunk-last-at nil
+  "Float-time of last callback event observed for current request, or nil.")
+(defvar-local carriage-transport-gptel--chunk-last-kind nil
+  "Last callback event kind for current request: symbol like 'text/'reasoning/'done/...")
+
 (defvar-local carriage-transport-gptel--wd-timer nil)
 (defvar-local carriage-transport-gptel--wd-last-activity 0.0)
 (defvar-local carriage-transport-gptel--wd-fired nil)
@@ -404,6 +452,67 @@ Starts as startup timeout, then may be extended after first stream content arriv
   "Record activity timestamp."
   (setq carriage-transport-gptel--wd-last-activity (float-time)))
 
+(defun carriage-transport-gptel--chunk-reset ()
+  "Reset per-request callback/chunk counters in current buffer."
+  (setq carriage-transport-gptel--chunks-text 0
+        carriage-transport-gptel--bytes-text 0
+        carriage-transport-gptel--chunks-reasoning 0
+        carriage-transport-gptel--bytes-reasoning 0
+        carriage-transport-gptel--chunk-first-at nil
+        carriage-transport-gptel--chunk-last-at nil
+        carriage-transport-gptel--chunk-last-kind nil))
+
+(defun carriage-transport-gptel--chunk-note (kind payload)
+  "Record a callback event of KIND with PAYLOAD (string or nil) into counters."
+  (let* ((now (float-time))
+         (bytes (if (stringp payload) (string-bytes payload) 0)))
+    (unless (numberp carriage-transport-gptel--chunk-first-at)
+      (setq carriage-transport-gptel--chunk-first-at now))
+    (setq carriage-transport-gptel--chunk-last-at now)
+    (setq carriage-transport-gptel--chunk-last-kind kind)
+    (pcase kind
+      ('text
+       (setq carriage-transport-gptel--chunks-text (1+ (or carriage-transport-gptel--chunks-text 0)))
+       (setq carriage-transport-gptel--bytes-text (+ (or carriage-transport-gptel--bytes-text 0) bytes)))
+      ('reasoning
+       (setq carriage-transport-gptel--chunks-reasoning (1+ (or carriage-transport-gptel--chunks-reasoning 0)))
+       (setq carriage-transport-gptel--bytes-reasoning (+ (or carriage-transport-gptel--bytes-reasoning 0) bytes)))
+      (_ nil))))
+
+(defun carriage-transport-gptel--gptel-proc+buf-for-origin (origin-buffer)
+  "Return (PROC . PROC-BUF) for GPTel request whose :buffer is ORIGIN-BUFFER, or nil."
+  (when (and (buffer-live-p origin-buffer)
+             (boundp 'gptel--request-alist)
+             (listp gptel--request-alist))
+    (cl-loop
+     for entry in gptel--request-alist
+     for proc = (car entry)
+     for fsm = (ignore-errors (cadr entry))
+     for info = (and fsm (ignore-errors (gptel-fsm-info fsm)))
+     when (and (processp proc)
+               (listp info)
+               (eq (plist-get info :buffer) origin-buffer))
+     return (cons proc (process-buffer proc)))))
+
+(defun carriage-transport-gptel--log-gptel-proc-buffer (origin-buffer id tag)
+  "Log snapshot of GPTel curl process buffer for ORIGIN-BUFFER (best-effort)."
+  (when carriage-transport-gptel-diagnostics
+    (when-let* ((pb (carriage-transport-gptel--gptel-proc+buf-for-origin origin-buffer))
+                (proc (car pb))
+                (buf (cdr pb))
+                ((buffer-live-p buf)))
+      (with-current-buffer buf
+        (let* ((sz (buffer-size))
+               (tail (buffer-substring-no-properties
+                      (max (point-min) (- (point-max) 500))
+                      (point-max))))
+          (carriage-log "Transport[gptel] %s id=%s proc=%s buf=%s size=%d tail=%s"
+                        (or tag "PROC-SNAP")
+                        id
+                        (process-name proc)
+                        (buffer-name buf)
+                        sz
+                        (carriage-transport-gptel--snip tail 320)))))))
 
 (defun carriage-transport-gptel--wd-extended-timeout ()
   "Return silence timeout (seconds) to use after first stream content arrives.
@@ -471,21 +580,31 @@ It MUST be idempotent."
                         (plist-get info :http_status))))
          (resp-kind (carriage-transport-gptel--response-kind resp)))
     (carriage-log
-     "Transport[gptel] END id=%s final=%s code=%s status=%s http=%s resp=%s req-alist=%s procs0=%d"
+     "Transport[gptel] END id=%s final=%s code=%s status=%s http=%s resp=%s req-alist=%s procs0=%d chunks{text=%d/%dB reasoning=%d/%dB last=%s}"
      id final code
      (if status (carriage-transport-gptel--snip status 200) "—")
      (if http (format "%s" http) "—")
      resp-kind
      (if (numberp reqn) (number-to-string reqn) "—")
-     (length procs0))
+     (length procs0)
+     (or carriage-transport-gptel--chunks-text 0)
+     (or carriage-transport-gptel--bytes-text 0)
+     (or carriage-transport-gptel--chunks-reasoning 0)
+     (or carriage-transport-gptel--bytes-reasoning 0)
+     (or carriage-transport-gptel--chunk-last-kind '-))
     (when (fboundp 'carriage-traffic-log)
       (carriage-traffic-log
        'in
-       "gptel: end id=%s final=%s code=%s http=%s status=%s err=%s"
+       "gptel: end id=%s final=%s code=%s http=%s status=%s err=%s chunks{text=%d/%dB reasoning=%d/%dB last=%s}"
        id final code
        (if http (format "%s" http) "—")
        (if status (carriage-transport-gptel--snip status 120) "—")
-       (carriage-transport-gptel--snip (and (listp info) (plist-get info :error)) 120)))))
+       (carriage-transport-gptel--snip (and (listp info) (plist-get info :error)) 120)
+       (or carriage-transport-gptel--chunks-text 0)
+       (or carriage-transport-gptel--bytes-text 0)
+       (or carriage-transport-gptel--chunks-reasoning 0)
+       (or carriage-transport-gptel--bytes-reasoning 0)
+       (or carriage-transport-gptel--chunk-last-kind '-)))))
 
 (defun carriage-transport-gptel--finalize--log-last (id final resp info)
   "Log LAST diagnostics for FINAL request kinds."
@@ -866,6 +985,17 @@ Returns plist with :watchdog-fired :code :reqn :procs0."
         (carriage-transport-gptel--wd-touch))
       (setq last-info info)
       (setq last-resp resp)
+      (when carriage-transport-gptel-trace-chunks
+        (carriage-transport-gptel--trace-callback
+         id resp info
+         (cond
+          ((and (stringp resp) (string-empty-p resp)) "empty-string")
+          ((and (consp resp) (eq (car resp) 'reasoning) (stringp (cdr resp)) (string-empty-p (cdr resp))) "empty-reasoning")
+          ((and (consp resp) (eq (car resp) 'reasoning) (eq (cdr resp) t)) "reasoning-end")
+          ((eq resp t) "done")
+          ((eq resp 'abort) "abort")
+          ((null resp) "nil")
+          (t nil))))
       (condition-case err
           (progn
             (when finished
@@ -879,6 +1009,8 @@ Returns plist with :watchdog-fired :code :reqn :procs0."
             (cond
              ;; Stream text
              ((stringp resp)
+              (with-current-buffer origin-buffer
+                (carriage-transport-gptel--chunk-note 'text resp))
               (unless first-stream
                 (setq first-stream t)
                 (with-current-buffer origin-buffer
@@ -892,29 +1024,39 @@ Returns plist with :watchdog-fired :code :reqn :procs0."
               (let ((val (cdr resp)))
                 (cond
                  ((stringp val)
+                  (with-current-buffer origin-buffer
+                    (carriage-transport-gptel--chunk-note 'reasoning val))
                   (unless first-stream
                     (setq first-stream t)
                     (carriage-transport-streaming origin-buffer))
                   (with-current-buffer origin-buffer
                     (carriage-insert-stream-chunk val 'reasoning)))
                  ((eq val t)
+                  (with-current-buffer origin-buffer
+                    (carriage-transport-gptel--chunk-note 'reasoning-end nil))
                   ;; end reasoning marker: insertion layer handles closing
                   nil)
                  (t nil))))
 
              ;; Done
              ((eq resp t)
+              (with-current-buffer origin-buffer
+                (carriage-transport-gptel--chunk-note 'done nil))
               (setq finished t)
               (carriage-transport-gptel--finalize origin-buffer id 'done resp info requested-model))
 
              ;; Abort (explicit)
              ((eq resp 'abort)
+              (with-current-buffer origin-buffer
+                (carriage-transport-gptel--chunk-note 'abort nil))
               (setq finished t)
               (carriage-transport-gptel--finalize origin-buffer id 'abort resp info requested-model))
 
              ;; Empty terminal response: if HTTP already succeeded and provider error is absent,
              ;; treat this as a successful completion with empty textual content.
              ((null resp)
+              (with-current-buffer origin-buffer
+                (carriage-transport-gptel--chunk-note 'nil nil))
               (setq finished t)
               (when carriage-transport-gptel-diagnostics
                 (carriage-log "Transport[gptel] NIL-RESP id=%s http-ok=%s info-error=%s status=%s"
@@ -1324,6 +1466,7 @@ Generic non-image files are omitted from `gptel-context'."
   (let ((start-procs (carriage-transport-gptel--live-gptel-curl-procs)))
     (setq carriage-transport-gptel--finalized nil
           carriage-transport-gptel--finalized-kind nil)
+    (carriage-transport-gptel--chunk-reset)
     (carriage-log "Transport[gptel] START id=%s source=%s model=%s prompt-bytes=%s"
                   id source (or model "—")
                   (if (stringp prompt) (number-to-string (string-bytes prompt)) "—"))
@@ -1335,6 +1478,8 @@ Generic non-image files are omitted from `gptel-context'."
   (carriage-transport-gptel--wd-start
    buffer id
    (lambda ()
+     (ignore-errors
+       (carriage-transport-gptel--log-gptel-proc-buffer buffer id "WD-TIMEOUT"))
      (funcall abort-fn)
      (carriage-transport-gptel--finalize
       buffer id 'timeout nil (list :status "timeout") nil))))

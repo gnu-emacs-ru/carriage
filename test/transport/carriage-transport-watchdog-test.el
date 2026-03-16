@@ -1,0 +1,201 @@
+;;; carriage-transport-watchdog-test.el --- Transport watchdog tests -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'cl-lib)
+
+;; Load full package so declared functions used by transport are defined.
+(require 'carriage)
+
+(defun carriage-test--wait (seconds)
+  "Wait up to SECONDS while allowing timers to run."
+  (let ((deadline (+ (float-time) (max 0.0 (float seconds)))))
+    (while (< (float-time) deadline)
+      (accept-process-output nil 0.01)))
+  t)
+
+(ert-deftest carriage-transport-watchdog-timeout-collapses-to-error ()
+  (let ((carriage-transport-watchdog-enabled t)
+        (carriage-transport-watchdog-stall-seconds 0.05)
+        (carriage-transport-watchdog-check-interval 0.01))
+    (with-temp-buffer
+      (let ((states '())
+            (aborted nil))
+        (cl-letf (((symbol-function 'carriage-ui-set-state)
+                   (lambda (st &rest _)
+                     (push st states)))
+                  ((symbol-function 'carriage-log)
+                   (lambda (&rest _) nil)))
+          (carriage-transport-begin (lambda () (setq aborted t)) (current-buffer))
+          ;; No progress → watchdog should fire.
+          (carriage-test--wait 0.15)
+          (should aborted)
+          (should (memq 'sending states))
+          (should (memq 'error states))
+          (should (bound-and-true-p carriage-transport--watchdog-fired))
+          (should (null carriage-transport--watchdog-timer)))))))
+
+(ert-deftest carriage-transport-watchdog-progress-prevents-timeout ()
+  (let ((carriage-transport-watchdog-enabled t)
+        (carriage-transport-watchdog-stall-seconds 0.05)
+        (carriage-transport-watchdog-check-interval 0.01))
+    (with-temp-buffer
+      (let ((states '())
+            (aborted nil))
+        (cl-letf (((symbol-function 'carriage-ui-set-state)
+                   (lambda (st &rest _) (push st states)))
+                  ((symbol-function 'carriage-log)
+                   (lambda (&rest _) nil)))
+          (carriage-transport-begin (lambda () (setq aborted t)) (current-buffer))
+          ;; Keep feeding progress longer than stall window.
+          (dotimes (_ 8)
+            (carriage-transport-note-progress 'test (current-buffer))
+            (carriage-test--wait 0.02))
+          (should-not aborted)
+          (should-not (bound-and-true-p carriage-transport--watchdog-fired))
+          ;; Finish normally, then ensure watchdog doesn't fire later.
+          (carriage-transport-complete nil (current-buffer))
+          (carriage-test--wait 0.12)
+          (should-not (bound-and-true-p carriage-transport--watchdog-fired))
+          (should (null carriage-transport--watchdog-timer))
+          (should (memq 'idle states)))))))
+
+(ert-deftest carriage-transport-watchdog-complete-cancels-timer ()
+  (let ((carriage-transport-watchdog-enabled t)
+        (carriage-transport-watchdog-stall-seconds 0.05)
+        (carriage-transport-watchdog-check-interval 0.01))
+    (with-temp-buffer
+      (let ((states '())
+            (aborted nil))
+        (cl-letf (((symbol-function 'carriage-ui-set-state)
+                   (lambda (st &rest _) (push st states)))
+                  ((symbol-function 'carriage-log)
+                   (lambda (&rest _) nil)))
+          (carriage-transport-begin (lambda () (setq aborted t)) (current-buffer))
+          (carriage-transport-complete nil (current-buffer))
+          (carriage-test--wait 0.12)
+          (should-not aborted)
+          (should-not (bound-and-true-p carriage-transport--watchdog-fired))
+          (should (null carriage-transport--watchdog-timer))
+          (should (memq 'idle states)))))))
+
+(ert-deftest carriage-send-prepare-advice-timeout-invokes-orig ()
+  "If async send-prepare never reports completion, the timeout must still invoke ORIG."
+  (require 'carriage-context nil t)
+  (let ((carriage-mode-send-prepare-async t)
+        (carriage-mode-send-prepare-timeout-seconds 0.05)
+        (carriage-mode-include-project-map nil))
+    (with-temp-buffer
+      (let ((called nil))
+        (cl-letf (((symbol-function 'carriage-log) (lambda (&rest _) nil))
+                  ((symbol-function 'carriage-context-collect-async)
+                   (lambda (_cb &optional _buffer _root)
+                     ;; Never call back; rely on timeout to proceed.
+                     (list :timer nil
+                           :cancel-fn (lambda () t)))))
+          (carriage-mode--send-prepare-async-around
+           (lambda (&rest _) (setq called t))
+           ;; no args
+           )
+          (carriage-test--wait 0.15)
+          (should called))))))
+
+(ert-deftest carriage-send-buffer-deferred-reaches-prepare-dispatch ()
+  "carriage-send-buffer should schedule a deferred tick that calls prepare+dispatch.
+This catches the class of hangs where send-buffer runs but the deferred tick never fires."
+  (let ((carriage-mode-send-prepare-async nil)) ; ensure advice calls ORIG directly
+    (with-temp-buffer
+      (let ((called nil)
+            (seen nil)
+            (srcbuf (current-buffer)))
+        (setq-local carriage-mode-backend 'echo)
+        (setq-local carriage-mode-model "gptel-default")
+        (setq-local carriage-mode-intent 'Ask)
+        (setq-local carriage-mode-suite 'aibo)
+        (cl-letf (((symbol-function 'carriage-ui-set-state) (lambda (&rest _) nil))
+                  ((symbol-function 'carriage-log) (lambda (&rest _) nil))
+                  ((symbol-function 'carriage--preloader-start) (lambda () nil))
+                  ((symbol-function 'carriage-insert-send-separator) (lambda () nil))
+                  ((symbol-function 'carriage-insert-inline-fingerprint-now) (lambda () nil))
+                  ((symbol-function 'carriage-begin-iteration) (lambda () nil))
+                  ;; IMPORTANT: must remain bound while timers run → wait inside cl-letf.
+                  ((symbol-function 'carriage--send-prepare-and-dispatch)
+                   (lambda (source buf backend model intent suite insert-marker)
+                     (setq called t)
+                     (setq seen (list source buf backend model intent suite (markerp insert-marker))))))
+          (carriage-send-buffer)
+          (carriage-test--wait 0.12)
+          (should called)
+          (should (equal (car-safe seen) 'buffer))
+          (should (eq (nth 1 seen) srcbuf))
+          (should (eq (nth 2 seen) 'echo))
+          (should (equal (nth 4 seen) 'Ask))
+          (should (equal (nth 5 seen) 'aibo))
+          (should (eq (nth 6 seen) t)))))))
+
+(ert-deftest carriage-send-prep-async-success-calls-dispatch ()
+  "Async send-prep should eventually call dispatch on success."
+  (skip-unless (fboundp 'make-thread))
+  (let ((carriage-mode-send-async-context t)
+        (carriage-mode-send-prep-watchdog-enabled t)
+        (carriage-mode-send-prep-timeout-seconds 0.3))
+    (with-temp-buffer
+      (let ((called nil))
+        (setq-local carriage-mode-backend 'echo)
+        (setq-local carriage-mode-model "gptel-default")
+        (setq-local carriage-mode-intent 'Ask)
+        (setq-local carriage-mode-suite 'aibo)
+        (cl-letf (((symbol-function 'carriage-ui-set-state) (lambda (&rest _) nil))
+                  ((symbol-function 'carriage-log) (lambda (&rest _) nil))
+                  ((symbol-function 'carriage--build-context)
+                   (lambda (&rest _)
+                     (list :payload "hi")))
+                  ((symbol-function 'carriage-build-prompt)
+                   (lambda (&rest _)
+                     (list :system "S" :prompt "P")))
+                  ((symbol-function 'carriage--send-dispatch-with-prompt)
+                   (lambda (&rest _) (setq called t))))
+          (carriage--send-prepare-and-dispatch
+           'buffer (current-buffer) 'echo "gptel-default" 'Ask 'aibo (copy-marker (point) t))
+          (carriage-test--wait 0.12)
+          (should called))))))
+
+(ert-deftest carriage-send-prep-watchdog-timeout-cancels-and-errors ()
+  "If async send-prep hangs before dispatch, prep watchdog must collapse UI to error."
+  (skip-unless (fboundp 'make-thread))
+  (let ((carriage-mode-send-async-context t)
+        (carriage-mode-send-prep-watchdog-enabled t)
+        (carriage-mode-send-prep-timeout-seconds 0.05))
+    (with-temp-buffer
+      (let ((states '())
+            (called nil)
+            (preloader-stopped nil))
+        (setq-local carriage-mode-backend 'echo)
+        (setq-local carriage-mode-model "gptel-default")
+        (setq-local carriage-mode-intent 'Ask)
+        (setq-local carriage-mode-suite 'aibo)
+        (cl-letf (((symbol-function 'carriage-ui-set-state)
+                   (lambda (st &rest _) (push st states)))
+                  ((symbol-function 'carriage-log) (lambda (&rest _) nil))
+                  ((symbol-function 'carriage--preloader-stop)
+                   (lambda () (setq preloader-stopped t)))
+                  ;; Simulate a hang in build-context.
+                  ((symbol-function 'carriage--build-context)
+                   (lambda (&rest _)
+                     (sleep-for 0.2)
+                     (list :payload "hi")))
+                  ((symbol-function 'carriage-build-prompt)
+                   (lambda (&rest _)
+                     (list :system "S" :prompt "P")))
+                  ((symbol-function 'carriage--send-dispatch-with-prompt)
+                   (lambda (&rest _) (setq called t))))
+          (carriage--send-prepare-and-dispatch
+           'buffer (current-buffer) 'echo "gptel-default" 'Ask 'aibo (copy-marker (point) t))
+          (carriage-test--wait 0.18)
+          (should-not called)
+          (should preloader-stopped)
+          (should (memq 'sending states))
+          (should (memq 'error states))
+          (should (null carriage--send-prep-thread)))))))
+
+(provide 'carriage-transport-watchdog-test)
+;;; carriage-transport-watchdog-test.el ends here

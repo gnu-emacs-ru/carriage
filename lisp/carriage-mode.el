@@ -1242,6 +1242,16 @@ when the buffer is visible but not selected."
   :type 'number
   :group 'carriage)
 
+(defcustom carriage-stream-debug nil
+  "When non-nil, emit verbose logs for streaming enqueue/flush/finalize.
+
+This is intended to diagnose cases where:
+- streaming was announced but no chunks arrive,
+- chunks arrive but stay queued (no flush),
+- only reasoning boundary events arrive (empty reasoning blocks)."
+  :type 'boolean
+  :group 'carriage)
+
 (defvar-local carriage--stream-pending-events nil
   "Pending streamed events as a reversed list of (TYPE . STRING).
 
@@ -1312,6 +1322,12 @@ Adjacent events with the same TYPE are merged to reduce buffer operations."
       (cancel-timer carriage--stream-flush-timer))
     (setq carriage--stream-flush-timer nil)
     (let* ((pending (nreverse (or carriage--stream-pending-events '()))))
+      (when (and (boundp 'carriage-stream-debug) carriage-stream-debug)
+        (carriage-log "stream: flush start pending-events=%d pending-bytes=%d"
+                      (length pending)
+                      (or (and (boundp 'carriage--stream-pending-bytes)
+                               carriage--stream-pending-bytes)
+                          0)))
       (setq carriage--stream-pending-events nil)
       (setq carriage--stream-pending-bytes 0)
       (when pending
@@ -1656,6 +1672,17 @@ Implementation note (perf/UX):
   number of inserts + a throttled `redisplay` so streaming remains visible even
   without user input (and in non-selected windows)."
   (let ((s (or string "")))
+    (when (and (boundp 'carriage-stream-debug) carriage-stream-debug)
+      (carriage-log "stream: recv chunk type=%s bytes=%d (reasoning-open=%s pending=%s)"
+                    (or type 'text)
+                    (string-bytes s)
+                    (if (and (boundp 'carriage--reasoning-open) carriage--reasoning-open) "t" "nil")
+                    (if (boundp 'carriage--stream-pending-events)
+                        (length carriage--stream-pending-events)
+                      "-")))
+    ;; Watchdog progress marker (must be O(1) and never signal).
+    (when (fboundp 'carriage-transport-note-progress)
+      (carriage-transport-note-progress 'chunk (current-buffer)))
     ;; O(1) modeline support: detect begin_patch even when token is split across chunks.
     (when (and (not carriage--last-iteration-has-patches)
                (stringp s))
@@ -1935,8 +1962,7 @@ so preloader/streaming starts strictly below the fingerprint line."
 
 (defun carriage-fingerprint--find-line-marker ()
   "Return a marker pointing at a fingerprint line suitable for upsert, or nil.
-Prefers `carriage--fingerprint-line-marker' when live; otherwise finds the LAST
-#+CARRIAGE_FINGERPRINT line in the buffer (to match the most recent request)."
+Prefers `carriage--fingerprint-line-marker' when live; otherwise finds the LAST occurrence in buffer."
   (cond
    ((and (markerp carriage--fingerprint-line-marker)
          (buffer-live-p (marker-buffer carriage--fingerprint-line-marker)))
@@ -1950,6 +1976,7 @@ Prefers `carriage--fingerprint-line-marker' when live; otherwise finds the LAST
           (setq last (line-beginning-position)))
         (when (numberp last)
           (copy-marker last t)))))))
+
 
 (defun carriage-fingerprint--read-plist-at (marker)
   "Read fingerprint plist at MARKER (beginning of line). Return plist or nil."
@@ -2584,6 +2611,69 @@ Notes:
 (defvar-local carriage--send-prep-cancelled nil
   "Non-nil when the current Send preparation was cancelled.")
 
+(defcustom carriage-mode-send-prep-watchdog-enabled t
+  "When non-nil, enable a watchdog timer for the Send preparation phase.
+
+This catches hangs that occur BEFORE transport dispatch begins (e.g., while building
+payload/context/prompt), when transport-level watchdog cannot help.
+
+On timeout the watchdog:
+- cancels the prep job (best-effort),
+- stops the preloader/spinner overlay,
+- collapses UI into 'error and emits diagnostics to *carriage-log*."
+  :type 'boolean
+  :group 'carriage)
+
+(defcustom carriage-mode-send-prep-timeout-seconds 20.0
+  "Timeout in seconds for Send preparation (payload/context/prompt build).
+
+Applies only when async preparation (`carriage-mode-send-async-context') is enabled.
+If preparation blocks the main thread synchronously, this watchdog cannot fire."
+  :type 'number
+  :group 'carriage)
+
+(defvar-local carriage--send-prep-watchdog-timer nil
+  "Timer object for the active Send preparation watchdog, or nil.")
+
+(defun carriage--send-prep-watchdog-stop ()
+  "Stop Send preparation watchdog timer in current buffer (best-effort)."
+  (when (timerp carriage--send-prep-watchdog-timer)
+    (ignore-errors (cancel-timer carriage--send-prep-watchdog-timer)))
+  (setq carriage--send-prep-watchdog-timer nil)
+  t)
+
+(defun carriage--send-prep-watchdog-start (job-id source)
+  "Start Send preparation watchdog for JOB-ID and SOURCE in current buffer."
+  (carriage--send-prep-watchdog-stop)
+  (when (and carriage-mode-send-prep-watchdog-enabled
+             (numberp carriage-mode-send-prep-timeout-seconds)
+             (> (float carriage-mode-send-prep-timeout-seconds) 0.0))
+    (let* ((buf (current-buffer))
+           (tmo (float carriage-mode-send-prep-timeout-seconds))
+           (t0 (float-time)))
+      (setq carriage--send-prep-watchdog-timer
+            (run-at-time
+             tmo nil
+             (lambda ()
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (when (and (= job-id (or carriage--send-prep-job-id 0))
+                              (not carriage--send-prep-cancelled)
+                              (threadp carriage--send-prep-thread)
+                              (thread-live-p carriage--send-prep-thread))
+                     (carriage-log
+                      "send: PREP watchdog TIMEOUT job=%s source=%s elapsed=%.3fs (no dispatch yet)"
+                      job-id source (max 0.0 (- (float-time) t0)))
+                     ;; Cancel and collapse UI (best-effort).
+                     (ignore-errors (carriage--send-prep-cancel job-id))
+                     (ignore-errors (carriage-clear-abort-handler))
+                     (ignore-errors (carriage--preloader-stop))
+                     (ignore-errors (carriage-ui-set-state 'error))
+                     (unless (bound-and-true-p noninteractive)
+                       (message
+                        "Carriage: подготовка запроса зависла (timeout). Смотрите *carriage-log*."))))))))))
+  t)
+
 (defun carriage--send-prep-async-enabled-p ()
   "Return non-nil when Send preparation may run asynchronously in this session."
   (and (boundp 'carriage-mode-send-async-context)
@@ -2595,6 +2685,7 @@ Notes:
   "Cancel Send preparation for JOB-ID (best-effort)."
   (when (= job-id (or carriage--send-prep-job-id 0))
     (setq carriage--send-prep-cancelled t)
+    (carriage--send-prep-watchdog-stop)
     (let ((thr carriage--send-prep-thread))
       (when (and (threadp thr) (thread-live-p thr))
         (ignore-errors (thread-signal thr 'quit nil))))
@@ -2657,13 +2748,18 @@ synchronously (still outside the immediate interactive command tick)."
       (setq carriage--send-prep-cancelled nil)
       (setq carriage--send-prep-job-id (1+ (or carriage--send-prep-job-id 0)))
       (let* ((job-id carriage--send-prep-job-id))
+        ;; Prep watchdog: catches hangs before we even reach transport dispatch.
+        (carriage--send-prep-watchdog-start job-id source)
         ;; Install an abort handler for the PREP phase (transport will override it later).
         (carriage-register-abort-handler
          (lambda ()
            (carriage--send-prep-cancel job-id)))
         ;; Keep UI responsive and show activity while we prepare.
         (carriage-ui-set-state 'sending)
+
         (if (carriage--send-prep-async-enabled-p)
+            ;; ---------------------------
+            ;; Async preparation (thread)
             (progn
               (setq carriage--send-prep-thread
                     (make-thread
@@ -2671,12 +2767,21 @@ synchronously (still outside the immediate interactive command tick)."
                        (let* ((res
                                (condition-case e
                                    (let* ((t0 (float-time))
+                                          (_ (carriage-log "send: prep job=%s step=build-context start source=%s"
+                                                           job-id source))
                                           (ctx (carriage--build-context source srcbuf))
+                                          (t1 (float-time))
+                                          (_ (carriage-log "send: prep job=%s step=build-context done elapsed=%.3fs"
+                                                           job-id (max 0.0 (- t1 t0))))
+                                          (_ (carriage-log "send: prep job=%s step=build-prompt start"
+                                                           job-id))
                                           (built (carriage-build-prompt intent suite ctx))
                                           (sys (plist-get built :system))
                                           (pr  (plist-get built :prompt))
-                                          (dt (- (float-time) t0)))
-                                     (list :ok t :system sys :prompt pr :elapsed dt))
+                                          (t2 (float-time))
+                                          (_ (carriage-log "send: prep job=%s step=build-prompt done elapsed=%.3fs total=%.3fs"
+                                                           job-id (max 0.0 (- t2 t1)) (max 0.0 (- t2 t0)))))
+                                     (list :ok t :system sys :prompt pr :elapsed (- (float-time) t0)))
                                  (quit (list :ok nil :quit t))
                                  (error (list :ok nil :error (error-message-string e))))))
                          (run-at-time
@@ -2685,6 +2790,8 @@ synchronously (still outside the immediate interactive command tick)."
                             (when (buffer-live-p srcbuf)
                               (with-current-buffer srcbuf
                                 (when (= job-id (or carriage--send-prep-job-id 0))
+                                  ;; Prep completed (success/fail/cancel): stop watchdog now.
+                                  (carriage--send-prep-watchdog-stop)
                                   (setq carriage--send-prep-thread nil)
                                   (cond
                                    ((or carriage--send-prep-cancelled
@@ -2699,6 +2806,8 @@ synchronously (still outside the immediate interactive command tick)."
                                     (carriage-traffic-log 'out
                                                           "send: prep ok source=%s elapsed=%.3fs"
                                                           source (or (plist-get res :elapsed) 0.0))
+                                    ;; Transport overrides abort handler; drop PREP handler now.
+                                    (ignore-errors (carriage-clear-abort-handler))
                                     (carriage--send-dispatch-with-prompt
                                      source srcbuf backend model intent suite
                                      (plist-get res :prompt)
@@ -2707,21 +2816,123 @@ synchronously (still outside the immediate interactive command tick)."
                                    (t
                                     (carriage-log "send: prep failed source=%s job=%s err=%s"
                                                   source job-id (or (plist-get res :error) "-"))
+                                    (ignore-errors (carriage-clear-abort-handler))
                                     (ignore-errors (carriage--preloader-stop))
-                                    (ignore-errors (carriage-ui-set-state 'idle))
+                                    (ignore-errors (carriage-ui-set-state 'error))
                                     (when (not (bound-and-true-p noninteractive))
                                       (message "Carriage: подготовка запроса не удалась: %s"
                                                (or (plist-get res :error) "unknown error"))))))))))))))
-              (format "carriage-send-prep-%s" job-id))))
-      t)
-    ;; Sync preparation fallback (still in deferred tick; may block UI)
-    (let* ((ctx (carriage--build-context source srcbuf))
-           (built (carriage-build-prompt intent suite ctx))
-           (sys (plist-get built :system))
-           (pr  (plist-get built :prompt)))
-      (carriage--send-dispatch-with-prompt
-       source srcbuf backend model intent suite pr sys insert-marker)
-      t)))
+              t)
+
+          ;; ---------------------------
+          ;; Sync preparation (main thread)
+          (let ((t0 (float-time)))
+            (carriage-log "send: prep sync job=%s step=build-context start source=%s" job-id source)
+            (condition-case e
+                (let* ((ctx (carriage--build-context source srcbuf))
+                       (t1 (float-time))
+                       (_ (carriage-log "send: prep sync job=%s step=build-context done elapsed=%.3fs"
+                                        job-id (max 0.0 (- t1 t0))))
+                       (_ (carriage-log "send: prep sync job=%s step=build-prompt start" job-id))
+                       (built (carriage-build-prompt intent suite ctx))
+                       (sys (plist-get built :system))
+                       (pr  (plist-get built :prompt))
+                       (t2 (float-time)))
+                  (carriage-log "send: prep sync job=%s step=build-prompt done elapsed=%.3fs total=%.3fs"
+                                job-id (max 0.0 (- t2 t1)) (max 0.0 (- t2 t0)))
+                  ;; Sync prep finished: stop watchdog, drop PREP abort handler.
+                  (carriage--send-prep-watchdog-stop)
+                  (setq carriage--send-prep-thread nil)
+                  (ignore-errors (carriage-clear-abort-handler))
+                  (carriage--send-dispatch-with-prompt
+                   source srcbuf backend model intent suite pr sys insert-marker)
+                  t)
+              (quit
+               (carriage-log "send: prep sync keyboard-quit source=%s job=%s" source job-id)
+               (carriage--send-prep-watchdog-stop)
+               (setq carriage--send-prep-thread nil)
+               (ignore-errors (carriage-clear-abort-handler))
+               (ignore-errors (carriage--preloader-stop))
+               (ignore-errors (carriage-ui-set-state 'idle))
+               nil)
+              (error
+               (carriage-log "send: prep sync failed source=%s job=%s err=%s"
+                             source job-id (error-message-string e))
+               (carriage--send-prep-watchdog-stop)
+               (setq carriage--send-prep-thread nil)
+               (ignore-errors (carriage-clear-abort-handler))
+               (ignore-errors (carriage--preloader-stop))
+               (ignore-errors (carriage-ui-set-state 'error))
+               (when (not (bound-and-true-p noninteractive))
+                 (message "Carriage: подготовка запроса не удалась: %s"
+                          (error-message-string e)))
+               nil))))))))
+
+;;; Helper: initialize carriage stream for buffer
+(defun carriage--send-buffer--prepare-stream (origin-marker)
+  "Prepare carriage streaming environment at ORIGIN-MARKER."
+  (carriage-stream-reset origin-marker)
+  (when (fboundp 'carriage-begin-iteration)
+    (ignore-errors (carriage-begin-iteration)))
+  ;; Insert separator first, then per-send fingerprint at stream origin (single canonical line).
+  (when (fboundp 'carriage-insert-send-separator)
+    (ignore-errors (carriage-insert-send-separator)))
+  (when (fboundp 'carriage-insert-inline-fingerprint-now)
+    (ignore-errors (carriage-insert-inline-fingerprint-now)))
+  (when (fboundp 'carriage--preloader-start)
+    (ignore-errors (carriage--preloader-start))))
+
+;;; Helper: actual deferred work for send-buffer (replacement for run-at-time body)
+(defun carriage--send-buffer--deferred-dispatch (srcbuf origin-marker prefix)
+  "Deferred LLM send prep/dispath for carriage-send-buffer."
+  (let ((current-prefix-arg prefix))
+    (when (buffer-live-p srcbuf)
+      (with-current-buffer srcbuf
+        (condition-case err
+            (progn
+              (carriage-log "send-buffer: deferred tick; starting prepare (backend=%s model=%s)"
+                            carriage-mode-backend carriage-mode-model)
+              (carriage--send-prepare-and-dispatch
+               'buffer
+               srcbuf
+               carriage-mode-backend
+               carriage-mode-model
+               carriage-mode-intent
+               carriage-mode-suite
+               (or (and (markerp carriage--stream-origin-marker)
+                        (buffer-live-p (marker-buffer carriage--stream-origin-marker))
+                        carriage--stream-origin-marker)
+                   origin-marker)))
+          (quit
+           (carriage-log "send-buffer: deferred tick quit; aborting")
+           (ignore-errors (carriage-clear-abort-handler))
+           (ignore-errors (carriage--preloader-stop))
+           (ignore-errors (carriage-ui-set-state 'idle)))
+          (error
+           (carriage-log "send-buffer: deferred tick ERROR: %s" (error-message-string err))
+           (ignore-errors (carriage-clear-abort-handler))
+           (ignore-errors (carriage--preloader-stop))
+           (ignore-errors (carriage-ui-set-state 'error))
+           (unless (bound-and-true-p noninteractive)
+             (message "Carriage: send-buffer crashed: %s" (error-message-string err)))))))))
+
+;;; Helper: compute insertion point for stream origin in carriage-send-buffer
+(defun carriage--send-buffer--calc-origin-marker ()
+  "Compute and return stream origin marker for carriage-send-buffer (new line after cursor if needed)."
+  (copy-marker
+   (progn
+     ;; Ensure Send always starts on a fresh line *below* the current one.
+     ;; If point is in the middle/end of a non-empty line, insert a newline and
+     ;; move point to the new line so the separator+fingerprint never appear above
+     ;; the user's current line.
+     (when (or (not (bolp))
+               (save-excursion
+                 (beginning-of-line)
+                 (re-search-forward "[^ \t]" (line-end-position) t)))
+       (end-of-line)
+       (insert "\n"))
+     (point))
+   t))
 
 ;;;###autoload
 (defun carriage-send-buffer ()
@@ -2737,50 +2948,72 @@ synchronously (still outside the immediate interactive command tick)."
   ;; Defer heavy preparation to the next tick so UI updates (spinner/state) are visible instantly.
   (let ((srcbuf (current-buffer))
         (prefix current-prefix-arg)
-        (origin-marker
-         (copy-marker
-          (progn
-            ;; Ensure Send always starts on a fresh line *below* the current one.
-            ;; If point is in the middle/end of a non-empty line, insert a newline and
-            ;; move point to the new line so the separator+fingerprint never appear above
-            ;; the user's current line.
-            (when (or (not (bolp))
-                      (save-excursion
-                        (beginning-of-line)
-                        (re-search-forward "[^ \t]" (line-end-position) t)))
-              (end-of-line)
-              (insert "\n"))
-            (point))
-          t)))
-    ;; Prepare stream immediately at cursor: reset → begin-iteration → insert marker+separator → preloader.
-    (carriage-stream-reset origin-marker)
-    (when (fboundp 'carriage-begin-iteration)
-      (ignore-errors (carriage-begin-iteration)))
-    ;; Insert separator first, then per-send fingerprint at stream origin (single canonical line).
-    (when (fboundp 'carriage-insert-send-separator)
-      (ignore-errors (carriage-insert-send-separator)))
-    (when (fboundp 'carriage-insert-inline-fingerprint-now)
-      (ignore-errors (carriage-insert-inline-fingerprint-now)))
-    (when (fboundp 'carriage--preloader-start)
-      (ignore-errors (carriage--preloader-start)))
+        (origin-marker (carriage--send-buffer--calc-origin-marker)))
+    (carriage--send-buffer--prepare-stream origin-marker)
     (run-at-time
      0 nil
      (lambda ()
-       (let ((current-prefix-arg prefix))
-         (with-current-buffer srcbuf
-           (carriage-log "send-buffer: deferred tick; starting prepare (backend=%s model=%s)"
-                         carriage-mode-backend carriage-mode-model)
-           (carriage--send-prepare-and-dispatch
-            'buffer
-            srcbuf
-            carriage-mode-backend
-            carriage-mode-model
-            carriage-mode-intent
-            carriage-mode-suite
-            (or (and (markerp carriage--stream-origin-marker)
-                     (buffer-live-p (marker-buffer carriage--stream-origin-marker))
-                     carriage--stream-origin-marker)
-                origin-marker))))))))
+       (carriage--send-buffer--deferred-dispatch srcbuf origin-marker prefix)))))
+
+;;; Helper: calculate origin marker for send-subtree (new line after cursor if needed)
+(defun carriage--send-subtree--calc-origin-marker ()
+  "Compute and return stream origin marker for carriage-send-subtree."
+  (copy-marker
+   (progn
+     ;; Ensure Send always starts on a fresh line *below* the current one.
+     (when (or (not (bolp))
+               (save-excursion
+                 (beginning-of-line)
+                 (re-search-forward "[^ \t]" (line-end-position) t)))
+       (end-of-line)
+       (insert "\n"))
+     (point))
+   t))
+
+;;; Helper: prepare stream state & preloader for send-subtree
+(defun carriage--send-subtree--prepare-stream (origin-marker)
+  "Prepare carriage streaming environment at ORIGIN-MARKER for send-subtree."
+  (carriage-stream-reset origin-marker)
+  (when (fboundp 'carriage-begin-iteration)
+    (ignore-errors (carriage-begin-iteration)))
+  (when (fboundp 'carriage-insert-inline-fingerprint-now)
+    (ignore-errors (carriage-insert-inline-fingerprint-now)))
+  (when (fboundp 'carriage--preloader-start)
+    (ignore-errors (carriage--preloader-start))))
+
+;;; Helper: deferred dispatch logic for send-subtree (run-at-time lambda body)
+(defun carriage--send-subtree--deferred-dispatch (srcbuf origin-marker prefix)
+  "Deferred LLM send prep/dispath for carriage-send-subtree."
+  (let ((current-prefix-arg prefix))
+    (when (buffer-live-p srcbuf)
+      (with-current-buffer srcbuf
+        (condition-case err
+            (progn
+              (carriage-log "send-subtree: deferred tick; starting prepare (backend=%s model=%s)"
+                            carriage-mode-backend carriage-mode-model)
+              (carriage--send-prepare-and-dispatch
+               'subtree
+               srcbuf
+               carriage-mode-backend
+               carriage-mode-model
+               carriage-mode-intent
+               carriage-mode-suite
+               (or (and (markerp carriage--stream-origin-marker)
+                        (buffer-live-p (marker-buffer carriage--stream-origin-marker))
+                        carriage--stream-origin-marker)
+                   origin-marker)))
+          (quit
+           (carriage-log "send-subtree: deferred tick quit; aborting")
+           (ignore-errors (carriage-clear-abort-handler))
+           (ignore-errors (carriage--preloader-stop))
+           (ignore-errors (carriage-ui-set-state 'idle)))
+          (error
+           (carriage-log "send-subtree: deferred tick ERROR: %s" (error-message-string err))
+           (ignore-errors (carriage-clear-abort-handler))
+           (ignore-errors (carriage--preloader-stop))
+           (ignore-errors (carriage-ui-set-state 'error))
+           (unless (bound-and-true-p noninteractive)
+             (message "Carriage: send-subtree crashed: %s" (error-message-string err)))))))))
 
 ;;;###autoload
 (defun carriage-send-subtree ()
@@ -2796,45 +3029,12 @@ synchronously (still outside the immediate interactive command tick)."
   ;; Defer heavy preparation to the next tick so UI updates (spinner/state) are visible instantly.
   (let ((srcbuf (current-buffer))
         (prefix current-prefix-arg)
-        (origin-marker
-         (copy-marker
-          (progn
-            ;; Ensure Send always starts on a fresh line *below* the current one.
-            (when (or (not (bolp))
-                      (save-excursion
-                        (beginning-of-line)
-                        (re-search-forward "[^ \t]" (line-end-position) t)))
-              (end-of-line)
-              (insert "\n"))
-            (point))
-          t)))
-    ;; Prepare stream origin and preloader; insert only the fingerprint line (no inline iteration-id line).
-    (carriage-stream-reset origin-marker)
-    (when (fboundp 'carriage-begin-iteration)
-      (ignore-errors (carriage-begin-iteration)))
-    (when (fboundp 'carriage-insert-inline-fingerprint-now)
-      (ignore-errors (carriage-insert-inline-fingerprint-now)))
-    (when (fboundp 'carriage--preloader-start)
-      (ignore-errors (carriage--preloader-start)))
+        (origin-marker (carriage--send-subtree--calc-origin-marker)))
+    (carriage--send-subtree--prepare-stream origin-marker)
     (run-at-time
      0 nil
      (lambda ()
-       (let ((current-prefix-arg prefix))
-         (when (buffer-live-p srcbuf)
-           (with-current-buffer srcbuf
-             (carriage-log "send-subtree: deferred tick; starting prepare (backend=%s model=%s)"
-                           carriage-mode-backend carriage-mode-model)
-             (carriage--send-prepare-and-dispatch
-              'subtree
-              srcbuf
-              carriage-mode-backend
-              carriage-mode-model
-              carriage-mode-intent
-              carriage-mode-suite
-              (or (and (markerp carriage--stream-origin-marker)
-                       (buffer-live-p (marker-buffer carriage--stream-origin-marker))
-                       carriage--stream-origin-marker)
-                  origin-marker)))))))))
+       (carriage--send-subtree--deferred-dispatch srcbuf origin-marker prefix)))))
 
 ;;;###autoload
 (defun carriage-dry-run-at-point ()
@@ -4204,21 +4404,36 @@ Token plist:
              (ctx-done nil)
              (map-done t)   ;; becomes nil if map task is started
              (fired nil)
+             (started-at (float-time))
              (ctx-token nil)
              (map-token nil)
              (wd nil)
              (token (list :cancelled nil :ctx nil :map nil :cancel-fn nil)))
+        (carriage-log "send-prepare: start buf=%s root=%s timeout=%.3fs project-map=%s"
+                      (buffer-name buf)
+                      (or (and (stringp root) (string-trim root)) root)
+                      (float (or carriage-mode-send-prepare-timeout-seconds 3.0))
+                      (if (and (boundp 'carriage-mode-include-project-map)
+                               carriage-mode-include-project-map)
+                          "on" "off"))
         (cl-labels
-            ((finish ()
+            ((finish (&optional why)
                (when (and (not fired) ctx-done map-done (not cancelled))
                  (setq fired t)
                  (when (timerp wd) (ignore-errors (cancel-timer wd)) (setq wd nil))
                  (setq carriage-mode--send-prepare-token nil)
+                 (carriage-log "send-prepare: ready buf=%s elapsed=%.3fs why=%s"
+                               (buffer-name buf)
+                               (max 0.0 (- (float-time) started-at))
+                               (or why "ok"))
                  (when (functionp on-ready)
                    (run-at-time 0 nil (lambda () (funcall on-ready))))))
              (cancel ()
                (setq cancelled t)
                (setf (plist-get token :cancelled) t)
+               (carriage-log "send-prepare: cancelled buf=%s elapsed=%.3fs"
+                             (buffer-name buf)
+                             (max 0.0 (- (float-time) started-at)))
                (when (timerp wd) (ignore-errors (cancel-timer wd)) (setq wd nil))
                (when (listp ctx-token)
                  (let ((cf (plist-get ctx-token :cancel-fn)))
@@ -4234,24 +4449,40 @@ Token plist:
           ;; Watchdog: never wait forever; proceed to original send.
           (let ((tmo (or carriage-mode-send-prepare-timeout-seconds 3.0)))
             (when (and (numberp tmo) (> tmo 0))
-              (setq wd (run-at-time tmo nil
-                                    (lambda ()
-                                      (setq ctx-done t map-done t)
-                                      (finish))))))
+              (setq wd
+                    (run-at-time
+                     tmo nil
+                     (lambda ()
+                       (carriage-log "send-prepare: TIMEOUT buf=%s elapsed=%.3fs (forcing send)"
+                                     (buffer-name buf)
+                                     (max 0.0 (- (float-time) started-at)))
+                       (setq ctx-done t map-done t)
+                       (finish 'timeout))))))
 
           ;; Warm Project Map cache if enabled.
           (when (and (boundp 'carriage-mode-include-project-map)
                      carriage-mode-include-project-map
                      (require 'carriage-context nil t)
                      (fboundp 'carriage-context-project-map-build-async))
+            (carriage-log "send-prepare: start project-map warm root=%s" root)
             (setq map-done nil)
             (let ((carriage-context--project-map-allow-compute t))
               (setq map-token
                     (ignore-errors
                       (carriage-context-project-map-build-async
                        root
-                       (lambda (&rest _r) (setq map-done t) (finish))
-                       (lambda (&rest _e) (setq map-done t) (finish))))))
+                       (lambda (&rest _r)
+                         (carriage-log "send-prepare: project-map warm done buf=%s elapsed=%.3fs"
+                                       (buffer-name buf)
+                                       (max 0.0 (- (float-time) started-at)))
+                         (setq map-done t)
+                         (finish 'project-map))
+                       (lambda (&rest _e)
+                         (carriage-log "send-prepare: project-map warm error buf=%s elapsed=%.3fs"
+                                       (buffer-name buf)
+                                       (max 0.0 (- (float-time) started-at)))
+                         (setq map-done t)
+                         (finish 'project-map-error))))))
             (setf (plist-get token :map) map-token))
 
           ;; Warm context file cache (doc/visible/gptel/patched) using the async collector.
@@ -4259,16 +4490,25 @@ Token plist:
             (let ((carriage-context-collect-async-timeout-seconds
                    (min (or carriage-mode-send-prepare-timeout-seconds 3.0)
                         (or carriage-context-collect-async-timeout-seconds 12.0))))
+              (carriage-log "send-prepare: start context warm root=%s (timeout=%.3fs)"
+                            root
+                            (float carriage-context-collect-async-timeout-seconds))
               (setq ctx-token
                     (ignore-errors
                       (carriage-context-collect-async
-                       (lambda (_ctx) (setq ctx-done t) (finish))
+                       (lambda (_ctx)
+                         (carriage-log "send-prepare: context warm done buf=%s elapsed=%.3fs"
+                                       (buffer-name buf)
+                                       (max 0.0 (- (float-time) started-at)))
+                         (setq ctx-done t)
+                         (finish 'context))
                        buf root)))))
           (setf (plist-get token :ctx) ctx-token)
           ;; If async collector couldn't start, don't block Send.
           (when (null ctx-token)
+            (carriage-log "send-prepare: context warm not started; proceeding immediately")
             (setq ctx-done t)
-            (finish))
+            (finish 'no-collector))
           token)))))
 
 (defun carriage-mode--send-prepare-async-around (orig &rest args)
@@ -4389,6 +4629,177 @@ This variable is intended to be buffer-local and persisted via doc-state."
   (force-mode-line-update t)
   (message "Соблюдать структуру: %s"
            (if carriage-mode-org-structure-hint "ON" "OFF")))
+
+;; -----------------------------------------------------------------------------
+;; Compatibility wrappers for legacy send commands
+;;
+;; Some older configs/key bindings may still call unprefixed `send-buffer' /
+;; `send-subtree' (or deprecated `carriage-send' / `carriage-send-region').
+;; These belonged to an older send pipeline.  Redirect them to the supported
+;; entry points to avoid hard failures like:
+;;   "Legacy send pipeline removed; use carriage-send-buffer / carriage-send-subtree"
+;;
+;; Important safety rule:
+;; - Do NOT clobber unrelated package commands.  We only alias unprefixed symbols
+;;   when they appear to be defined by Carriage itself (symbol-file contains
+;;   "carriage").
+
+(defun carriage--legacy-send-command-p (sym)
+  "Return non-nil when SYM looks like a legacy Carriage send command.
+
+We try hard not to clobber unrelated package commands:
+- Prefer checking `symbol-file' for \"carriage\".
+- Fallback: detect Carriage legacy stubs by docstring markers (works when
+  `symbol-file' is nil for autoloads/native-compiled code).
+
+Best-effort: never signals."
+  (condition-case _e
+      (let* ((sf (ignore-errors (symbol-file sym 'defun)))
+             (doc (ignore-errors (documentation sym t))))
+        (or (and (stringp sf) (string-match-p "carriage" sf))
+            (and (stringp doc)
+                 (or (string-match-p "Legacy send pipeline removed" doc)
+                     (string-match-p "use carriage-send-buffer" doc)
+                     (string-match-p "use carriage-send-subtree" doc)
+                     (string-match-p "\\bcarriage-send-buffer\\b" doc)
+                     (string-match-p "\\bcarriage-send-subtree\\b" doc)))))
+    (error nil)))
+
+(defun carriage--maybe-alias-legacy-send-command (sym target)
+  "If SYM is a legacy Carriage send command, alias it to TARGET.
+Return t when aliased, nil otherwise.  Best-effort: never signals."
+  (condition-case _e
+      (when (and (symbolp sym)
+                 (symbolp target)
+                 (fboundp sym)
+                 (fboundp target)
+                 (carriage--legacy-send-command-p sym))
+        (defalias sym target)
+        t)
+    (error nil)))
+
+;;;###autoload
+(defun carriage-send ()
+  "Compatibility DWIM wrapper for older configs.
+
+Prefer calling `carriage-send-buffer' or `carriage-send-subtree' directly."
+  (interactive)
+  (cond
+   ((and (derived-mode-p 'org-mode)
+         (require 'org nil t)
+         (save-excursion
+           (ignore-errors (org-back-to-heading t))
+           (looking-at-p "^[ \t]*\\*+\\s-+")))
+    (call-interactively #'carriage-send-subtree))
+   (t
+    (call-interactively #'carriage-send-buffer))))
+
+;;;###autoload
+(defun carriage-send-region ()
+  "Compatibility wrapper for legacy configs.
+
+Carriage v1 does not have a region-only send pipeline; fall back to sending
+the whole buffer."
+  (interactive)
+  (call-interactively #'carriage-send-buffer))
+
+;; If legacy unprefixed commands are present and come from Carriage, redirect them.
+(carriage--maybe-alias-legacy-send-command 'send-buffer 'carriage-send-buffer)
+(carriage--maybe-alias-legacy-send-command 'send-subtree 'carriage-send-subtree)
+
+;; Some setups load old Carriage stubs lazily/late (autoload/native-compiled),
+;; so the first alias attempt above may run before `send-buffer' becomes fboundp.
+;; Keep a lightweight after-load hook to re-apply aliases when new code is loaded.
+(defvar carriage--legacy-send-alias-hook-installed nil
+  "Non-nil when legacy send alias after-load hook has been installed.")
+
+(defun carriage--legacy-send-alias-ensure (&optional _file)
+  "Ensure legacy unprefixed send commands are aliased to supported Carriage entry points.
+Best-effort; never signals."
+  (ignore-errors
+    (carriage--maybe-alias-legacy-send-command 'send-buffer 'carriage-send-buffer)
+    (carriage--maybe-alias-legacy-send-command 'send-subtree 'carriage-send-subtree)
+    (carriage--legacy-send-redirect-ensure))
+  t)
+
+(unless carriage--legacy-send-alias-hook-installed
+  (setq carriage--legacy-send-alias-hook-installed t)
+  (add-hook 'after-load-functions #'carriage--legacy-send-alias-ensure))
+
+;; -------------------------------------------------------------------
+;; Legacy unprefixed send commands: runtime redirect (local, non-clobbering)
+;;
+;; Problem addressed:
+;; Some older configs (or stale autoloads) still call `send-buffer' / `send-subtree'
+;; symbols that may be provided by a removed legacy Carriage pipeline and error with:
+;;   "Legacy send pipeline removed; use carriage-send-buffer / carriage-send-subtree"
+;;
+;; Our previous approach tried to defalias these symbols, but that can fail when:
+;; - symbols are defined after Carriage loads (autoload/native-compiled),
+;; - symbol-file/docstring heuristics are insufficient.
+;;
+;; This redirect is safer:
+;; - It does NOT clobber global semantics: it triggers only when `carriage-mode'
+;;   is active in the current buffer and we're in org-mode.
+;; - Otherwise it delegates to the original `send-buffer' / `send-subtree'.
+
+(defcustom carriage-legacy-send-redirect-enabled t
+  "When non-nil, redirect legacy unprefixed `send-buffer' / `send-subtree'
+calls to `carriage-send-buffer' / `carriage-send-subtree' in `carriage-mode' Org buffers.
+
+This prevents hard failures from stale legacy Carriage send commands in old configs,
+while avoiding global clobbering of unrelated packages that may define similar symbols."
+  :type 'boolean
+  :group 'carriage)
+
+(defvar carriage--legacy-send-redirect-advice-installed nil
+  "Non-nil when legacy unprefixed send redirect advices were installed.")
+
+(defun carriage--legacy-send--redirect (target orig-fn args)
+  "Redirect helper used by legacy send advices.
+TARGET is a symbol like `carriage-send-buffer'. ORIG-FN is the original function.
+ARGS is the original call argument list."
+  (if (and (boundp 'carriage-legacy-send-redirect-enabled)
+           carriage-legacy-send-redirect-enabled
+           (bound-and-true-p carriage-mode)
+           (derived-mode-p 'org-mode)
+           (symbolp target)
+           (fboundp target))
+      ;; Preserve prefix arg semantics.
+      (let ((current-prefix-arg current-prefix-arg))
+        (call-interactively target))
+    (apply orig-fn args)))
+
+(defun carriage--legacy-send-redirect--around-send-buffer (orig-fn &rest args)
+  "Around-advice redirecting `send-buffer' to `carriage-send-buffer' in carriage-mode Org buffers."
+  (carriage--legacy-send--redirect 'carriage-send-buffer orig-fn args))
+
+(defun carriage--legacy-send-redirect--around-send-subtree (orig-fn &rest args)
+  "Around-advice redirecting `send-subtree' to `carriage-send-subtree' in carriage-mode Org buffers."
+  (carriage--legacy-send--redirect 'carriage-send-subtree orig-fn args))
+
+(defun carriage--legacy-send-redirect-ensure (&optional _file)
+  "Ensure legacy unprefixed send redirect advices are installed (idempotent).
+
+Important:
+This function MUST be safe to call before `send-buffer' / `send-subtree'
+are defined (autoloads loaded later). Therefore it must not \"lock in\"
+a global installed flag too early; it should attempt installation
+whenever the target function becomes available."
+  (when (fboundp 'send-buffer)
+    (unless (advice-member-p #'carriage--legacy-send-redirect--around-send-buffer 'send-buffer)
+      (ignore-errors
+        (advice-add 'send-buffer :around #'carriage--legacy-send-redirect--around-send-buffer)))
+    (setq carriage--legacy-send-redirect-advice-installed t))
+  (when (fboundp 'send-subtree)
+    (unless (advice-member-p #'carriage--legacy-send-redirect--around-send-subtree 'send-subtree)
+      (ignore-errors
+        (advice-add 'send-subtree :around #'carriage--legacy-send-redirect--around-send-subtree)))
+    (setq carriage--legacy-send-redirect-advice-installed t))
+  t)
+
+;; Install now and also on future loads (when legacy symbols may appear late).
+(ignore-errors (carriage--legacy-send-redirect-ensure))
 
 (provide 'carriage-mode)
 ;;; carriage-mode.el ends here

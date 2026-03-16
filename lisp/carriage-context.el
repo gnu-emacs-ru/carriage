@@ -1396,6 +1396,26 @@ This preserves history for the LLM while avoiding begin_patch markers that can b
             (goto-char (min (point-max) (1+ (line-end-position))))))))
     (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun carriage-context--doc-context-policy-hint ()
+  "Return LLM-facing instruction about doc-context semantics, or nil.
+
+This hint is included only when doc-context is enabled for the current buffer.
+When scope is 'last, include an extra note that ONLY the last begin_context block
+is used for the next iteration and it must contain the full list of needed paths."
+  (when (or (not (boundp 'carriage-mode-include-doc-context))
+            carriage-mode-include-doc-context)
+    (let* ((base-lines
+            '("Контекст файлов берётся из блоков `#+begin_context … #+end_context` в документе."
+              "Если на СЛЕДУЮЩЕЙ итерации понадобятся дополнительные файлы, добавь/обнови `#+begin_context` УЖЕ В ЭТОМ ответе, указав пути (одна строка — один путь)."))
+           (last-lines
+            (when (and (boundp 'carriage-doc-context-scope)
+                       (eq carriage-doc-context-scope 'last))
+              '("Включён режим “Только последний блок”: в следующем запросе будет виден ТОЛЬКО последний `#+begin_context`, все предыдущие блоки игнорируются."
+                "Поэтому последний блок должен содержать ПОЛНЫЙ список всех нужных путей (не только новые добавления).")))
+           (lines (append base-lines last-lines)))
+      (when lines
+        (mapconcat (lambda (s) (concat ";; " s)) lines "\n")))))
+
 (defun carriage-context-format (ctx &key where)
   "Format CTX (plist from carriage-context-collect) into a string for insertion.
 WHERE is 'system or 'user (affects only label string)."
@@ -1408,6 +1428,7 @@ WHERE is 'system or 'user (affects only label string)."
                       (or (plist-get stats :included) 0)
                       (or (plist-get stats :skipped) 0)
                       (or (plist-get stats :total-bytes) 0)))
+         (doc-hint (ignore-errors (carriage-context--doc-context-policy-hint)))
          (warn-str (mapconcat (lambda (w) (concat ";; " w)) warnings "\n"))
          (sections
           (mapcar
@@ -1425,7 +1446,8 @@ WHERE is 'system or 'user (affects only label string)."
                          rel
                          (if reason (format " (%s)" reason) "")))))
            files)))
-    (string-join (delq nil (list hdr (and warnings warn-str)
+    (string-join (delq nil (list hdr doc-hint
+                                 (and warnings warn-str)
                                  (mapconcat #'identity sections "\n")))
                  "\n")))
 

@@ -440,8 +440,12 @@ When BUFFER is non-nil, operate in that buffer."
       (when (functionp abort-fn)
         (carriage-register-abort-handler abort-fn))
       (let ((rid (carriage-transport--begin-new-request abort-fn)))
-        (carriage-log "Transport: begin rid=%s (abort=%s)"
-                      rid (if (functionp abort-fn) "installed" "none")))
+        (carriage-log "Transport: begin rid=%s entry=%s (abort=%s)"
+                      rid
+                      (if (boundp 'carriage--current-send-entry-id)
+                          (or carriage--current-send-entry-id "-")
+                        "-")
+                      (if (functionp abort-fn) "installed" "none")))
       ;; GC guard: raise threshold during request to reduce pauses.
       (unless carriage--gc-guard-active
         (setq carriage--gc-guard-prev-threshold gc-cons-threshold)
@@ -501,103 +505,114 @@ If ERRORP non-nil, set state to 'error; otherwise flash 'done then return to 'id
 When BUFFER is non-nil, operate in that buffer (default is current buffer)."
   (let ((buf (or buffer (current-buffer))))
     (with-current-buffer buf
-      (let ((rid0 (and (boundp 'carriage-transport--request-id)
-                       carriage-transport--request-id))
-            (st0 (and (boundp 'carriage--ui-state) carriage--ui-state))
-            (wf0 (and (boundp 'carriage-transport--watchdog-fired)
-                      carriage-transport--watchdog-fired)))
-        ;; Always maintain lightweight completion bookkeeping to catch races:
-        ;; watchdog finalize vs adapter finalize (ok→error for same rid, etc).
-        (let* ((now (float-time))
-               (prev carriage-transport--last-complete)
-               (prev-ts (and (listp prev) (plist-get prev :ts)))
-               (prev-rid (and (listp prev) (plist-get prev :rid)))
-               (prev-err (and (listp prev) (plist-get prev :errorp)))
-               (dt (and (numberp prev-ts) (- now prev-ts))))
-          (setq carriage-transport--complete-count (1+ (or carriage-transport--complete-count 0)))
-          (setq carriage-transport--last-complete (list :ts now :rid rid0 :errorp (and errorp t)))
+      (cl-block carriage-transport-complete
+        (let ((rid0 (and (boundp 'carriage-transport--request-id)
+                         carriage-transport--request-id))
+              (st0 (and (boundp 'carriage--ui-state) carriage--ui-state))
+              (wf0 (and (boundp 'carriage-transport--watchdog-fired)
+                        carriage-transport--watchdog-fired)))
+          ;; Always maintain lightweight completion bookkeeping to catch races:
+          ;; watchdog finalize vs adapter finalize (ok→error for same rid, etc).
+          (let* ((now (float-time))
+                 (prev carriage-transport--last-complete)
+                 (prev-ts (and (listp prev) (plist-get prev :ts)))
+                 (prev-rid (and (listp prev) (plist-get prev :rid)))
+                 (prev-err (and (listp prev) (plist-get prev :errorp)))
+                 (dt (and (numberp prev-ts) (- now prev-ts))))
+            (setq carriage-transport--complete-count (1+ (or carriage-transport--complete-count 0)))
+            (setq carriage-transport--last-complete (list :ts now :rid rid0 :errorp (and errorp t)))
 
-          ;; Case 1: complete called after rid already cleared (typical for late finalize
-          ;; from a previous request). Log it, but do not mutate current UI/state.
-          (when (null rid0)
-            (carriage-log "Transport: complete(NO-RID) errorp=%s prev-rid=%s prev-errorp=%s dt=%.3fs state=%s wfired=%s buf=%s"
-                          (if errorp "t" "nil")
-                          (or prev-rid "-")
-                          (if prev-err "t" "nil")
-                          (if (numberp dt) (max 0.0 dt) 0.0)
-                          (or st0 "-")
-                          (if wf0 "t" "nil")
-                          (buffer-name buf))
-            (when-let* ((bt (carriage-transport--short-backtrace 10)))
-              (carriage-log "Transport: complete(NO-RID) backtrace\n%s" bt))
-            ;; Late completion from an already-finished or aborted request: diagnostics only.
-            ;; Must not touch current UI/request flags.
-            (carriage-transport--watchdog-stop buf)
-            (cl-return-from carriage-transport-complete t))
+            ;; Case 1: complete called after rid already cleared (typical for late finalize
+            ;; from a previous request). Log it, but do not mutate current UI/state.
+            (when (null rid0)
+              (carriage-log "Transport: complete(NO-RID) errorp=%s prev-rid=%s prev-errorp=%s dt=%.3fs state=%s wfired=%s buf=%s"
+                            (if errorp "t" "nil")
+                            (or prev-rid "-")
+                            (if prev-err "t" "nil")
+                            (if (numberp dt) (max 0.0 dt) 0.0)
+                            (or st0 "-")
+                            (if wf0 "t" "nil")
+                            (buffer-name buf))
+              (when-let* ((bt (carriage-transport--short-backtrace 10)))
+                (carriage-log "Transport: complete(NO-RID) backtrace\n%s" bt))
+              ;; Late completion from an already-finished or aborted request: diagnostics only.
+              ;; Must not touch current UI/request flags.
+              (carriage-transport--watchdog-stop buf)
+              (cl-return-from carriage-transport-complete t))
 
-          ;; Case 2: duplicate complete for the same rid (ok→error or error→ok).
-          ;; The first finalize wins; later calls are diagnostics-only.
-          (when (and (stringp rid0) (stringp prev-rid) (string= rid0 prev-rid))
-            (carriage-log "Transport: DUP complete rid=%s prev-errorp=%s new-errorp=%s dt=%.3fs state=%s wfired=%s buf=%s"
-                          rid0
-                          (if prev-err "t" "nil")
-                          (if errorp "t" "nil")
-                          (if (numberp dt) (max 0.0 dt) 0.0)
-                          (or st0 "-")
-                          (if wf0 "t" "nil")
-                          (buffer-name buf))
-            (when-let* ((bt (carriage-transport--short-backtrace 10)))
-              (carriage-log "Transport: complete(DUP) backtrace\n%s" bt))
-            ;; Duplicate completion for the active rid must not re-run cleanup/state flip.
-            (carriage-transport--watchdog-stop buf)
-            (cl-return-from carriage-transport-complete t))))
+            ;; Case 2: duplicate complete for the same rid (ok→error or error→ok).
+            ;; The first finalize wins; later calls are diagnostics-only.
+            (when (and (stringp rid0) (stringp prev-rid) (string= rid0 prev-rid))
+              (carriage-log "Transport: DUP complete rid=%s prev-errorp=%s new-errorp=%s dt=%.3fs state=%s wfired=%s buf=%s"
+                            rid0
+                            (if prev-err "t" "nil")
+                            (if errorp "t" "nil")
+                            (if (numberp dt) (max 0.0 dt) 0.0)
+                            (or st0 "-")
+                            (if wf0 "t" "nil")
+                            (buffer-name buf))
+              (when-let* ((bt (carriage-transport--short-backtrace 10)))
+                (carriage-log "Transport: complete(DUP) backtrace\n%s" bt))
+              ;; Duplicate completion for the active rid must not re-run cleanup/state flip.
+              (carriage-transport--watchdog-stop buf)
+              (cl-return-from carriage-transport-complete t)))
 
-      ;; Keep existing verbose watchdog debug logs as-is.
-      (when (and carriage-transport-watchdog-debug (null rid0))
-        (carriage-log "Transport: complete called with no active rid (errorp=%s state=%s watchdog-fired=%s buf=%s)"
-                      (if errorp "t" "nil") (or st0 "-") (if wf0 "t" "nil") (buffer-name buf)))
-      (when carriage-transport-watchdog-debug
-        (when-let* ((bt (carriage-transport--short-backtrace 14)))
-          (carriage-log "Transport: complete backtrace rid=%s errorp=%s state=%s watchdog-fired=%s\n%s"
-                        (or rid0 "-") (if errorp "t" "nil") (or st0 "-") (if wf0 "t" "nil") bt))))
-    ;; Stop watchdog first to prevent late re-fire during finalization.
-    (carriage-transport--watchdog-stop buf)
-    (carriage-transport-note-progress 'complete buf)
-    (let* ((rid (or (carriage-transport-current-request-id buf) "-"))
-           (lp (or carriage-transport--last-progress-at (float-time)))
-           (idle (- (float-time) lp)))
-      (carriage-clear-abort-handler)
-      ;; Ensure preloader is stopped on finalize.
-      (when (fboundp 'carriage--preloader-stop)
-        (ignore-errors (carriage--preloader-stop)))
-      ;; Last-resort: when GPTel request ends in error, force an emergency cleanup of gptel/curl
-      ;; to avoid \"stuck until Emacs restart\" due to lingering gptel-curl processes.
-      (when errorp
-        (ignore-errors
-          (when (require 'carriage-transport-gptel nil t)
-            (when (fboundp 'carriage-transport-gptel-emergency-cleanup)
-              (carriage-transport-gptel-emergency-cleanup t "transport-complete/error")))))
-      ;; Restore GC threshold and schedule a light GC after completion.
-      (when carriage--gc-guard-active
-        (setq gc-cons-threshold (or carriage--gc-guard-prev-threshold gc-cons-threshold))
-        (setq carriage--gc-guard-prev-threshold nil)
-        (setq carriage--gc-guard-active nil)
-        (run-at-time 0.2 nil (lambda () (ignore-errors (garbage-collect)))))
-      (if errorp
-          (carriage-ui-set-state 'error)
-        (carriage-ui-set-state 'idle))
-      (carriage-log "Transport: complete rid=%s (status=%s idle=%.3fs)"
-                    rid (if errorp "error" "ok") (max 0.0 idle))
-      ;; Clear request bookkeeping (so stale rid can't be reused).
-      (setq carriage-transport--request-id nil)
-      (setq carriage-transport--watchdog-abort-fn nil)
-      (setq carriage-transport--watchdog-abort-rid nil)
-      ;; Allow the next send only after the current request is fully finalized.
-      (when (boundp 'carriage--send-in-flight)
-        (setq carriage--send-in-flight nil))
-      (when (boundp 'carriage--send-dispatch-scheduled)
-        (setq carriage--send-dispatch-scheduled nil))
-      t)))
+          ;; Keep existing verbose watchdog debug logs as-is.
+          (when (and carriage-transport-watchdog-debug (null rid0))
+            (carriage-log "Transport: complete called with no active rid (errorp=%s state=%s watchdog-fired=%s buf=%s)"
+                          (if errorp "t" "nil") (or st0 "-") (if wf0 "t" "nil") (buffer-name buf)))
+          (when carriage-transport-watchdog-debug
+            (when-let* ((bt (carriage-transport--short-backtrace 14)))
+              (carriage-log "Transport: complete backtrace rid=%s errorp=%s state=%s watchdog-fired=%s\n%s"
+                            (or rid0 "-") (if errorp "t" "nil") (or st0 "-") (if wf0 "t" "nil") bt))))
+
+        ;; Stop watchdog first to prevent late re-fire during finalization.
+        (carriage-transport--watchdog-stop buf)
+        (carriage-transport-note-progress 'complete buf)
+        (let* ((rid (or (carriage-transport-current-request-id buf) "-"))
+               (lp (or carriage-transport--last-progress-at (float-time)))
+               (idle (- (float-time) lp)))
+          (carriage-clear-abort-handler)
+          ;; Ensure preloader is stopped on finalize.
+          (when (fboundp 'carriage--preloader-stop)
+            (ignore-errors (carriage--preloader-stop)))
+          ;; Last-resort: when GPTel request ends in error, force an emergency cleanup of gptel/curl
+          ;; to avoid \"stuck until Emacs restart\" due to lingering gptel-curl processes.
+          (when errorp
+            (ignore-errors
+              (when (require 'carriage-transport-gptel nil t)
+                (when (fboundp 'carriage-transport-gptel-emergency-cleanup)
+                  (carriage-transport-gptel-emergency-cleanup t "transport-complete/error")))))
+          ;; Restore GC threshold and schedule a light GC after completion.
+          (when carriage--gc-guard-active
+            (setq gc-cons-threshold (or carriage--gc-guard-prev-threshold gc-cons-threshold))
+            (setq carriage--gc-guard-prev-threshold nil)
+            (setq carriage--gc-guard-active nil)
+            (run-at-time 0.2 nil (lambda () (ignore-errors (garbage-collect)))))
+          (if errorp
+              (carriage-ui-set-state 'error)
+            (carriage-ui-set-state 'idle))
+          (carriage-log "Transport: complete rid=%s entry=%s (status=%s idle=%.3fs)"
+                        rid
+                        (if (boundp 'carriage--current-send-entry-id)
+                            (or carriage--current-send-entry-id "-")
+                          "-")
+                        (if errorp "error" "ok")
+                        (max 0.0 idle))
+          ;; Clear request bookkeeping (so stale rid can't be reused).
+          (setq carriage-transport--request-id nil)
+          (setq carriage-transport--watchdog-abort-fn nil)
+          (setq carriage-transport--watchdog-abort-rid nil)
+          ;; Allow the next send only after the current request is fully finalized.
+          (when (boundp 'carriage--send-in-flight)
+            (setq carriage--send-in-flight nil))
+          (when (boundp 'carriage--send-dispatch-scheduled)
+            (setq carriage--send-dispatch-scheduled nil))
+          (when (boundp 'carriage--active-send-generation)
+            (setq carriage--active-send-generation nil))
+          (when (boundp 'carriage--apply-entry-id)
+            (setq carriage--apply-entry-id nil))
+          t)))))
 
 ;;;###autoload
 (defun carriage-transport-dispatch (&rest args)

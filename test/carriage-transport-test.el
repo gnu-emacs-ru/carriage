@@ -59,22 +59,26 @@
           (with-current-buffer origin
             (org-mode)
             (carriage-mode 1)
-            (setq-local carriage--ui-state 'sending))
+            (setq-local carriage--ui-state 'sending)
+            (setq-local carriage-transport--request-id "rid-test-origin"))
           (with-current-buffer other
             (org-mode)
             (carriage-mode 1)
             (setq-local carriage--ui-state 'sending)
-            ;; New anti-duplicate guard treats complete(NO-RID) as diagnostics-only no-op.
-            ;; Seed an active request id so explicit BUFFER completion still exercises
-            ;; the real finalize path for OTHER.
+            (setq-local carriage--active-send-generation 7)
+            (setq-local carriage--apply-entry-id "carriage-send-buffer-7")
             (setq-local carriage-transport--request-id "rid-test-other"))
           ;; Complete OTHER while current buffer is ORIGIN.
           (with-current-buffer origin
             (carriage-transport-complete t other))
           (should (eq (with-current-buffer origin carriage--ui-state) 'sending))
+          (should (equal (with-current-buffer origin carriage-transport--request-id)
+                         "rid-test-origin"))
           (with-current-buffer other
             (should (eq carriage--ui-state 'error))
-            (should (null carriage-transport--request-id)))))
+            (should (null carriage-transport--request-id))
+            (should (null carriage--active-send-generation))
+            (should (null carriage--apply-entry-id)))))
     (when (buffer-live-p origin) (kill-buffer origin))
     (when (buffer-live-p other)  (kill-buffer other))))
 

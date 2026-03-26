@@ -36,6 +36,7 @@
 (require 'carriage-git)
 (require 'carriage-format-registry)
 (require 'carriage-apply-engine)
+(require 'carriage-parser)
 ;; Load default Git apply engine so it registers itself in the engine registry.
 (require 'carriage-engine-git)
 
@@ -199,6 +200,106 @@ Side-effect-only; never alters REPORT (REQ-apply-010)."
                  (carriage--op-rank (carriage--plan-get b :op))))
             plan))
 
+(defun carriage--plan-target-path (item)
+  "Return primary target path for ITEM."
+  (or (carriage--plan-get item :path)
+      (carriage--plan-get item :file)
+      (carriage--plan-get item :to)
+      (carriage--plan-get item :from)))
+
+(defun carriage--state-manifest-trusted-fallback (plan repo-root)
+  "Synthesize trusted request-state from filesystem for internal flows.
+PLAN is the apply plan; REPO-ROOT is the repository root directory.
+Return alist of (PATH . PLIST) where PLIST has :exists and :has_text keys.
+
+This fallback is used ONLY when no explicit begin_state_manifest is present.
+It assumes internal/test flows are trusted and can read filesystem state.
+LLM-originated requests with explicit manifest remain strict fail-closed."
+  (let ((state '()))
+    (dolist (item plan)
+      (let* ((path (or (carriage--plan-get item :path)
+                       (carriage--plan-get item :file)))
+             (op (carriage--plan-get item :op)))
+        (when (and path (stringp path))
+          (let* ((abs (expand-file-name path repo-root))
+                 (exists (file-exists-p abs))
+                 (has-text (and exists (not (file-directory-p abs))
+                                (condition-case nil
+                                    (with-temp-buffer
+                                      (insert-file-contents abs)
+                                      t)
+                                  (error nil)))))
+            (push (cons path (list :exists exists :has-text has-text)) state)))))
+    (nreverse state)))
+
+(defun carriage--state-sensitive-op-p (op)
+  "Return non-nil when OP depends on current file state."
+  (memq op '(patch aibo sre delete rename)))
+
+(defun carriage--text-required-op-p (op)
+  "Return non-nil when OP requires current file text in request context."
+  (memq op '(patch aibo sre)))
+
+(defun carriage--request-state-from-filesystem (repo-root path op)
+  "Synthesize trusted request-state for PATH under REPO-ROOT for internal flows.
+Used only when no explicit request state is available from the current request buffer."
+  (when (stringp path)
+    (let* ((abs (ignore-errors (carriage-normalize-path repo-root path)))
+           (exists (and abs (file-exists-p abs)))
+           (has-text (and exists
+                          (carriage--text-required-op-p op)
+                          (file-regular-p abs)
+                          (file-readable-p abs))))
+      (list :exists (and exists t)
+            :has-text (and has-text t)
+            :source 'filesystem))))
+
+(defun carriage--request-state-for-item (item repo-root)
+  "Return request-state plist for ITEM under REPO-ROOT.
+Prefer explicit current-buffer state manifest; fall back to trusted filesystem
+snapshot only when no explicit manifest block is present in the current buffer."
+  (let* ((op (carriage--plan-get item :op))
+         (path (carriage--plan-target-path item))
+         (manifest-table (and (fboundp 'carriage--state-manifest-read-current-buffer)
+                              (carriage--state-manifest-read-current-buffer)))
+         (manifest-present (hash-table-p manifest-table))
+         (state (and (stringp path) (carriage--state-manifest-get path))))
+    (cond
+     ((plist-member state :exists)
+      (plist-put (copy-sequence state) :source 'manifest))
+     ((and (not manifest-present) (stringp path) repo-root)
+      (carriage--request-state-from-filesystem repo-root path op))
+     (t nil))))
+
+(defun carriage--gatekeeper-check-item (item repo-root)
+  "Return nil when ITEM passes request-state checks, else a fail row plist."
+  (let* ((op (carriage--plan-get item :op))
+         (path (carriage--plan-target-path item))
+         (state (carriage--request-state-for-item item repo-root))
+         (source (plist-get state :source))
+         (exists (plist-get state :exists))
+         (has-text (plist-get state :has-text)))
+    (cond
+     ((and (eq op 'create) state exists)
+      (carriage--report-fail op :file path
+                             :details (if (eq source 'manifest)
+                                          "Create forbidden: path already exists in current state manifest"
+                                        "Create forbidden: path already exists in current project state")))
+     ((and (carriage--state-sensitive-op-p op) (null state))
+      (carriage--report-fail op :file (or path "-")
+                             :details "State-sensitive op rejected: path missing from current request state"))
+     ((and (carriage--state-sensitive-op-p op) (not exists))
+      (carriage--report-fail op :file (or path "-")
+                             :details (if (eq source 'manifest)
+                                          "State-sensitive op rejected: file does not exist in current state manifest"
+                                        "State-sensitive op rejected: file does not exist in current project state")))
+     ((and (carriage--text-required-op-p op) (not has-text))
+      (carriage--report-fail op :file (or path "-")
+                             :details (if (eq source 'manifest)
+                                          "Edit rejected: file text is not present in current request context"
+                                        "Edit rejected: file text is not available from current project state")))
+     (t nil))))
+
 (defun carriage--dry-run-dispatch (item repo-root)
   "Dispatch dry-run for a single ITEM with REPO-ROOT.
 For :op 'patch → use apply engine (:dry-run) with a short sync wait loop to gather pid/elapsed;
@@ -350,7 +451,8 @@ Return report alist:
          (virt '())  ; virtual created files: (\"path\" . content)
          (msgs '()))
     (dolist (it sorted)
-      (let* ((res0 (carriage--dry-run-item-result it repo-root virt))
+      (let* ((gate (carriage--gatekeeper-check-item it repo-root))
+             (res0 (or gate (carriage--dry-run-item-result it repo-root virt)))
              ;; Stash original plan item and repo root into report item for UI actions (e.g., Ediff).
              (res (append res0 (list :_plan it :_root repo-root)))
              (status (plist-get res :status)))
@@ -387,7 +489,8 @@ Stops on first failure. Returns report alist as in carriage-dry-run-plan."
          (msgs '()))
     (dolist (it sorted)
       (unless stop
-        (let* ((res0 (carriage--apply-dispatch it repo-root))
+        (let* ((gate (carriage--gatekeeper-check-item it repo-root))
+               (res0 (or gate (carriage--apply-dispatch it repo-root)))
                ;; Store original plan item and root on the row (parity with dry-run report)
                (res (append res0 (list :_plan it :_root repo-root)))
                (status (plist-get res :status))

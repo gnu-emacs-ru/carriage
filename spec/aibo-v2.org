@@ -49,6 +49,10 @@ Normative Requirements
 - REQ-aibo-002: :match key is forbidden; only literal matching is allowed.
 - REQ-aibo-003: :occur ∈ {first, all}; 'all requires :expect ≥ 0.
 - REQ-aibo-004: NOOP policy same as SRE; 'skip on no changes with counters.
+- REQ-aibo-005: AIBO edits MUST be generated only for files whose current full text is present in the current request context; if the text is unavailable, the safe fallback is to request context rather than emit an AIBO block.
+- REQ-aibo-006: Literal replacements MUST be expressed only via `#+begin_from` / `#+end_from` and `#+begin_to` / `#+end_to` body segments; header keys such as `:from` and `:to` are forbidden.
+- REQ-aibo-005: AIBO edits MUST be generated only for files whose current full text is present in the current request context; if the text is unavailable, the safe fallback is to request context rather than emit an AIBO block.
+- REQ-aibo-006: Literal replacements MUST be expressed only via `#+begin_from` / `#+end_from` and `#+begin_to` / `#+end_to` body segments; header keys such as `:from` and `:to` are forbidden.
 
 Invariants
 - Anchor: INV
@@ -115,7 +119,7 @@ Prompt Guidance (LLM Output Contract)
 - Pack-Priority: P0
 - PRM-aibo-001: Answer ONLY with an aibo block identical to SRE layout; never output udiff.
 - Do NOT generate patches that don't change the content (no-op patches). If no changes are needed, do not output any patch block.
-- Forbidden-Phrases: "--- a/", "+++ b/", "diff --git"; any :match key.
+- Forbidden-Phrases: "--- a/", "+++ b/", "diff --git"; any :match key; any `:from` or `:to` header key in an AIBO block.
 - Positive Example: two pairs, :occur all with :expect 2, literal-only replacements, no :match key.
 - Negative Example: presence of :match regex; or :occur all without :expect; no-op patch (TO identical to FROM).
 

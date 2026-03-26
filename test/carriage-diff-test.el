@@ -133,4 +133,54 @@
        (carriage-parse-diff hdr body default-directory)
        :type sym))))
 
+(ert-deftest carriage-diff-dry-run-explicit-manifest-without-text-fails-closed ()
+  "Explicit request-state manifest with has_text=false must reject patch dry-run."
+  (let* ((dir (make-temp-file "carriage-diff-" t)))
+    (should (zerop (carriage-diff-test--git dir "init")))
+    (should (zerop (carriage-diff-test--git dir "config" "user.email" "tester@example.com")))
+    (should (zerop (carriage-diff-test--git dir "config" "user.name" "Tester")))
+    (carriage-diff-test--write dir "a.txt" "old\n")
+    (should (zerop (carriage-diff-test--git dir "add" "--" "a.txt")))
+    (should (zerop (carriage-diff-test--git dir "commit" "-m" "init")))
+    (let* ((diff (concat
+                  (mapconcat #'identity
+                             '("diff --git a/a.txt b/a.txt"
+                               "index 0000000..0000001 100644"
+                               "--- a/a.txt"
+                               "+++ b/a.txt"
+                               "@@ -1,1 +1,1 @@"
+                               "-old"
+                               "+new")
+                             "\n")
+                  "\n"))
+           (item `(:version "1" :op patch :apply git-apply :strip 1
+                            :path "a.txt" :diff ,diff)))
+      (with-temp-buffer
+        (insert "#+begin_state_manifest\n")
+        (insert "path|exists|has_text\n")
+        (insert "a.txt|true|false\n")
+        (insert "#+end_state_manifest\n")
+        (let* ((rep (carriage-dry-run-plan (list item) dir))
+               (row (car (plist-get rep :items))))
+          (should (eq (plist-get row :status) 'fail))
+          (should (string-match-p "file text is not present in current request context"
+                                  (or (plist-get row :details) ""))))))))
+
+(ert-deftest carriage-create-explicit-manifest-existing-path-fails-closed ()
+  "Explicit request-state manifest with exists=true must reject create."
+  (let* ((dir (make-temp-file "carriage-diff-" t)))
+    (carriage-diff-test--write dir "a.txt" "old\n")
+    (with-temp-buffer
+      (insert "#+begin_state_manifest\n")
+      (insert "path|exists|has_text\n")
+      (insert "a.txt|true|true\n")
+      (insert "#+end_state_manifest\n")
+      (let* ((rep (carriage-dry-run-plan
+                   (list '(:version "1" :op create :file "a.txt" :content "new\n"))
+                   dir))
+             (row (car (plist-get rep :items))))
+        (should (eq (plist-get row :status) 'fail))
+        (should (string-match-p "Create forbidden"
+                                (or (plist-get row :details) "")))))))
+
 ;;; carriage-diff-test.el ends here

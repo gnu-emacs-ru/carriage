@@ -94,6 +94,11 @@ This is very verbose; enable only for diagnosing stalls / watchdog timeouts."
   :type 'boolean
   :group 'carriage-transport-watchdog)
 
+(defcustom carriage-transport-debug-in-file-log nil
+  "When non-nil, log a short summary of `In file <path>:' sections present in SYSTEM text."
+  :type 'boolean
+  :group 'carriage-transport-watchdog)
+
 (defun carriage-transport--short-backtrace (&optional max-lines)
   "Return a short backtrace string (best-effort) limited to MAX-LINES.
 Never signals."
@@ -259,6 +264,17 @@ This function MUST be safe on hot paths (stream chunks) and MUST never signal."
   (carriage-transport-note-progress 'begin (current-buffer))
   (carriage-transport--watchdog-start (current-buffer))
   carriage-transport--request-id)
+
+(defun carriage-transport--debug-summarize-in-file (text)
+  "Return a list of paths found in `In file <path>:' headers inside TEXT."
+  (when (stringp text)
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (let ((acc '()))
+        (while (re-search-forward "^In file \\(.+\\):[ \t]*$" nil t)
+          (push (match-string-no-properties 1) acc))
+        (nreverse (delete-dups acc))))))
 
 ;; Traffic logging (per-buffer buffers, summaries, and optional file logging)
 
@@ -625,6 +641,9 @@ Contract:
 - If missing, attempt one-shot lazy load of adapter (guarded), then call entry-point.
 - No recursion, no reliance on function cell replacement."
   (carriage-transport-note-progress 'dispatch (plist-get args :buffer))
+  (when carriage-transport-debug-in-file-log
+    (let ((paths (carriage-transport--debug-summarize-in-file (plist-get args :system))))
+      (carriage-log "Transport: In file sections in SYSTEM: %S" paths)))
   (carriage-traffic-log 'out "dispatch request rid=%s: %S"
                         (or (carriage-transport-current-request-id (plist-get args :buffer)) "-")
                         args)
@@ -678,6 +697,70 @@ Contract:
        (carriage-transport-complete t)
        (user-error "Unknown transport backend: %s" bsym)))))
 
+(defun carriage-transport--payload-summarize-patch-blocks-fallback (text)
+  "Transport-local fallback: summarize #+begin_patch blocks into one-line history markers.
+
+Used only when the canonical `carriage--payload-summarize-patch-blocks'
+is unavailable. Must never signal."
+  (with-temp-buffer
+    (insert (or text ""))
+    (goto-char (point-min))
+    (let ((case-fold-search t)
+          (rx-end "^[ \t]*#\\+end_patch\\b"))
+      (while (re-search-forward "^[ \t]*#\\+begin_patch\\b" nil t)
+        (let* ((beg (line-beginning-position))
+               (hdr-line (buffer-substring-no-properties beg (line-end-position)))
+               (hdr nil)
+               (keep nil))
+          ;; Parse optional header plist from the begin_patch line.
+          (when (string-match "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" hdr-line)
+            (let* ((sexp (match-string 1 hdr-line))
+                   (obj (condition-case _e
+                            (car (read-from-string sexp))
+                          (error nil))))
+              (when (listp obj)
+                (setq hdr obj)
+                (setq keep (plist-get obj :keep)))))
+          (if keep
+              ;; Keep block as-is; just jump past its end (or EOF).
+              (progn
+                (forward-line 1)
+                (if (re-search-forward rx-end nil t)
+                    (forward-line 1)
+                  (goto-char (point-max))))
+            ;; Replace the whole block with a one-line marker.
+            (let* ((end
+                    (save-excursion
+                      (goto-char (1+ (line-end-position)))
+                      (if (re-search-forward rx-end nil t)
+                          (min (point-max) (1+ (line-end-position)))
+                        (point-max))))
+                   (desc0 (or (and (listp hdr)
+                                   (or (plist-get hdr :description)
+                                       (plist-get hdr :result)))
+                              (and (listp hdr) (plist-get hdr :applied) "Applied")
+                              "(no description)"))
+                   (desc (string-trim (format "%s" desc0)))
+                   (desc (if (string-empty-p desc) "(no description)" desc))
+                   (target
+                    (cond
+                     ((and (listp hdr) (plist-get hdr :path)) (plist-get hdr :path))
+                     ((and (listp hdr) (plist-get hdr :file)) (plist-get hdr :file))
+                     ((and (listp hdr)
+                           (or (plist-get hdr :from) (plist-get hdr :to)))
+                      (let ((f (plist-get hdr :from))
+                            (t2 (plist-get hdr :to)))
+                        (string-trim
+                         (format "%s → %s"
+                                 (or (and (stringp f) f) "-")
+                                 (or (and (stringp t2) t2) "-")))))
+                     (t "-")))
+                   (line (format ";; patch history: %s — %s" target desc)))
+              (delete-region beg end)
+              (goto-char beg)
+              (insert line "\n"))))))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
 (defun carriage-transport--strip-internal-lines (text)
   "Remove internal Carriage marker lines from TEXT (best-effort, centralized).
 
@@ -701,18 +784,26 @@ Strips:
         (delete-region (line-beginning-position)
                        (min (point-max) (1+ (line-end-position)))))
 
-      ;; Applied patch blocks must never leak into prompts.
-      ;; Reuse the canonical payload helper when available to keep formatting identical.
+      ;; Patch blocks must never leak into prompts (history is summarized to one-line markers).
+      ;; Prefer full patch-history collapse (all patches) when available; fall back
+      ;; to applied-only collapse on older builds.
       (let ((s (buffer-substring-no-properties (point-min) (point-max))))
-        (when (fboundp 'carriage--payload-summarize-applied-patches)
+        (cond
+         ((fboundp 'carriage--payload-summarize-patch-blocks)
           (erase-buffer)
-          (insert (carriage--payload-summarize-applied-patches s))))
-      ;; Also strip any accidentally pasted transport diagnostic lines to avoid polluting prompts.
-      ;; Example: \"Transport[gptel] …\" lines copied from *carriage-log*/*carriage-traffic*.
-      (goto-char (point-min))
-      (while (re-search-forward "^[ \t]*Transport\\[[^]\n]+\\].*$" nil t)
-        (delete-region (line-beginning-position)
-                       (min (point-max) (1+ (line-end-position))))))
+          (insert (carriage--payload-summarize-patch-blocks s)))
+         ((fboundp 'carriage-transport--payload-summarize-patch-blocks-fallback)
+          (erase-buffer)
+          (insert (carriage-transport--payload-summarize-patch-blocks-fallback s)))
+         ((fboundp 'carriage--payload-summarize-applied-patches)
+          (erase-buffer)
+          (insert (carriage--payload-summarize-applied-patches s))))))
+    ;; Also strip any accidentally pasted transport diagnostic lines to avoid polluting prompts.
+    ;; Example: \"Transport[gptel] …\" lines copied from *carriage-log*/*carriage-traffic*.
+    (goto-char (point-min))
+    (while (re-search-forward "^[ \t]*Transport\\[[^]\n]+\\].*$" nil t)
+      (delete-region (line-beginning-position)
+                     (min (point-max) (1+ (line-end-position)))))
     (buffer-substring-no-properties (point-min) (point-max))))
 
 

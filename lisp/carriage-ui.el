@@ -1130,26 +1130,45 @@ Important (perf):
 
 (defun carriage-ui--org-outline-path ()
   "Return org outline path (A › B › C) at point, or nil if not available.
-Prefer using Org's cache (use-cache=t); our hooks keep the value fresh."
+Best-effort and fail-closed for malformed parser state in idle/headerline paths.
+
+IMPORTANT (robustness):
+- Must NEVER open debugger even when `debug-on-error' is non-nil.
+- Avoid `org-get-outline-path' / org-element parser paths which may signal
+  \"Invalid search bound\" during incremental edits."
   (when (and (derived-mode-p 'org-mode)
-             (fboundp 'org-get-outline-path))
-    ;; Use cache=t for speed; we recompute on heading changes via our hook.
-    (let* ((path (ignore-errors (org-get-outline-path t nil))))
-      (when (and path (listp path) (> (length path) 0))
-        (mapconcat (lambda (s) (if (stringp s) s (format "%s" s))) path " › ")))))
+             (require 'org nil t))
+    (let ((inhibit-debugger t))
+      (condition-case _e
+          (save-excursion
+            (save-restriction
+              (widen)
+              (let ((parts nil)
+                    (max-depth 32))
+                ;; Move to nearest heading without using org-element-based APIs.
+                (when (or (org-at-heading-p)
+                          (ignore-errors (org-back-to-heading t)))
+                  (push (org-get-heading t t t t) parts)
+                  (while (and (< (length parts) max-depth)
+                              (org-up-heading-safe))
+                    (push (org-get-heading t t t t) parts)))
+                (when parts
+                  (mapconcat #'identity parts " › ")))))
+        (error nil)))))
 
 (defun carriage-ui-goto-outline (&optional _event)
-  "Go to the current org heading (best-effort) when clicking outline in header-line."
+  "Go to the nearest Org heading above point (best-effort) when clicking outline in header-line.
+Must never open debugger, even when `debug-on-error' is non-nil."
   (interactive "e")
-  (when (and (derived-mode-p 'org-mode)
-             (fboundp 'org-find-exact-headline-in-buffer)
-             (fboundp 'org-get-outline-path))
-    (let* ((path (ignore-errors (org-get-outline-path t t)))
-           (title (and path (car (last path))))
-           (pos (and title (ignore-errors (org-find-exact-headline-in-buffer title)))))
-      (when (number-or-marker-p pos)
-        (goto-char pos)
-        (recenter 1)))))
+  (when (derived-mode-p 'org-mode)
+    (let ((inhibit-debugger t))
+      (condition-case _e
+          (progn
+            (require 'org nil t)
+            (when (fboundp 'org-back-to-heading)
+              (org-back-to-heading t)
+              (recenter 1)))
+        (error nil)))))
 
 (defvar carriage-ui--icons-lib-available (featurep 'all-the-icons)
   "Cached availability of all-the-icons library.")
@@ -3516,21 +3535,31 @@ All edits occur within a single undo group."
   "Idle worker to refresh outline path string (if dirty) and update the header-line.
 Avoids heavy org computations on redisplay path."
   (unwind-protect
-      (progn
-        (when (and carriage-mode-headerline-show-outline
-                   (derived-mode-p 'org-mode))
-          (let* ((win (or (get-buffer-window (current-buffer) t)
-                          (selected-window)))
-                 (w (ignore-errors (and (window-live-p win) (window-total-width win))))
-                 (wide (or (null w) (>= w 40))))
-            (when (and wide
-                       (or carriage-ui--outline-dirty
-                           (null carriage-ui--last-outline-path-str)))
-              (setq carriage-ui--last-outline-path-str
-                    (or (carriage-ui--org-outline-path) ""))
-              (setq carriage-ui--outline-dirty nil))))
-        (when (get-buffer-window (current-buffer) t)
-          (force-mode-line-update)))
+      (condition-case _e
+          (progn
+            (when (and carriage-mode-headerline-show-outline
+                       (derived-mode-p 'org-mode))
+              (let* ((win (or (get-buffer-window (current-buffer) t)
+                              (selected-window)))
+                     (w (ignore-errors (and (window-live-p win) (window-total-width win))))
+                     (wide (or (null w) (>= w 40))))
+                (when (and wide
+                           (or carriage-ui--outline-dirty
+                               (null carriage-ui--last-outline-path-str)))
+                  (let ((inhibit-debugger t))
+                    (setq carriage-ui--last-outline-path-str
+                          (condition-case nil
+                              (or (carriage-ui--org-outline-path) "")
+                            (error ""))))
+                  (setq carriage-ui--outline-dirty nil))))
+            (when (get-buffer-window (current-buffer) t)
+              (force-mode-line-update)))
+        (error
+         ;; Fail-closed: never let headerline idle timer surface Org parser errors.
+         (setq carriage-ui--last-outline-path-str "")
+         (setq carriage-ui--outline-dirty nil)
+         (when (get-buffer-window (current-buffer) t)
+           (force-mode-line-update))))
     (setq carriage-ui--headerline-idle-timer nil)))
 
 ;; -- Event-driven invalidation for UI toggles/selectors (avoid idle churn)
@@ -6329,6 +6358,35 @@ Must not break nerd-icons/all-the-icons glyph properties."
        #'carriage-toggle-org-structure-hint
        help
        'structure))))
+
+(defun carriage-ui--org-outline-path ()
+  "Return an Org outline path string for headerline; never signal.
+
+This implementation intentionally avoids `org-get-outline-path' because it may
+signal \"Invalid search bound\" via org-element parsing during incremental edits
+(e.g., when called from idle timers).
+
+IMPORTANT:
+- Must NEVER open debugger even when `debug-on-error' is non-nil."
+  (when (and (derived-mode-p 'org-mode)
+             (require 'org nil t))
+    (let ((inhibit-debugger t))
+      (condition-case _e
+          (save-excursion
+            (save-restriction
+              (widen)
+              (let ((parts nil)
+                    (max-depth 32))
+                ;; Move to nearest heading without using org-element-based APIs.
+                (when (or (org-at-heading-p)
+                          (ignore-errors (org-back-to-heading t)))
+                  (push (org-get-heading t t t t) parts)
+                  (while (and (< (length parts) max-depth)
+                              (org-up-heading-safe))
+                    (push (org-get-heading t t t t) parts)))
+                (when parts
+                  (mapconcat #'identity parts " › ")))))
+        (error "")))))
 
 (provide 'carriage-ui)
 ;;; carriage-ui.el ends here

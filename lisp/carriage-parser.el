@@ -39,6 +39,72 @@
 (defvar carriage-mode-max-batch-pairs 200
   "Fallback maximum number of pairs allowed in an SRE block when Customize is not loaded.")
 
+
+
+(defun carriage--strict-aibo-sre-header-ok-p (header-plist)
+  "Return non-nil when HEADER-PLIST does not misuse :from/:to for aibo/sre."
+  (let* ((op (plist-get header-plist :op))
+         (opsym (if (symbolp op) op (intern (format "%s" op)))))
+    (if (memq opsym '(aibo sre))
+        (and (not (plist-member header-plist :from))
+             (not (plist-member header-plist :to)))
+      t)))
+
+(defun carriage--state-manifest-read-current-buffer ()
+  "Read explicit begin_state_manifest from current buffer and return a hash table or nil.
+
+Return value:
+- hash table PATH -> plist (:exists BOOL :has-text BOOL) when an explicit manifest
+  block is present in the current buffer;
+- nil when no explicit manifest block exists.
+
+Best-effort and never signals."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((case-fold-search t))
+        (when (re-search-forward "^[ \t]*#\\+begin_state_manifest\\b" nil t)
+          (forward-line 1)
+          (let ((tbl (make-hash-table :test 'equal)))
+            ;; Optional header row
+            (when (looking-at-p "^[ \t]*path|exists|has_text[ \t]*$")
+              (forward-line 1))
+            (while (and (not (eobp))
+                        (not (looking-at-p "^[ \t]*#\\+end_state_manifest\\b")))
+              (let* ((line (string-trim
+                            (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position)))))
+                (unless (string-empty-p line)
+                  (let ((cols (split-string line "|" t)))
+                    (when (>= (length cols) 3)
+                      (let* ((path (string-trim (nth 0 cols)))
+                             (exists-s (downcase (string-trim (nth 1 cols))))
+                             (has-text-s (downcase (string-trim (nth 2 cols)))))
+                        (puthash path
+                                 (list :exists (string= exists-s "true")
+                                       :has-text (string= has-text-s "true"))
+                                 tbl)))))
+                (forward-line 1)))
+            tbl))))))
+
+
+
+
+
+(defun carriage--state-manifest-get (path)
+  "Return request-state plist for PATH from explicit manifest in current buffer, or nil."
+  (when (stringp path)
+    (let ((tbl (carriage--state-manifest-read-current-buffer)))
+      (when (hash-table-p tbl)
+        (gethash path tbl)))))
+
+(defalias 'carriage-state-manifest-read-current-buffer
+  #'carriage--state-manifest-read-current-buffer)
+
+(defalias 'carriage-state-manifest-get
+  #'carriage--state-manifest-get)
+
 (defun carriage-parse (op header-plist body-text repo-root)
   "Dispatch parse via registry by OP for HEADER-PLIST and BODY-TEXT under REPO-ROOT.
 
@@ -144,33 +210,49 @@ Move point is not changed. Return nil if not found."
                    (parsed (car (read-from-string hdr-str))))
               parsed)))))))
 
+(defun carriage--ensure-parseable-aibo-sre-header (header-plist)
+  "Signal when HEADER-PLIST misuses :from/:to for aibo/sre."
+  (unless (carriage--strict-aibo-sre-header-ok-p header-plist)
+    (signal (carriage-error-symbol 'MODE_E_DISPATCH)
+            (list "AIBO/SRE must use begin_from/begin_to blocks; :from/:to header keys are forbidden"))))
+
+(defun carriage--patch-block-body-text (beg end-bol)
+  "Return patch block body text between BEG header line and END-BOL end marker line."
+  (save-excursion
+    (goto-char beg)
+    (forward-line 1)
+    (let ((body-beg (point)))
+      (goto-char end-bol)
+      ;; end-bol points to beginning of #+end_patch line
+      (buffer-substring-no-properties body-beg (line-beginning-position)))))
+
+(defun carriage--parse-block-at-bounds (beg end-bol end-eol repo-root)
+  "Parse patch block delimited by BEG, END-BOL and END-EOL under REPO-ROOT."
+  (let* ((header-plist (save-excursion
+                         (goto-char beg)
+                         (carriage--read-patch-header-at beg)))
+         (body (carriage--patch-block-body-text beg end-bol))
+         (plan (progn
+                 (carriage--ensure-parseable-aibo-sre-header header-plist)
+                 (carriage-parse (plist-get header-plist :op) header-plist body repo-root))))
+    ;; Attach buffer and live markers for later replacement (# +patch_done)
+    (let ((mb (copy-marker beg))
+          (me (copy-marker end-eol)))
+      (if (listp plan)
+          (append plan (list (cons :_buffer (current-buffer))
+                             (cons :_beg-marker mb)
+                             (cons :_end-marker me)))
+        plan))))
+
 (defun carriage-parse-block-at-point (repo-root)
   "Parse current org patch block at point into a plan item under REPO-ROOT."
-  (let* ((bounds (carriage--bounds-of-patch-block-at-point)))
+  (let ((bounds (carriage--bounds-of-patch-block-at-point)))
     (unless bounds
       (signal (carriage-error-symbol 'MODE_E_DISPATCH) (list "No patch block at point")))
     (let* ((beg (car bounds))
            (end-bol (cdr bounds))
-           (end-eol (save-excursion (goto-char end-bol) (line-end-position)))
-           (header-plist (save-excursion
-                           (goto-char beg)
-                           (carriage--read-patch-header-at beg)))
-           (body (save-excursion
-                   (goto-char beg)
-                   (forward-line 1)
-                   (let ((body-beg (point)))
-                     (goto-char end-bol)
-                     ;; end-bol points to beginning of #+end_patch line
-                     (buffer-substring-no-properties body-beg (line-beginning-position)))))
-           (plan (carriage-parse (plist-get header-plist :op) header-plist body repo-root)))
-      ;; Attach buffer and live markers for later replacement (# +patch_done)
-      (let ((mb (copy-marker beg))
-            (me (copy-marker end-eol)))
-        (if (listp plan)
-            (append plan (list (cons :_buffer (current-buffer))
-                               (cons :_beg-marker mb)
-                               (cons :_end-marker me)))
-          plan)))))
+           (end-eol (save-excursion (goto-char end-bol) (line-end-position))))
+      (carriage--parse-block-at-bounds beg end-bol end-eol repo-root))))
 
 ;;;; Region/group parsing
 

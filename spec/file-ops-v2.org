@@ -48,6 +48,8 @@ Normative Requirements
 - REQ-fops-001: create
   - Header: #+begin_patch (:version "1" :op "create" :file "REL/PATH")
   - Body: raw file content (no DELIM in v2).
+  - Create is valid only when the target path does not exist in the current project state; if the path is present in a project map or state manifest as existing, create MUST be rejected.
+  - Create is valid only when the target path does not exist in the current project state; if the path is present in a project map or state manifest as existing, create MUST be rejected.
 - REQ-fops-002: replace (reserved)
   - Not implemented in v2 baseline. Use 'patch (udiff) or 'sre for modifications.
   - Future versions MAY introduce 'replace as a full-file rewrite with explicit guards.
@@ -133,7 +135,7 @@ Prompt Guidance (LLM Output Contract)
 - PRM-fops-001: For create/replace use raw content between begin/end; no extra markers.
 - Forbidden-Phrases: unified diff headers; SRE begin_from/begin_to segments.
 - Positive Example: create — #+begin_patch (:version "1" :op "create" :file "dir/x.txt") … #+end_patch.
-- Negative Example: delete/rename with non-empty body; rename using :file instead of :from/:to.
+- Negative Example: delete/rename with non-empty body; rename using :file instead of :from/:to; create for a path already present in `#+begin_map` or current state manifest.
 
 Testing and Conformance
 - Anchor: TST

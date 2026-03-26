@@ -194,12 +194,21 @@ The fragment enforces:
 - Guidance to keep plain prose minimal and avoid duplication."
   (mapconcat
    #'identity
-   '("You MUST structure key parts using Org Typed Blocks v1."
-     "- Allowed types: task, analysis, plan, verify, commands, context, question, answer, notes."
-     "- Syntax: lines starting at column 0: \"#+begin_<type>\" … \"#+end_<type>\"."
-     "- Forbidden: asterisk headlines like \"*begin_<type>\"/\"*end_<type>\"."
-     "- Forbidden: spaces inside the marker, e.g., use \"#+begin_task\", NOT \"#+ begin_task\"."
-     "- Keep plain prose minimal; avoid duplicating the same content inside and outside blocks.")
+   '(     "You MUST structure key parts using Org Typed Blocks v1."
+          "- Allowed types: task, analysis, plan, verify, commands, context, question, answer, notes."
+          "- Additional state block allowed for request state snapshots: state_manifest."
+          "- Syntax: lines starting at column 0: \"#+begin_<type>\" … \"#+end_<type>\"."
+          "- Forbidden: asterisk headlines like \"*begin_<type>\"/\"*end_<type>\"."
+          "- Forbidden: spaces inside the marker, e.g., use \"#+begin_task\", NOT \"#+ begin_task\"."
+          "- Keep plain prose minimal; avoid duplicating the same content inside and outside blocks."
+          ""
+          "PATCH SAFETY (STRICT):"
+          "- Do NOT generate a patch for any file whose current text is NOT present in the context of THIS request."
+          "- File sections formatted as `In file <path>:` followed by the file body count as the current text of that file for this request."
+          "- If the file exists but its text is missing, output ONLY one begin_context block with required paths."
+          "- If a path appears in #+begin_map, or begin_state_manifest says exists=true, treat the file as existing; do NOT propose :op \"create\" for it."
+          "- Edit requires begin_state_manifest to say exists=true and has_text=true, and the current file body may be supplied in the same request under `In file <path>:`."
+          "- For :op \"aibo\" and :op \"sre\": use nested #+begin_from/# +end_from and #+begin_to/# +end_to blocks; do NOT use :from/:to keys in the patch header.")
    "\n"))
 
 ;; -----------------------------------------------------------------------------
@@ -692,6 +701,29 @@ Policy:
     (cond
      ((> lvl 0) (min 20 lvl))
      (t 1))))
+
+(defun carriage-typedblocks--state-manifest-rules ()
+  "Return strict request-state and begin_context fallback rules for prompt."
+  (mapconcat
+   #'identity
+   (list
+    ""
+    "REQUEST STATE CONTRACT (STRICT):"
+    "- Edit (patch/sre/aibo) requires: exists=true AND has_text=true in current request state."
+    "- Create requires: exists=false (or path not in begin_map/state_manifest)."
+    "- If file exists but has_text=false, you MUST output begin_context block with the path."
+    "- begin_state_manifest takes precedence over begin_map for state resolution."
+    "- begin_map indicates existence only; does NOT imply has_text=true."
+    ""
+    "AIBO/SRE FORMAT (STRICT):"
+    "- Use nested begin_from/begin_to blocks for replacements."
+    "- Do NOT use :from/:to keys in patch header for content changes."
+    "- begin_from content must match literally in the current file text."
+    ""
+    "PATCH HISTORY ISOLATION:"
+    "- begin_patch bodies are excluded from outgoing payload (LLM never sees them)."
+    "- Only history markers are included unless :keep escape hatch is explicitly set.")
+   "\n"))
 
 (defun carriage-typedblocks--org-structure-rules ()
   "Return a strict Org formatting rule string for prompt injection."

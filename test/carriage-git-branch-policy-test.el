@@ -69,5 +69,57 @@
        (let ((after (carriage-bp--current-branch root)))
          (should (string= before after)))))))
 
+(ert-deftest carriage-git-dry-run-without-manifest-uses-trusted-project-state ()
+  "Internal dry-run without explicit manifest should use trusted project state."
+  (carriage-bp--with-temp-repo
+   (lambda (root)
+     (let* ((plan-item (list (cons :version "1")
+                             (cons :op 'patch)
+                             (cons :apply 'git-apply)
+                             (cons :strip 1)
+                             (cons :path "foo.txt")
+                             (cons :diff (carriage-bp--make-diff "hello" "hello world"))))
+            (rep (carriage-dry-run-plan (list plan-item) root))
+            (it (car (plist-get rep :items))))
+       (should (eq (plist-get it :status) 'ok))))))
+
+(ert-deftest carriage-git-apply-without-manifest-uses-trusted-project-state ()
+  "Internal apply without explicit manifest should use trusted project state."
+  (carriage-bp--with-temp-repo
+   (lambda (root)
+     (let* ((plan-item (list (cons :version "1")
+                             (cons :op 'patch)
+                             (cons :apply 'git-apply)
+                             (cons :strip 1)
+                             (cons :path "foo.txt")
+                             (cons :diff (carriage-bp--make-diff "hello" "hello world"))))
+            (rep (carriage-apply-plan (list plan-item) root))
+            (it (car (plist-get rep :items))))
+       (should (eq (plist-get it :status) 'ok))
+       (should (string= "hello world\n"
+                        (with-temp-buffer
+                          (insert-file-contents (expand-file-name "foo.txt" root))
+                          (buffer-string))))))))
+
+(ert-deftest carriage-git-dry-run-explicit-empty-manifest-fails-closed ()
+  "Explicit empty state manifest must disable trusted filesystem fallback for patch."
+  (carriage-bp--with-temp-repo
+   (lambda (root)
+     (with-temp-buffer
+       (insert "#+begin_state_manifest\n")
+       (insert "path|exists|has_text\n")
+       (insert "#+end_state_manifest\n")
+       (let* ((plan-item (list (cons :version "1")
+                               (cons :op 'patch)
+                               (cons :apply 'git-apply)
+                               (cons :strip 1)
+                               (cons :path "foo.txt")
+                               (cons :diff (carriage-bp--make-diff "hello" "hello world"))))
+              (rep (carriage-dry-run-plan (list plan-item) root))
+              (it (car (plist-get rep :items))))
+         (should (eq (plist-get it :status) 'fail))
+         (should (string-match-p "State-sensitive op rejected: path missing from current request state"
+                                 (or (plist-get it :details) ""))))))))
+
 (provide 'carriage-git-branch-policy-test)
 ;;; carriage-git-branch-policy-test.el ends here

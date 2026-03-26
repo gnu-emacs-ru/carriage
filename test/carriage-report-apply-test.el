@@ -77,5 +77,35 @@
               (should-not (string= branch "HEAD"))))))
     (ignore-errors (delete-directory dir t))))
 
+(ert-deftest carriage-report-apply-at-point-sre-explicit-manifest-without-text-fails ()
+  "Report apply must fail-closed when explicit request-state says has_text=false."
+  (let* ((dir (make-temp-file "carriage-rpt-apply-" t)))
+    (unwind-protect
+        (progn
+          (should (zerop (carriage-report-apply-test--git dir "init")))
+          (should (zerop (carriage-report-apply-test--git dir "config" "user.email" "tester@example.com")))
+          (should (zerop (carriage-report-apply-test--git dir "config" "user.name" "Tester")))
+          (carriage-report-apply-test--write dir "x.txt" "hello\n")
+          (should (zerop (carriage-report-apply-test--git dir "add" "--" "x.txt")))
+          (should (zerop (carriage-report-apply-test--git dir "commit" "-m" "init")))
+          (with-temp-buffer
+            (insert "#+begin_state_manifest\n")
+            (insert "path|exists|has_text\n")
+            (insert "x.txt|true|false\n")
+            (insert "#+end_state_manifest\n")
+            (let* ((item (list (cons :version "1")
+                               (cons :op 'sre)
+                               (cons :file "x.txt")
+                               (cons :pairs
+                                     (list (list (cons :from "hello")
+                                                 (cons :to   "world")
+                                                 (cons :opts '(:occur first :match literal)))))))
+                   (rep (carriage-dry-run-plan (list item) dir))
+                   (row (car (plist-get rep :items))))
+              (should (eq (plist-get row :status) 'fail))
+              (should (string-match-p "file text is not present in current request context"
+                                      (or (plist-get row :details) "")))))))
+      (ignore-errors (delete-directory dir t)))))
+
 (provide 'carriage-report-apply-test)
 ;;; carriage-report-apply-test.el ends here

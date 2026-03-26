@@ -7,7 +7,7 @@
 Meta
 - Spec-ID: carriage/context/integration/v2
 - Version: v2.0
-- Status: draft
+- Status: stable
 - Normativity: RFC 2119 applies
 - Ownership: context, suite
 - Prompt-ABI: v1
@@ -45,6 +45,8 @@ Terms
 - Stability: stable
 - Pack-Priority: P1
 - Sources: doc (from #+begin_context plus optional patched-files from #+begin_patch headers), gptel (registry/files), visible (open buffers).
+- State Manifest: a document block =#+begin_state_manifest … #+end_state_manifest= with rows =path|exists|has_text= describing whether a repo-relative file exists in the current project snapshot and whether its full current text is included in this request.
+- State Manifest: a document block =#+begin_state_manifest … #+end_state_manifest= with rows =path|exists|has_text= describing whether a repo-relative file exists in the current project snapshot and whether its full current text is included in this request.
 - Packaging target: 'system or 'user; where collected text is injected in prompts.
 - Collector: function that returns {:count :items :warnings :stats}.
 
@@ -68,6 +70,16 @@ Normative Requirements
   - The map MUST be deterministic (stable sort, stable rendering) and MUST NOT read file contents.
   - The map MUST be subject to limits (bytes/paths) and MAY be cached with TTL; overflows MUST be truncated deterministically and MUST warn.
   - If all methods fail or result is empty, the map MUST be omitted with a warning (no hard error).
+- REQ-ctx-010: State Manifest source SHOULD be supported via a `#+begin_state_manifest` block with header row `path|exists|has_text` and deterministic repo-relative rows.
+- REQ-ctx-011: `exists` and `has_text` MUST be treated as distinct facts; presence in `#+begin_map` or `#+begin_context` does not imply `has_text=true`.
+- REQ-ctx-012: Edit-like responses MUST be considered valid only for files with `exists=true` and `has_text=true` in the current request state.
+- REQ-ctx-013: If a required file has `exists=true` and `has_text=false`, the preferred safe fallback is to request that file via `#+begin_context` instead of generating edits from inference.
+  - Preferred mechanism: `git ls-files -co --exclude-standard` (fast, gitignore-aware).
+  - If git is unavailable, not a repo, or fails/timeouts, the implementation MAY fall back to OS/Emacs enumeration (directory traversal) to avoid hard failure.
+    - When falling back, the implementation MUST warn that gitignore compliance may be incomplete.
+  - The map MUST be deterministic (stable sort, stable rendering) and MUST NOT read file contents.
+  - The map MUST be subject to limits (bytes/paths) and MAY be cached with TTL; overflows MUST be truncated deterministically and MUST warn.
+  - If all methods fail or result is empty, the map MUST be omitted with a warning (no hard error).
 
 Invariants
 - Anchor: INV
@@ -79,6 +91,7 @@ Invariants
 - FREEZE: max-summary-ratio = 0.6
 - INV-ctx-001: Source preference order: doc > visible > gptel.
 - INV-ctx-002: Item record MUST include :path, :source, and whether content is included or omitted.
+- INV-ctx-003: File existence and file-text availability are separate invariants; `exists=true` MUST NOT be interpreted as `has_text=true`.
 
 Grammar/Schema
 - Anchor: SCHEMA
@@ -94,6 +107,10 @@ Grammar/Schema
   - :included (integer), :skipped (integer), :total-bytes (integer)
 - Packaging result (plist):
   - :context-text (string), :context-target ('system|'user)
+- State Manifest block:
+  - Marker lines: "#+begin_state_manifest" and "#+end_state_manifest"
+  - First body line: `path|exists|has_text`
+  - Following lines: `<repo-relative-path>|<true|false>|<true|false>`
 
 Interfaces/Contracts
 - Anchor: IFC
@@ -116,9 +133,12 @@ Algorithms
   - Read files within limits; if overflow, set omitted with :reason and warn
 - ALG-ctx-002: Format
   - Build deterministic sections grouped by source; include path headers; optionally summarize
+  - Include `#+begin_state_manifest` when available before file bodies so downstream prompt builders and validators can distinguish `exists` from `has_text`
   - Respect :where target; return single string designed for downstream packing
 - ALG-ctx-003: Summarize
   - Apply ratio ≤ max-summary-ratio; preserve first and last k bytes; insert ellipses
+- ALG-ctx-004: Missing-text fallback
+  - If a downstream action requires a file with `exists=true` and `has_text=false`, the system SHOULD prefer a deterministic `#+begin_context` request for the missing path(s) over speculative edits
 
 Errors and Diagnostics
 - Anchor: ERR

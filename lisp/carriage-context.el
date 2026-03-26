@@ -1041,6 +1041,299 @@ and size limits:
          (config (carriage-context--collect-config buf root)))
     (carriage-context--collect-exec buf config)))
 
+(defun carriage-context--collect-async-empty-ctx (why)
+  "Return minimal empty async context with WHY warning."
+  (list :files '()
+        :warnings (list (format "CTX_TIMEOUT: %s" (or why "context collection timed out")))
+        :omitted 0
+        :stats (list :total-bytes 0 :included 0 :skipped 0)))
+
+(defun carriage-context--collect-async-finish (env callback ctx &optional why)
+  "Finish async collection using ENV and invoke CALLBACK with CTX.
+Ensures cleanup and callback invocation happen at most once."
+  (unless (plist-get env :done)
+    (plist-put env :done t)
+    (let ((watchdog (plist-get env :watchdog))
+          (timer (plist-get env :timer))
+          (token (plist-get env :token)))
+      (when (timerp watchdog)
+        (ignore-errors (cancel-timer watchdog))
+        (plist-put env :watchdog nil))
+      (when (timerp timer)
+        (ignore-errors (cancel-timer timer))
+        (plist-put env :timer nil))
+      (setf (plist-get token :timer) nil)
+      (setf (plist-get token :watchdog) nil)
+      (let ((ctx2 (if (listp ctx) ctx (carriage-context--collect-async-empty-ctx why))))
+        (run-at-time
+         0 nil
+         (lambda ()
+           (when (functionp callback)
+             (ignore-errors (funcall callback ctx2)))))))))
+
+(defun carriage-context--collect-async-cancel (env callback)
+  "Cancel async collection represented by ENV and invoke CALLBACK."
+  (carriage-context--collect-async-finish
+   env callback
+   (carriage-context--collect-async-empty-ctx "cancelled")
+   "cancelled")
+  t)
+
+(defun carriage-context--collect-async-include-patched-p (buf)
+  "Return non-nil when patched files should be included for BUF."
+  (with-current-buffer buf
+    (and (boundp 'carriage-mode-include-patched-files)
+         carriage-mode-include-patched-files)))
+
+(defun carriage-context--collect-async-visible-items (buf)
+  "Return visible work items for BUF.
+Items are either (:kind path :value STRING) or (:kind visible-buffer :buffer BUF)."
+  (let ((items '()))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (let ((seen (make-hash-table :test 'eq))
+              (ignored-modes (and (boundp 'carriage-visible-ignore-modes) carriage-visible-ignore-modes))
+              (ignored-names (and (boundp 'carriage-visible-ignore-buffer-regexps) carriage-visible-ignore-buffer-regexps)))
+          (walk-windows
+           (lambda (w)
+             (let ((b (window-buffer w)))
+               (unless (gethash b seen)
+                 (puthash b t seen)
+                 (with-current-buffer b
+                   (let* ((nm (buffer-name b))
+                          (mm major-mode)
+                          (skip
+                           (or (and (boundp 'carriage-visible-exclude-current-buffer)
+                                    carriage-visible-exclude-current-buffer
+                                    (eq b buf))
+                               (minibufferp b)
+                               (eq mm 'exwm-mode)
+                               (and (listp ignored-modes) (memq mm ignored-modes))
+                               (and (listp ignored-names)
+                                    (seq-some (lambda (rx) (and (stringp rx) (string-match-p rx nm)))
+                                              ignored-names)))))
+                     (unless skip
+                       (let ((bf (buffer-file-name b)))
+                         (cond
+                          ((and (stringp bf) (not (file-remote-p bf)))
+                           (push (list :kind 'path :value bf) items))
+                          (t
+                           (push (list :kind 'visible-buffer :buffer b) items))))))))))
+           nil (selected-frame)))))
+    (nreverse items)))
+
+(defun carriage-context--collect-async-process-visible-buffer (vb state)
+  "Include visible non-file buffer VB into STATE and return updated STATE."
+  (if (not (buffer-live-p vb))
+      state
+    (with-current-buffer vb
+      (let* ((nm (buffer-name vb))
+             (mm major-mode)
+             (rel (format "visible:/%s" nm))
+             (tail (or (and (boundp 'carriage-visible-terminal-tail-lines)
+                            carriage-visible-terminal-tail-lines)
+                       256))
+             (is-term (or (derived-mode-p 'comint-mode)
+                          (derived-mode-p 'eshell-mode)
+                          (derived-mode-p 'term-mode)
+                          (ignore-errors (derived-mode-p 'vterm-mode))
+                          (derived-mode-p 'compilation-mode)
+                          (eq mm 'messages-buffer-mode)
+                          (string= nm "*Messages*")))
+             (text
+              (save-excursion
+                (save-restriction
+                  (widen)
+                  (if (not is-term)
+                      (buffer-substring-no-properties (point-min) (point-max))
+                    (goto-char (point-max))
+                    (forward-line (- tail))
+                    (buffer-substring-no-properties (point) (point-max))))))
+             (sz (string-bytes (or text "")))
+             (max-bytes (plist-get state :max-bytes))
+             (total (plist-get state :total-bytes)))
+        (if (and (numberp max-bytes) (> (+ total sz) max-bytes))
+            (progn
+              (setq state (carriage-context--push-warning
+                           (format "limit reached, include path only: %s" rel) state))
+              (setq state (carriage-context--push-file
+                           (list :rel rel :true nil :content nil :reason 'size-limit)
+                           state))
+              (plist-put state :skipped (1+ (plist-get state :skipped))))
+          (setq state (carriage-context--push-file
+                       (list :rel rel :true nil :content text)
+                       state))
+          (setq state (plist-put state :total-bytes (+ total sz)))
+          (plist-put state :included (1+ (plist-get state :included))))))))
+
+(defun carriage-context--collect-async-next-build-phase (cfg phase)
+  "Return next async build PHASE for CFG."
+  (let ((inc-doc (plist-get cfg :include-doc))
+        (inc-gpt (plist-get cfg :include-gptel))
+        (inc-vis (plist-get cfg :include-visible)))
+    (pcase phase
+      ('init
+       (cond
+        ((plist-get cfg :include-patched) 'patched)
+        (inc-doc 'doc)
+        (inc-vis 'visible)
+        (inc-gpt 'gptel)
+        (t 'finalize)))
+      ('patched
+       (cond
+        (inc-doc 'doc)
+        (inc-vis 'visible)
+        (inc-gpt 'gptel)
+        (t 'finalize)))
+      ('doc
+       (cond
+        (inc-vis 'visible)
+        (inc-gpt 'gptel)
+        (t 'finalize)))
+      ('visible
+       (if inc-gpt 'gptel 'finalize))
+      ('gptel 'finalize)
+      ('finalize 'done)
+      (_ 'finalize))))
+
+(defun carriage-context--collect-async-finalize-queue (env)
+  "Finalize queue in ENV from collected source lists."
+  (let ((q '()))
+    (dolist (p (or (plist-get env :pat) '()))
+      (when (stringp p) (push (list :kind 'path :value p) q)))
+    (dolist (p (or (plist-get env :doc) '()))
+      (when (stringp p) (push (list :kind 'path :value p) q)))
+    (dolist (it (or (plist-get env :vis) '()))
+      (when (listp it) (push it q)))
+    (dolist (p (or (plist-get env :gpt) '()))
+      (when (stringp p) (push (list :kind 'path :value p) q)))
+    (plist-put env :queue (nreverse q))
+    env))
+
+(defun carriage-context--collect-async-build-queue-step (env)
+  "Advance async queue-building state in ENV once.
+Returns non-nil when the queue is fully built."
+  (let* ((buf (plist-get env :buf))
+         (root (plist-get env :root))
+         (cfg (or (plist-get env :config)
+                  (let ((c (carriage-context--collect-config buf root)))
+                    (plist-put env :config c)
+                    c)))
+         (phase (or (plist-get env :build-phase) 'init)))
+    (pcase phase
+      ('init
+       (plist-put env :state (carriage-context--collect-init-state cfg))
+       (plist-put cfg :include-patched (carriage-context--collect-async-include-patched-p buf))
+       (plist-put env :config cfg)
+       (plist-put env :build-phase (carriage-context--collect-async-next-build-phase cfg 'init))
+       (sit-for 0)
+       nil)
+      ('patched
+       (plist-put env :pat (ignore-errors (carriage-context--patched-files buf)))
+       (plist-put env :build-phase (carriage-context--collect-async-next-build-phase cfg 'patched))
+       (sit-for 0)
+       nil)
+      ('doc
+       (plist-put env :doc (ignore-errors (carriage-context--doc-paths buf)))
+       (plist-put env :build-phase (carriage-context--collect-async-next-build-phase cfg 'doc))
+       (sit-for 0)
+       nil)
+      ('visible
+       (plist-put env :vis (ignore-errors (carriage-context--collect-async-visible-items buf)))
+       (plist-put env :build-phase (carriage-context--collect-async-next-build-phase cfg 'visible))
+       (sit-for 0)
+       nil)
+      ('gptel
+       (plist-put env :gpt (ignore-errors (carriage-context--maybe-gptel-files)))
+       (plist-put env :build-phase 'finalize)
+       (sit-for 0)
+       nil)
+      ('finalize
+       (carriage-context--collect-async-finalize-queue env)
+       (plist-put env :build-phase 'done)
+       (sit-for 0)
+       t)
+      ('done t)
+      (_
+       (plist-put env :build-phase 'finalize)
+       (sit-for 0)
+       nil))))
+
+(defun carriage-context--collect-async-process-item (item state)
+  "Process one async queue ITEM with STATE and return updated STATE."
+  (let ((kind (plist-get item :kind)))
+    (pcase kind
+      ('path
+       (let ((p (plist-get item :value)))
+         (if (and (stringp p) (not (string-empty-p p)))
+             (carriage-context--collect-process-path p state)
+           state)))
+      ('visible-buffer
+       (carriage-context--collect-async-process-visible-buffer
+        (plist-get item :buffer) state))
+      (_ state))))
+
+(defun carriage-context--collect-async-step (env callback)
+  "Run one async collector step for ENV and CALLBACK."
+  (condition-case e
+      (let ((done (plist-get env :done))
+            (buf (plist-get env :buf)))
+        (when (or done (not (buffer-live-p buf)))
+          (carriage-context--collect-async-finish
+           env callback
+           (carriage-context--collect-async-empty-ctx "buffer not live")
+           "buffer not live"))
+        (unless (plist-get env :done)
+          (when (not (plist-get env :built))
+            (condition-case e2
+                (plist-put env :built (carriage-context--collect-async-build-queue-step env))
+              (error
+               (carriage-context--collect-async-finish
+                env callback
+                (carriage-context--collect-async-empty-ctx (error-message-string e2))
+                (error-message-string e2)))))
+          (unless (or (plist-get env :done) (plist-get env :built))
+            (let ((timer (run-at-time
+                          0 nil
+                          (lambda ()
+                            (carriage-context--collect-async-step env callback)))))
+              (plist-put env :timer timer)
+              (setf (plist-get (plist-get env :token) :timer) timer)))
+          (when (and (not (plist-get env :done))
+                     (plist-get env :built)
+                     (listp (plist-get env :state)))
+            (let* ((t0 (float-time))
+                   (budget (max 0.001 (float (or (plist-get env :slice) 0.02))))
+                   (queue (plist-get env :queue))
+                   (state (plist-get env :state)))
+              (while (and (not (plist-get env :done))
+                          (consp queue)
+                          (carriage-context--state-under-file-limit-p state)
+                          (< (- (float-time) t0) budget))
+                (setq state (carriage-context--collect-async-process-item (pop queue) state))
+                (sit-for 0))
+              (plist-put env :queue queue)
+              (plist-put env :state state)
+              (cond
+               ((or (plist-get env :done)
+                    (not (carriage-context--state-under-file-limit-p state))
+                    (null queue))
+                (carriage-context--collect-async-finish
+                 env callback
+                 (carriage-context--collect-finalize state)))
+               (t
+                (let ((timer (run-at-time
+                              0 nil
+                              (lambda ()
+                                (carriage-context--collect-async-step env callback)))))
+                  (plist-put env :timer timer)
+                  (setf (plist-get (plist-get env :token) :timer) timer))))))))
+    (error
+     (carriage-context--collect-async-finish
+      env callback
+      (carriage-context--collect-async-empty-ctx (error-message-string e))
+      (error-message-string e)))))
+
 (defun carriage-context-collect-async (callback &optional buffer root)
   "Collect context asynchronously and invoke CALLBACK with CTX on the main thread.
 Returns a token plist: (:timer TIMER), plus :watchdog timer when enabled.
@@ -1054,267 +1347,50 @@ Important:
   the Emacs UI in practice."
   (let* ((buf (or buffer (current-buffer)))
          (timeout carriage-context-collect-async-timeout-seconds)
-         (slice (or carriage-context-collect-async-slice-seconds 0.02))
-         (done nil)
-         (watchdog nil)
-         (timer nil)
-         (queue nil)
-         (state nil)
-         ;; Queue-build is intentionally incremental (across multiple timer ticks)
-         ;; to avoid starving UI timers (spinner) after Send.
-         (config nil)
-         (build-phase 'init)
-         (pat nil)
-         (doc nil)
-         (vis nil)
-         (gpt nil)
-         (built nil)
-         (token (list :timer nil :watchdog nil :cancel-fn nil)))
-    (cl-labels
-        ((empty-ctx (why)
-           (list :files '()
-                 :warnings (list (format "CTX_TIMEOUT: %s" (or why "context collection timed out")))
-                 :omitted 0
-                 :stats (list :total-bytes 0 :included 0 :skipped 0)))
-         (finish (ctx &optional why)
-           ;; Ensure callback is invoked once; always pass a plist-shaped CTX.
-           (unless done
-             (setq done t)
-             (when (timerp watchdog)
-               (ignore-errors (cancel-timer watchdog))
-               (setq watchdog nil))
-             (when (timerp timer)
-               (ignore-errors (cancel-timer timer))
-               (setq timer nil))
-             (setf (plist-get token :timer) nil)
-             (setf (plist-get token :watchdog) nil)
-             (let ((ctx2 (if (listp ctx) ctx (empty-ctx why))))
-               (run-at-time 0 nil
-                            (lambda ()
-                              (when (functionp callback)
-                                (ignore-errors (funcall callback ctx2))))))))
-         (cancel ()
-           (finish (empty-ctx "cancelled") "cancelled")
-           t)
-         (inc-patched-p ()
-           (with-current-buffer buf
-             (and (boundp 'carriage-mode-include-patched-files)
-                  carriage-mode-include-patched-files)))
-         (visible-items ()
-           "Return list of visible work items for BUF.
-Items are either (:kind path :value STRING) or (:kind visible-buffer :buffer BUF)."
-           (let ((items '()))
-             (when (buffer-live-p buf)
-               (with-current-buffer buf
-                 (let ((seen (make-hash-table :test 'eq))
-                       (ignored-modes (and (boundp 'carriage-visible-ignore-modes) carriage-visible-ignore-modes))
-                       (ignored-names (and (boundp 'carriage-visible-ignore-buffer-regexps) carriage-visible-ignore-buffer-regexps)))
-                   (walk-windows
-                    (lambda (w)
-                      (let ((b (window-buffer w)))
-                        (unless (gethash b seen)
-                          (puthash b t seen)
-                          (with-current-buffer b
-                            (let* ((nm (buffer-name b))
-                                   (mm major-mode)
-                                   (skip
-                                    (or (and (boundp 'carriage-visible-exclude-current-buffer)
-                                             carriage-visible-exclude-current-buffer
-                                             (eq b buf))
-                                        (minibufferp b)
-                                        (eq mm 'exwm-mode)
-                                        (and (listp ignored-modes) (memq mm ignored-modes))
-                                        (and (listp ignored-names)
-                                             (seq-some (lambda (rx) (and (stringp rx) (string-match-p rx nm)))
-                                                       ignored-names)))))
-                              (unless skip
-                                (let ((bf (buffer-file-name b)))
-                                  (cond
-                                   ((and (stringp bf) (not (file-remote-p bf)))
-                                    (push (list :kind 'path :value bf) items))
-                                   (t
-                                    (push (list :kind 'visible-buffer :buffer b) items))))))))))
-                    nil (selected-frame)))))
-             (nreverse items)))
-         (process-visible-buffer (vb)
-           "Include a visible non-file buffer VB into STATE (budgeted)."
-           (when (buffer-live-p vb)
-             (with-current-buffer vb
-               (let* ((nm (buffer-name vb))
-                      (mm major-mode)
-                      (rel (format "visible:/%s" nm))
-                      (tail (or (and (boundp 'carriage-visible-terminal-tail-lines)
-                                     carriage-visible-terminal-tail-lines)
-                                256))
-                      (is-term (or (derived-mode-p 'comint-mode)
-                                   (derived-mode-p 'eshell-mode)
-                                   (derived-mode-p 'term-mode)
-                                   (ignore-errors (derived-mode-p 'vterm-mode))
-                                   (derived-mode-p 'compilation-mode)
-                                   (eq mm 'messages-buffer-mode)
-                                   (string= nm "*Messages*")))
-                      (text
-                       (save-excursion
-                         (save-restriction
-                           (widen)
-                           (if (not is-term)
-                               (buffer-substring-no-properties (point-min) (point-max))
-                             (goto-char (point-max))
-                             (forward-line (- tail))
-                             (buffer-substring-no-properties (point) (point-max))))))
-                      (sz (string-bytes (or text "")))
-                      (max-bytes (plist-get state :max-bytes))
-                      (total (plist-get state :total-bytes)))
-                 (if (and (numberp max-bytes) (> (+ total sz) max-bytes))
-                     (progn
-                       (setq state (carriage-context--push-warning
-                                    (format "limit reached, include path only: %s" rel) state))
-                       (setq state (carriage-context--push-file
-                                    (list :rel rel :true nil :content nil :reason 'size-limit)
-                                    state))
-                       (setq state (plist-put state :skipped (1+ (plist-get state :skipped)))))
-                   (setq state (carriage-context--push-file
-                                (list :rel rel :true nil :content text)
-                                state))
-                   (setq state (plist-put state :total-bytes (+ total sz)))
-                   (setq state (plist-put state :included (1+ (plist-get state :included))))))))))
-      (build-queue ()
-                   "Incrementally build initial work queue across multiple timer ticks.
-Returns non-nil when the queue is fully built and STATE is initialized.
+         (token (list :timer nil :watchdog nil :cancel-fn nil))
+         (env (list :buf buf
+                    :root root
+                    :slice (or carriage-context-collect-async-slice-seconds 0.02)
+                    :done nil
+                    :watchdog nil
+                    :timer nil
+                    :queue nil
+                    :state nil
+                    :config nil
+                    :build-phase 'init
+                    :pat nil
+                    :doc nil
+                    :vis nil
+                    :gpt nil
+                    :built nil
+                    :token token)))
+    (setf (plist-get token :cancel-fn)
+          (lambda ()
+            (carriage-context--collect-async-cancel env callback)))
 
-Rationale:
-- Some sources (doc-context scan, walk-windows, gptel context) can be heavy.
-- Splitting them across separate timer ticks gives UI/spinner timers more chances to run."
-                   (let* ((cfg (or config (setq config (carriage-context--collect-config buf root))))
-                          (inc-doc (plist-get cfg :include-doc))
-                          (inc-gpt (plist-get cfg :include-gptel))
-                          (inc-vis (plist-get cfg :include-visible))
-                          (inc-pat (inc-patched-p)))
-                     (pcase build-phase
-                       ('init
-                        (setq state (carriage-context--collect-init-state cfg))
-                        (setq build-phase
-                              (cond
-                               (inc-pat 'patched)
-                               (inc-doc 'doc)
-                               (inc-vis 'visible)
-                               (inc-gpt 'gptel)
-                               (t 'finalize)))
-                        (sit-for 0)
-                        nil)
-                       ('patched
-                        (setq pat (ignore-errors (carriage-context--patched-files buf)))
-                        (setq build-phase
-                              (cond
-                               (inc-doc 'doc)
-                               (inc-vis 'visible)
-                               (inc-gpt 'gptel)
-                               (t 'finalize)))
-                        (sit-for 0)
-                        nil)
-                       ('doc
-                        (setq doc (ignore-errors (carriage-context--doc-paths buf)))
-                        (setq build-phase
-                              (cond
-                               (inc-vis 'visible)
-                               (inc-gpt 'gptel)
-                               (t 'finalize)))
-                        (sit-for 0)
-                        nil)
-                       ('visible
-                        (setq vis (ignore-errors (visible-items)))
-                        (setq build-phase
-                              (cond
-                               (inc-gpt 'gptel)
-                               (t 'finalize)))
-                        (sit-for 0)
-                        nil)
-                       ('gptel
-                        (setq gpt (ignore-errors (carriage-context--maybe-gptel-files)))
-                        (setq build-phase 'finalize)
-                        (sit-for 0)
-                        nil)
-                       ('finalize
-                        (let ((q '()))
-                          ;; Same preference ordering as sync collector:
-                          ;; patched → doc → visible → gptel.
-                          (dolist (p (or pat '()))
-                            (when (stringp p) (push (list :kind 'path :value p) q)))
-                          (dolist (p (or doc '()))
-                            (when (stringp p) (push (list :kind 'path :value p) q)))
-                          (dolist (it (or vis '()))
-                            (when (listp it) (push it q)))
-                          (dolist (p (or gpt '()))
-                            (when (stringp p) (push (list :kind 'path :value p) q)))
-                          (setq queue (nreverse q))
-                          (setq build-phase 'done))
-                        (sit-for 0)
-                        t)
-                       ('done t)
-                       (_
-                        (setq build-phase 'finalize)
-                        (sit-for 0)
-                        nil))))
-      (step ()
-            (condition-case e
-                (progn
-                  (when (or done (not (buffer-live-p buf)))
-                    (finish (empty-ctx "buffer not live") "buffer not live"))
-                  ;; IMPORTANT: build initial queue/state incrementally across timer ticks,
-                  ;; not synchronously in the caller, so UI (spinner) can start immediately.
-                  (when (and (not done) (not built))
-                    (condition-case e2
-                        (setq built (build-queue))
-                      (error
-                       (finish (empty-ctx (error-message-string e2)) (error-message-string e2))))
-                    ;; Not ready yet → reschedule and exit this tick.
-                    (unless (or done built)
-                      (setq timer (run-at-time 0 nil #'step))
-                      (setf (plist-get token :timer) timer)))
-                  (when (and (not done) built (listp state))
-                    (let* ((t0 (float-time))
-                           (budget (max 0.001 (float (or slice 0.02)))))
-                      (while (and (not done)
-                                  (consp queue)
-                                  (carriage-context--state-under-file-limit-p state)
-                                  (< (- (float-time) t0) budget))
-                        (let* ((it (pop queue))
-                               (kind (plist-get it :kind)))
-                          (pcase kind
-                            ('path
-                             (let ((p (plist-get it :value)))
-                               (when (and (stringp p) (not (string-empty-p p)))
-                                 (setq state (carriage-context--collect-process-path p state)))))
-                            ('visible-buffer
-                             (let ((vb (plist-get it :buffer)))
-                               (process-visible-buffer vb)))
-                            (_ nil)))
-                        ;; Yield to keep UI responsive between items.
-                        (sit-for 0))
-                      (cond
-                       ((or done (not (carriage-context--state-under-file-limit-p state)) (null queue))
-                        (finish (carriage-context--collect-finalize state)))
-                       (t
-                        (setq timer (run-at-time 0 nil #'step))
-                        (setf (plist-get token :timer) timer))))))
-              (error
-               (finish (empty-ctx (error-message-string e)) (error-message-string e))))))
-    ;; Init token cancel-fn
-    (setf (plist-get token :cancel-fn) #'cancel)
-
-    ;; Watchdog: prevents "Send" from hanging forever if prepare stalls.
     (when (and (numberp timeout) (> timeout 0))
-      (setq watchdog (run-at-time timeout nil (lambda () (finish nil "context collection timed out"))))
-      (setf (plist-get token :watchdog) watchdog))
+      (let ((watchdog
+             (run-at-time
+              timeout nil
+              (lambda ()
+                (carriage-context--collect-async-finish
+                 env callback nil "context collection timed out")))))
+        (plist-put env :watchdog watchdog)
+        (setf (plist-get token :watchdog) watchdog)))
 
-    ;; Kick the incremental worker immediately, but prefer idle timer in interactive
-    ;; sessions so UI can render/animate (spinner) before we start scanning buffers/windows.
-    ;; NOTE: build-queue is deferred to the first step tick to avoid blocking the caller/UI.
-    (unless done
-      (setq timer (if noninteractive
-                      (run-at-time 0 nil #'step)
-                    (run-with-idle-timer 0 nil #'step)))
-      (setf (plist-get token :timer) timer))
+    (unless (plist-get env :done)
+      (let ((timer
+             (if noninteractive
+                 (run-at-time
+                  0 nil
+                  (lambda ()
+                    (carriage-context--collect-async-step env callback)))
+               (run-with-idle-timer
+                0 nil
+                (lambda ()
+                  (carriage-context--collect-async-step env callback))))))
+        (plist-put env :timer timer)
+        (setf (plist-get token :timer) timer)))
 
     token))
 
@@ -1422,6 +1498,26 @@ is used for the next iteration and it must contain the full list of needed paths
       (when lines
         (mapconcat (lambda (s) (concat ";; " s)) lines "\n")))))
 
+(defun carriage-context--state-manifest-format (ctx)
+  "Return minimal begin_state_manifest block for CTX."
+  (let* ((files (or (plist-get ctx :files) '()))
+         (rows
+          (sort
+           (delete-dups
+            (mapcar
+             (lambda (f)
+               (let* ((rel (or (plist-get f :rel) ""))
+                      (exists (if (string-prefix-p "visible:/" rel) "false" "true"))
+                      (has-text (if (stringp (plist-get f :content)) "true" "false")))
+                 (format "%s|%s|%s" rel exists has-text)))
+             files))
+           #'string<)))
+    (when rows
+      (concat "#+begin_state_manifest\n"
+              "path|exists|has_text\n"
+              (mapconcat #'identity rows "\n")
+              "\n#+end_state_manifest\n"))))
+
 (defun carriage-context-format (ctx &key where)
   "Format CTX (plist from carriage-context-collect) into a string for insertion.
 WHERE is 'system or 'user (affects only label string)."
@@ -1435,6 +1531,7 @@ WHERE is 'system or 'user (affects only label string)."
                       (or (plist-get stats :skipped) 0)
                       (or (plist-get stats :total-bytes) 0)))
          (doc-hint (ignore-errors (carriage-context--doc-context-policy-hint)))
+         (manifest (carriage-context--state-manifest-format ctx))
          (warn-str (mapconcat (lambda (w) (concat ";; " w)) warnings "\n"))
          (sections
           (mapcar
@@ -1445,14 +1542,30 @@ WHERE is 'system or 'user (affects only label string)."
                     (lang (carriage-context--guess-lang rel)))
                (if (stringp content)
                    (concat (format "In file %s:\n" rel)
+                           ";; CURRENT TEXT PRESENT IN THIS REQUEST\n"
+                           ";; THIS FULL FILE BODY IS VISIBLE TO THE MODEL IN THE CURRENT REQUEST.\n"
+                           ";; AUTHORITATIVE CURRENT TEXT FOR THIS PATH.\n"
+                           ";; AUTHORITATIVE CURRENT FILE TEXT FOR THIS PATH.\n"
+                           ";; TREAT THIS FILE BODY AS THE AUTHORITATIVE CURRENT TEXT FOR THIS PATH.\n"
+                           ";; THIS MEANS has_text=true FOR THIS PATH IN THE CURRENT REQUEST.\n"
+                           ";; THE MODEL MUST USE THIS BODY AS THE CURRENT FILE TEXT AND MUST NOT CLAIM IT IS MISSING.\n"
+                           ";; MUST NOT CLAIM THAT THIS FILE TEXT IS MISSING.\n"
+                           ";; IF YOU CAN SEE THIS `In file <path>:` SECTION WITH A BODY, THEN THE FILE TEXT IS PRESENT IN CONTEXT.\n"
+                           ";; THIS `In file <path>:` BODY IS THE REAL CURRENT FILE TEXT.\n"
+                           ";; THIS `In file <path>:` BODY IS THE REAL CURRENT FILE TEXT, NOT JUST A REFERENCE OR A PATH MENTION.\n"
+                           ";; EDITS FOR THIS EXACT PATH ARE ALLOWED TO RELY ON THIS BODY AS VISIBLE CURRENT TEXT.\n"
+                           ";; EDITS FOR THIS EXACT PATH ARE ALLOWED TO RELY ON THIS BODY AS VISIBLE CURRENT TEXT IN THIS REQUEST.\n"
+                           ";; DO NOT ASK FOR begin_context FOR THIS SAME PATH.\n"
+                           ";; DO NOT ASK FOR begin_context FOR THIS SAME PATH UNLESS YOU NEED SOME OTHER FILE.\n"
                            (format "#+begin_src %s\n" lang)
                            content
                            "\n#+end_src\n")
+
                  (format "In file %s: [content omitted]%s\n"
                          rel
                          (if reason (format " (%s)" reason) "")))))
            files)))
-    (string-join (delq nil (list hdr doc-hint
+    (string-join (delq nil (list hdr doc-hint manifest
                                  (and warnings warn-str)
                                  (mapconcat #'identity sections "\n")))
                  "\n")))
@@ -1754,6 +1867,74 @@ SOURCE is used only for source classification maps."
           :warnings warnings
           :stats (list :total-bytes total-bytes :included included :skipped skipped))))
 
+(defun carriage-context--count-fast-process-paths (paths state source)
+  "Process PATHS into STATE using SOURCE classification."
+  (dolist (p paths state)
+    (when (carriage-context--count-fast-under-file-limit-p state)
+      (setq state (carriage-context--count-fast-process-path p state source)))))
+
+(defun carriage-context--count-fast-collect-visible (buf state)
+  "Process visible buffers for BUF into STATE."
+  (let ((seen (make-hash-table :test 'eq))
+        (ignored-modes (and (boundp 'carriage-visible-ignore-modes) carriage-visible-ignore-modes))
+        (ignored-names (and (boundp 'carriage-visible-ignore-buffer-regexps) carriage-visible-ignore-buffer-regexps)))
+    (walk-windows
+     (lambda (w)
+       (let ((b (window-buffer w)))
+         (unless (gethash b seen)
+           (puthash b t seen)
+           (with-current-buffer b
+             (let* ((nm (buffer-name b))
+                    (mm major-mode)
+                    (skip
+                     (or (and (boundp 'carriage-visible-exclude-current-buffer)
+                              carriage-visible-exclude-current-buffer
+                              (eq b buf))
+                         (minibufferp b)
+                         (eq mm 'exwm-mode)
+                         (and (listp ignored-modes) (memq mm ignored-modes))
+                         (and (listp ignored-names)
+                              (seq-some (lambda (rx) (and (stringp rx) (string-match-p rx nm)))
+                                        ignored-names)))))
+               (unless skip
+                 (cond
+                  ((and (stringp buffer-file-name) (not (file-remote-p buffer-file-name)))
+                   (when (carriage-context--count-fast-under-file-limit-p state)
+                     (setq state (carriage-context--count-fast-process-path buffer-file-name state 'visible))))
+                  (t
+                   (when (carriage-context--count-fast-under-file-limit-p state)
+                     (setq state (carriage-context--count-fast-process-visible-buffer b state))))))))))
+       nil (selected-frame)))
+    state))
+
+(defun carriage-context--count-fast-collect-patched (buf state)
+  "Process patched files from BUF into STATE."
+  (if (and (plist-get state :include-patched)
+           (carriage-context--count-fast-under-file-limit-p state))
+      (let ((pat (ignore-errors (carriage-context--patched-files buf))))
+        (carriage-context--count-fast-process-paths pat state 'doc))
+    state))
+
+(defun carriage-context--count-fast-collect-doc (buf state)
+  "Process doc-context files and warnings from BUF into STATE."
+  (when (and (plist-get state :include-doc)
+             (carriage-context--count-fast-under-file-limit-p state))
+    ;; Carry doc parse warnings into count warnings so UI explains inflated Ctx.
+    (dolist (w (ignore-errors (carriage-context--doc-warnings buf)))
+      (when (and (stringp w) (not (string-empty-p w)))
+        (setq state (carriage-context--count-fast-push-warning w state))))
+    (let ((doc (ignore-errors (carriage-context--doc-paths buf))))
+      (setq state (carriage-context--count-fast-process-paths doc state 'doc))))
+  state)
+
+(defun carriage-context--count-fast-collect-gptel (state)
+  "Process GPTel context files into STATE."
+  (if (and (plist-get state :include-gptel)
+           (carriage-context--count-fast-under-file-limit-p state))
+      (let ((gpt (ignore-errors (carriage-context--maybe-gptel-files))))
+        (carriage-context--count-fast-process-paths gpt state 'gptel))
+    state))
+
 (defun carriage-context--count-fast-exec (buf root inc-gpt inc-doc inc-vis inc-patched)
   "Compute a fast count-compatible result for BUF/ROOT/toggles without reading file contents."
   (let* ((state (carriage-context--count-fast-init buf root inc-gpt inc-doc inc-vis inc-patched))
@@ -1761,60 +1942,11 @@ SOURCE is used only for source classification maps."
          (max-bytes (plist-get state :max-bytes))
          (_ (carriage-context--dbg "count-fast: root=%s include{gpt=%s,doc=%s,vis=%s,patched=%s} limits{files=%s,bytes=%s}"
                                    (plist-get state :root) inc-gpt inc-doc inc-vis inc-patched max-files max-bytes)))
-    ;; 1a) Patched files (treated as doc precedence)
-    (when (and inc-patched (carriage-context--count-fast-under-file-limit-p state))
-      (let ((pat (ignore-errors (carriage-context--patched-files buf))))
-        (dolist (p pat)
-          (when (carriage-context--count-fast-under-file-limit-p state)
-            (setq state (carriage-context--count-fast-process-path p state 'doc))))))
-    ;; 1b) Doc paths
-    (when (and inc-doc (carriage-context--count-fast-under-file-limit-p state))
-      ;; Carry doc parse warnings into count warnings so UI explains inflated Ctx.
-      (dolist (w (ignore-errors (carriage-context--doc-warnings buf)))
-        (when (and (stringp w) (not (string-empty-p w)))
-          (setq state (carriage-context--count-fast-push-warning w state))))
-      (let ((doc (ignore-errors (carriage-context--doc-paths buf))))
-        (dolist (p doc)
-          (when (carriage-context--count-fast-under-file-limit-p state)
-            (setq state (carriage-context--count-fast-process-path p state 'doc))))))
-    ;; 2) Visible buffers
+    (setq state (carriage-context--count-fast-collect-patched buf state))
+    (setq state (carriage-context--count-fast-collect-doc buf state))
     (when (and inc-vis (carriage-context--count-fast-under-file-limit-p state))
-      (let ((seen (make-hash-table :test 'eq))
-            (ignored-modes (and (boundp 'carriage-visible-ignore-modes) carriage-visible-ignore-modes))
-            (ignored-names (and (boundp 'carriage-visible-ignore-buffer-regexps) carriage-visible-ignore-buffer-regexps)))
-        (walk-windows
-         (lambda (w)
-           (let ((b (window-buffer w)))
-             (unless (gethash b seen)
-               (puthash b t seen)
-               (with-current-buffer b
-                 (let* ((nm (buffer-name b))
-                        (mm major-mode)
-                        (skip
-                         (or (and (boundp 'carriage-visible-exclude-current-buffer)
-                                  carriage-visible-exclude-current-buffer
-                                  (eq b buf))
-                             (minibufferp b)
-                             (eq mm 'exwm-mode)
-                             (and (listp ignored-modes) (memq mm ignored-modes))
-                             (and (listp ignored-names)
-                                  (seq-some (lambda (rx) (and (stringp rx) (string-match-p rx nm)))
-                                            ignored-names)))))
-                   (unless skip
-                     (cond
-                      ((and (stringp buffer-file-name) (not (file-remote-p buffer-file-name)))
-                       (when (carriage-context--count-fast-under-file-limit-p state)
-                         (setq state (carriage-context--count-fast-process-path buffer-file-name state 'visible))))
-                      (t
-                       (when (carriage-context--count-fast-under-file-limit-p state)
-                         (setq state (carriage-context--count-fast-process-visible-buffer b state))))))))))))
-        nil (selected-frame)))
-    ;; 3) GPTel context last
-    (when (and inc-gpt (carriage-context--count-fast-under-file-limit-p state))
-      (let ((gpt (ignore-errors (carriage-context--maybe-gptel-files))))
-        (dolist (p gpt)
-          (when (carriage-context--count-fast-under-file-limit-p state)
-            (setq state (carriage-context--count-fast-process-path p state 'gptel))))))
+      (setq state (carriage-context--count-fast-collect-visible buf state)))
+    (setq state (carriage-context--count-fast-collect-gptel state))
     (carriage-context--count-fast-finalize state)))
 
 (defun carriage-context-count (&optional buffer _point)
@@ -2486,8 +2618,8 @@ Best-effort: never signals. Returns nil when:
 (defvar carriage-context--project-map-trace-installed nil
   "Non-nil when Project Map trace advices were installed for this Emacs session.")
 
-(defun carriage-context--pm--trace-wrap (fn)
-  "Return an around-advice wrapper for FN that logs timing/result summary.
+(defun carriage-context--pm--trace-wrap (name)
+  "Return an around-advice wrapper for function NAME that logs timing/result summary.
 
 Always logs failures/empty results. Logs successes only when
 `carriage-context-project-map-trace' is non-nil."
@@ -2505,27 +2637,27 @@ Always logs failures/empty results. Logs successes only when
       (let* ((elapsed (truncate (* 1000 (max 0.0 (- (float-time) t0)))))
              (len (carriage-context--pm--len ret))
              (kind (cond
-                    (err 'error)
+                    (and err 'error)
                     ((null ret) 'nil)
                     ((stringp ret) 'string)
                     ((listp ret) 'list)
                     ((hash-table-p ret) 'hash)
                     (t 'other)))
-             (dbg (list :fn fn :root root :elapsed-ms elapsed :kind kind :len len)))
+             (dbg (list :fn name :root root :elapsed-ms elapsed :kind kind :len len)))
         (carriage-context--pm-note dbg)
         ;; Always log when empty/error; log successes only in trace mode.
         (when (or carriage-context-project-map-trace
                   err
                   (memq kind '(nil error))
-                  ;; Special: empty begin_map block string still looks like "string" but is tiny.
-                  (and (eq fn 'carriage-context-project-map-block)
+                  ;; Special: empty begin_map block string still looks like \"string\" but is tiny.
+                  (and (eq name 'carriage-context-project-map-block)
                        (stringp ret)
                        (< (length ret) 40)))
-          (carriage-context--pm-log "%s: root=%s elapsed=%sms kind=%s len=%s%s"
-                                    fn (or root "-") elapsed kind len
+          (carriage-context--pm-log \"%s: root=%s elapsed=%sms kind=%s len=%s%s\"
+                                    name (or root \"-\") elapsed kind len
                                     (if err
-                                        (format " err=%s" (error-message-string err))
-                                      ""))))
+                                        (format \" err=%s\" (error-message-string err))
+                                      \"\"))))
       ret)))
 
 (unless carriage-context--project-map-trace-installed

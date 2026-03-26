@@ -148,5 +148,32 @@
                               (string-match-p "unterminated" w)))
                        warns)))))
 
+(ert-deftest carriage-context-format-marks-in-file-body-as-current-text ()
+  "Formatted context must explicitly mark file bodies as current text present in this request."
+  (let* ((ctx (list :files (list (list :rel "lisp/x.el"
+                                       :true "/tmp/lisp/x.el"
+                                       :content "(message \"hi\")"))
+                    :warnings nil
+                    :omitted 0
+                    :stats (list :total-bytes 14 :included 1 :skipped 0)))
+         (out (carriage-context-format ctx :where 'system)))
+    (should (stringp out))
+    (should (string-match-p "In file lisp/x\\.el:" out))
+    (should (string-match-p "CURRENT TEXT PRESENT IN THIS REQUEST" out))
+    (should (string-match-p "(message \"hi\")" out))))
+
+(ert-deftest carriage-context-format-marks-in-file-body-as-authoritative-text ()
+  "Formatted context must explicitly say that visible file text is authoritative and not missing."
+  (let* ((ctx (list :files (list (list :rel "lisp/x.el"
+                                       :true "/tmp/lisp/x.el"
+                                       :content "(message \"hi\")"))
+                    :warnings nil
+                    :omitted 0
+                    :stats (list :total-bytes 14 :included 1 :skipped 0)))
+         (out (carriage-context-format ctx :where 'system)))
+    (should (stringp out))
+    (should (string-match-p "AUTHORITATIVE CURRENT TEXT FOR THIS PATH" out))
+    (should (string-match-p "MUST NOT CLAIM THAT THIS FILE TEXT IS MISSING" out))))
+
 (provide 'carriage-context-tests)
 ;;; carriage-context-tests.el ends here

@@ -2265,17 +2265,41 @@ Never signals."
   (and (listp plist) (plist-get plist :applied)))
 
 (defun carriage--patch--applied-desc (plist)
-  "Return normalized description for an applied patch PLIST."
+  "Return normalized description string for patch PLIST.
+
+Prefers :description, then :result. Falls back to \"(no description)\".
+
+Note: function name is kept for backward compatibility."
   (let* ((desc (or (and (listp plist)
                         (or (plist-get plist :description)
                             (plist-get plist :result)))
-                   "Applied"))
+                   "(no description)"))
          (s (string-trim (format "%s" desc))))
-    (if (string-empty-p s) "Applied" s)))
+    (if (string-empty-p s) "(no description)" s)))
 
-(defun carriage--patch--summary-line (desc)
-  "Build the one-line summary placeholder for applied patch body."
-  (format ";; applied: %s (content omitted)\n" desc))
+(defun carriage--patch--keep-p (plist)
+  "Return non-nil when PLIST requests keeping this patch block in outgoing payload.
+Escape hatch: set :keep t in the begin_patch header."
+  (and (listp plist) (plist-get plist :keep)))
+
+(defun carriage--patch--history-summary (plist)
+  "Return one-line history marker string for patch header PLIST."
+  (let* ((desc (carriage--patch--applied-desc plist))
+         (target
+          (cond
+           ((eq (plist-get plist :op) 'rename)
+            (let ((a (plist-get plist :from))
+                  (b (plist-get plist :to)))
+              (string-trim
+               (format "%s → %s"
+                       (or (and (stringp a) a) "-")
+                       (or (and (stringp b) b) "-")))))
+           ((stringp (plist-get plist :path)) (plist-get plist :path))
+           ((stringp (plist-get plist :file)) (plist-get plist :file))
+           (t "-"))))
+    (format ";; patch history: %s — %s\n"
+            (string-trim (format "%s" target))
+            (string-trim (format "%s" desc)))))
 
 (defun carriage--patch--body-begin-pos (beg-line-end)
   "Compute body start position given BEG-LINE-END (end of #+begin_patch line)."
@@ -2318,6 +2342,42 @@ Never signals."
         (goto-char (min (point-max) (1+ (line-end-position))))
         (point))
     (carriage--patch--goto-next-line-safe)))
+
+(defun carriage--payload-summarize-patch-blocks (text)
+  "Replace #+begin_patch blocks in TEXT with one-line history comments.
+
+Policy:
+- Collapse ANY begin_patch..end_patch block into a single line:
+    ;; patch history: <target> — <description>
+- Escape hatch: if header contains :keep t, keep that patch block verbatim.
+- If end marker is missing, treat the block as lasting until end-of-text.
+
+Goal: prevent old/failed patches in the buffer from acting as \"project state\" in the next prompt."
+  (with-temp-buffer
+    (insert (or text ""))
+    (goto-char (point-min))
+    (let ((case-fold-search t))
+      (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
+        (let* ((beg-line-beg (line-beginning-position))
+               (sexp-str (match-string 1))
+               (plist (carriage--patch--read-header-plist sexp-str)))
+          (if (carriage--patch--keep-p plist)
+              ;; Keep verbatim; advance past end marker if present to avoid infinite loop.
+              (carriage--patch--goto-after-end-line)
+            (let* ((summary (carriage--patch--history-summary plist))
+                   (block-end
+                    (save-excursion
+                      (goto-char (line-end-position))
+                      (forward-line 1)
+                      (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                          (min (point-max) (1+ (line-end-position)))
+                        (point-max)))))
+              (delete-region beg-line-beg block-end)
+              (goto-char beg-line-beg)
+              (insert summary)
+              ;; Continue scanning after inserted summary.
+              (goto-char (min (point-max) (+ beg-line-beg (length summary)))))))))
+    (buffer-substring-no-properties (point-min) (point-max))))
 
 (defun carriage--payload-summarize-applied-patches (text &optional _keep-applied-bodies)
   "Replace applied #+begin_patch blocks in TEXT with one-line history comments.
@@ -2374,11 +2434,86 @@ _KEEṔ-APPLIED-BODIES is deprecated and ignored (applied patches are never sent
               (goto-char (min (point-max) (+ beg-line-beg (length summary)))))))))
     (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun carriage--payload-summarize-patch-blocks (text)
+  "Replace #+begin_patch blocks in TEXT with one-line history comments.
+
+Policy:
+- Collapse ANY begin_patch..end_patch block into a single line:
+    ;; patch history: <target> — <description>
+- Escape hatch: if header contains :keep t, keep that patch block verbatim.
+- If end marker is missing, treat the block as lasting until end-of-text.
+
+Goal: prevent old/failed patches in the buffer from acting as \"project state\" in the next prompt."
+  (with-temp-buffer
+    (insert (or text ""))
+    (goto-char (point-min))
+    (let ((case-fold-search t))
+      (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
+        (let* ((beg-line-beg (line-beginning-position))
+               (sexp-str (match-string 1))
+               (hdr (condition-case _e
+                        (car (read-from-string sexp-str))
+                      (error nil)))
+               (plist (if (listp hdr) hdr '()))
+               (keep (plist-get plist :keep)))
+          (if keep
+              ;; Keep verbatim; advance past end marker if present to avoid infinite loop.
+              (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                  (goto-char (min (point-max) (1+ (line-end-position))))
+                (goto-char (point-max)))
+            (let* ((op0 (plist-get plist :op))
+                   (op (cond
+                        ((symbolp op0) op0)
+                        ((stringp op0) (intern op0))
+                        (t nil)))
+                   (desc (or (plist-get plist :description)
+                             (plist-get plist :result)
+                             "(no description)"))
+                   (desc (string-trim (format "%s" desc)))
+                   (desc (if (string-empty-p desc) "(no description)" desc))
+                   (target
+                    (pcase op
+                      ('rename
+                       (let ((a (plist-get plist :from))
+                             (b (plist-get plist :to)))
+                         (string-trim
+                          (format "%s → %s"
+                                  (or (and (stringp a) a) "-")
+                                  (or (and (stringp b) b) "-")))))
+                      (_
+                       (cond
+                        ((stringp (plist-get plist :path)) (plist-get plist :path))
+                        ((stringp (plist-get plist :file)) (plist-get plist :file))
+                        (t "-")))))
+                   (summary (format ";; patch history: %s — %s\n"
+                                    (string-trim (format "%s" target))
+                                    desc))
+                   (block-end
+                    (save-excursion
+                      (goto-char (line-end-position))
+                      (forward-line 1)
+                      (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
+                          (min (point-max) (1+ (line-end-position)))
+                        (point-max)))))
+              (delete-region beg-line-beg block-end)
+              (goto-char beg-line-beg)
+              (insert summary)
+              ;; Continue scanning after inserted summary.
+              (goto-char (min (point-max) (+ beg-line-beg (length summary)))))))))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
 (defun carriage--sanitize-payload-for-llm (text)
   "Return TEXT sanitized for LLM payload.
-Strips doc-state/markers and replaces applied patch blocks with one-line history comments."
-  (carriage--payload-summarize-applied-patches
-   (carriage--payload-strip-doc-state-and-markers text)))
+Strips doc-state/markers and replaces begin_patch blocks with one-line history comments.
+
+Robustness: never signal. On any summarization error, fall back to the next strategy."
+  (let* ((s (carriage--payload-strip-doc-state-and-markers text)))
+    (or (and (fboundp 'carriage--payload-summarize-patch-blocks)
+             (ignore-errors (carriage--payload-summarize-patch-blocks s)))
+        (and (fboundp 'carriage--payload-summarize-applied-patches)
+             (ignore-errors (carriage--payload-summarize-applied-patches s)))
+        s)))
+
 
 (defun carriage--context-target ()
   "Return current buffer's context injection target ('system or 'user)."
@@ -2704,6 +2839,29 @@ It is controlled by `carriage-mode-org-structure-hint' (buffer-local)."
           "- Code/commands/output must use Org src blocks: #+begin_src <lang> ... #+end_src.")
          "\n")))))
 
+(defun carriage--context-profile-symbol (&optional buffer)
+  "Return normalized context profile symbol for BUFFER (or current buffer)."
+  (with-current-buffer (or buffer (current-buffer))
+    (cond
+     ((and (boundp 'carriage-doc-context-profile)
+           (memq carriage-doc-context-profile '(p1 p3)))
+      carriage-doc-context-profile)
+     ((and (boundp 'carriage-context-profile)
+           (memq carriage-context-profile '(p1 p3)))
+      carriage-context-profile)
+     ((and (boundp 'carriage-mode-context-profile)
+           (memq carriage-mode-context-profile '(p1 p3)))
+      carriage-mode-context-profile)
+     (t 'p1))))
+
+(defun carriage--doc-context-scope-symbol (&optional buffer)
+  "Return normalized doc-context scope for BUFFER (or current buffer)."
+  (with-current-buffer (or buffer (current-buffer))
+    (if (and (boundp 'carriage-doc-context-scope)
+             (memq carriage-doc-context-scope '(all last)))
+        carriage-doc-context-scope
+      'all)))
+
 (defun carriage--build-context (source buffer)
   "Return context plist for prompt builder with at least :payload.
 SOURCE is 'buffer or 'subtree. BUFFER is the source buffer.
@@ -2715,13 +2873,46 @@ May include :context-text and :context-target per v1.1."
            (ctx-text (carriage--context-collect-and-format buffer target))
            (ctx-meta (carriage--context-meta-from-text ctx-text))
            (org-note (ignore-errors (carriage--org-structure--prompt-note buffer)))
+           (profile (carriage--context-profile-symbol buffer))
+           (doc-scope (carriage--doc-context-scope-symbol buffer))
+           (suite (and (boundp 'carriage-mode-suite) carriage-mode-suite))
            (project-state-note
             (concat
              "Project-state policy:\n"
-             "- Treat begin_context, begin_map, and applied patch history as the current project state.\n"
+             "- Treat begin_context, begin_map, begin_state_manifest, and applied patch history as the current project state.\n"
+             "- begin_map tells you only that a path exists in the project snapshot.\n"
+             "- begin_state_manifest distinguishes file existence from text availability using path|exists|has_text.\n"
+             "- If a path is present in begin_map, or begin_state_manifest says exists=true, it MUST be treated as an existing file (so :op create is forbidden for it).\n"
+             "- Sections later in this same request formatted as `In file <path>:` followed by the file body provide the CURRENT TEXT of that exact file.\n"
+             "- Seeing an `In file <path>:` section with a body means the CURRENT TEXT of that file is present in this request.\n"
+             "- The full body inside `In file <path>:` is authoritative current file text for that exact path in this request.\n"
+             "- The full body inside `In file <path>:` MUST be treated as visible context.\n"
+             "- The request may provide the matching current file body under `In file <path>:`.\n"
+             "- If this request contains an `In file <path>:` section with the file body for a path, you MUST treat that file text as visible/present in this request.\n"
+             "- Seeing an `In file <path>:` section with a body means the file text is already present in context for that exact path.\n"
+             "- An `In file <path>:` body is the actual current contents of that file in this request, not a summary, not a hint, and not merely a path mention.\n"
+             "- When an `In file <path>:` section with the file body is present, that file already has current text available in this request and must be treated as has_text=true for this request.\n"
+             "- Therefore do NOT say that file text is absent for that path, even if begin_state_manifest was omitted, stale, or says has_text=false.\n"
+             "- Do NOT claim that file text is missing when this request already contains an `In file <path>:` section with the file body.\n"
+             "- When a file body is present in such an `In file <path>:` section, treat that file as having current text available.\n"
+             "- When both begin_state_manifest and an `In file <path>:` body are present for the same path, the visible file body overrides uncertainty and confirms that current text is available in this request.\n"
+             "- If this request contains an `In file <path>:` section with the file body for a path, you MUST treat that file text as visible/present even if begin_state_manifest was omitted, stale, or says has_text=false.\n"
+             "- If the current request visibly contains `In file <path>:` with a real file body, you already see that file's text in context right now.\n"
+             "- Never say \"I do not see the file text\" or equivalent for a path whose `In file <path>:` body is present in this same request.\n"
+             "- Do NOT ask for begin_context for a path whose full current body is already present in an `In file <path>:` section in this same request.\n"
+             "- Do NOT generate edits (patch/sre/aibo/rename/delete) for a file unless its CURRENT TEXT is present in this request's context.\n"
+             "- Current text is considered present when the matching `In file <path>:` section with the file body is present in this request.\n"
+             "- If there is no current file body for it in this request, request begin_context instead of guessing.\n"
+             "- If you can see a full `In file <path>:` body for the target path in this request, you already have the required current text and must proceed from that body instead of claiming missing context.\n"
+             "- If a needed file exists but there is no matching `In file <path>:` body in this request, output ONLY begin_context with required paths (do not guess patches).\n"
              "- Do NOT generate :op create for a file that already exists in that current project state.\n"
-             "- For an existing file, use patch/sre/aibo instead of create.\n"))
-           (res (list :payload payload :org-structure-note org-note)))
+             "- For an existing file with available text, use patch/sre/aibo instead of create.\n"
+             "- For :op aibo and :op sre, use only begin_from/begin_to pairs in the patch body; never :from/:to header keys except for rename.\n"))
+           (res (list :payload payload
+                      :org-structure-note org-note
+                      :profile profile
+                      :doc-scope doc-scope
+                      :suite suite)))
       (setq ctx-text
             (if (and (stringp ctx-text) (not (string-empty-p ctx-text)))
                 (concat project-state-note "\n" ctx-text)

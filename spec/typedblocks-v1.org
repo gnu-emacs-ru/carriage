@@ -26,10 +26,10 @@ Grammar (minimal)
 - Optional header plist after begin_<type>: "(…)" — :nollm t excludes a block from payload.
 
 Allowed types (recognized)
-- task, notes, analysis, plan, verify, commands, context, patch, question, answer.
+- task, notes, analysis, plan, verify, commands, context, state_manifest, patch, question, answer.
 
 Inclusion matrix (defaults)
-- Included: task, analysis, plan, verify, context, question, answer.
+- Included: task, analysis, plan, verify, context, state_manifest, question, answer.
 - Included by flag: commands (carriage-typedblocks-include-commands t|nil, default t).
 - Excluded: notes.
 - Patch body: never included (treat as excluded regardless of flags).
@@ -45,7 +45,7 @@ Assembly rules
 
 Prompt guidance (for LLM)
 - LLM Output Contract (Typed Blocks v1):
-  • Allowed types: task, analysis, plan, verify, commands, context, question, answer, notes.
+  • Allowed types: task, analysis, plan, verify, commands, context, state_manifest, question, answer, notes.
   • Syntax only: lines starting at BOL with exactly "#+begin_<type>" … "#+end_<type>" (case-insensitive type).
   • Never include the begin_/end_ markers themselves in the payload (only the content between them is used).
 - Forbidden/negative examples (must NOT appear):

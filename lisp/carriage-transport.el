@@ -146,6 +146,24 @@ Plist keys: :ts :rid :errorp.")
 (defvar-local carriage-transport--complete-count 0
   "Number of times `carriage-transport-complete' was called in this buffer.")
 
+(defun carriage-transport--send-entry-current-p (entry-id &optional buffer)
+  "Return non-nil when ENTRY-ID is still the current send owner for BUFFER.
+This is used to ignore stale delayed/reentry callbacks from send-preparation."
+  (with-current-buffer (or buffer (current-buffer))
+    (and (stringp entry-id)
+         (boundp 'carriage--current-send-entry-id)
+         (stringp carriage--current-send-entry-id)
+         (string= entry-id carriage--current-send-entry-id))))
+
+(defun carriage-transport-invalidate-send-owner (&optional buffer)
+  "Invalidate current send owner token for BUFFER.
+This prevents stale preflight/reentry callbacks from starting a new send lifecycle
+after the request has already been completed or aborted."
+  (with-current-buffer (or buffer (current-buffer))
+    (when (boundp 'carriage--current-send-entry-id)
+      (setq carriage--current-send-entry-id nil))
+    t))
+
 (defun carriage-transport--rid-next ()
   "Generate a new transport request id (rid)."
   (setq carriage-transport--request-counter (1+ (or carriage-transport--request-counter 0)))
@@ -619,9 +637,13 @@ When BUFFER is non-nil, operate in that buffer (default is current buffer)."
           (setq carriage-transport--request-id nil)
           (setq carriage-transport--watchdog-abort-fn nil)
           (setq carriage-transport--watchdog-abort-rid nil)
+          ;; Invalidate send ownership before reopening the gate, so stale
+          ;; send-prepare/reentry callbacks cannot resurrect the just-finished send.
+          (carriage-transport-invalidate-send-owner buf)
           ;; Allow the next send only after the current request is fully finalized.
           (when (boundp 'carriage--send-in-flight)
             (setq carriage--send-in-flight nil))
+
           (when (boundp 'carriage--send-dispatch-scheduled)
             (setq carriage--send-dispatch-scheduled nil))
           (when (boundp 'carriage--active-send-generation)

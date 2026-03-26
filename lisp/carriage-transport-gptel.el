@@ -1625,7 +1625,15 @@ Generic non-image files are omitted from `gptel-context'."
                   id source (or model "—")
                   (if (stringp prompt) (number-to-string (string-bytes prompt)) "—"))
     (carriage-transport-gptel--log-procs "PROCS-START" id start-procs)
-    (carriage-register-abort-handler abort-fn)))
+    (carriage-register-abort-handler abort-fn)
+    ;; A new adapter dispatch becomes the current send owner only if the transport
+    ;; layer still considers this request active. This helps stale preflight reentry
+    ;; callbacks lose authority after completion.
+    (when (boundp 'carriage--current-send-entry-id)
+      (setq carriage--current-send-entry-id
+            (or carriage--current-send-entry-id
+                (and (boundp 'carriage--current-send-entry-id)
+                     carriage--current-send-entry-id))))))
 
 (defun carriage-transport-gptel--dispatch-start-watchdog (buffer id abort-fn)
   "Start watchdog timers for BUFFER and ID using ABORT-FN."

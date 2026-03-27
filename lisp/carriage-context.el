@@ -570,7 +570,9 @@ Policy:
   This avoids false positives in prose such as:
     \"#+begin_context blocks and full rescans...\"
 - Unterminated blocks (missing #+end_context) are ignored (no \"consume till end\")
-  and produce a warning, to avoid accidentally swallowing large parts of a document."
+  and produce a warning, to avoid accidentally swallowing large parts of a document.
+- Suspicious marker-like typos are reported as warnings to make silent context loss visible
+  (e.g. malformed lines such as \"#+begin_#+begin_context\")."
   (save-excursion
     (save-restriction
       (narrow-to-region beg end)
@@ -580,6 +582,18 @@ Policy:
             (blocks 0)
             (unterminated 0)
             (case-fold-search t))
+        ;; Surface malformed marker-like lines that would otherwise be silently ignored.
+        (goto-char (point-min))
+        (while (re-search-forward "^[ \t]*#\\+begin_[^ \t\n]*context\\b.*$" nil t)
+          (let ((ln (string-trim
+                     (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position)))))
+            (unless (string-match-p carriage-context--re-begin-context-line ln)
+              (push (format "doc-context: suspicious begin_context marker at line %d: %s"
+                            (line-number-at-pos (line-beginning-position))
+                            ln)
+                    warns))))
+        (goto-char (point-min))
         (while (re-search-forward carriage-context--re-begin-context-line nil t)
           (setq blocks (1+ blocks))
           (let* ((beg-pos (match-beginning 0))
@@ -2447,18 +2461,21 @@ Order (fastest-first, with short timeouts):
              (when (ok-files-p files)
                (carriage-context--dbg "project-map: method=%s ok files=%d elapsed=%.3fs"
                                       method (length files) dt))
-             files)))
-      ;; Important: do not use cl-return-from here (can produce no-catch in byte-compiled code).
-      (let* ((g (try 'git (lambda () (carriage-context--project-map--git-ls-files root)))))
-        (if (ok-files-p g)
-            (mk t g 'git nil)
-          (let* ((f (try 'fd (lambda () (carriage-context--project-map--fd-files root)))))
-            (if (ok-files-p f)
-                (mk t f 'fd nil)
-              (let* ((e (try 'emacs (lambda () (carriage-context--project-map--emacs-files root)))))
-                (if (ok-files-p e)
-                    (mk t e 'emacs nil)
-                  (mk nil nil 'none 'empty))))))))))
+             files))))
+    (let ((g (try 'git (lambda () (carriage-context--project-map--git-ls-files root)))))
+      (cond
+       ((ok-files-p g)
+        (mk t g 'git nil))
+       (t
+        (let ((f (try 'fd (lambda () (carriage-context--project-map--fd-files root)))))
+          (cond
+           ((ok-files-p f)
+            (mk t f 'fd nil))
+           (t
+            (let ((e (try 'emacs (lambda () (carriage-context--project-map--emacs-files root)))))
+              (if (ok-files-p e)
+                  (mk t e 'emacs nil)
+                (mk nil nil 'none 'empty)))))))))))
 
 (defun carriage-context--project-map--truncate-bytes (s max-bytes)
   "Return (cons TEXT TRUNCATEDP) truncating S to MAX-BYTES bytes deterministically."
@@ -2496,47 +2513,64 @@ Order (fastest-first, with short timeouts):
   (list :ok nil :reason 'not-allowed))
 
 (defun carriage-context--project-map--empty-result (why method elapsed)
-  "Return result plist if no files could be found for Project Map."
-  (list :ok nil :reason (or why 'empty) :method method :elapsed elapsed))
+  "Return result plist if no files could be found for Project Map.
+Always includes a diagnostic #+begin_map block so the caller can still include it
+into the request instead of silently dropping Project Map."
+  (let ((msg (concat "#+begin_map\n"
+                     (format ";; Project Map unavailable (reason: %s, method: %s, elapsed: %.3fs)\n"
+                             (or why "empty") (or method "none") (or elapsed 0.0))
+                     ";; This diagnostic block is included intentionally so absence of repo tree is visible.\n"
+                     "#+end_map\n")))
+    (list :ok nil
+          :reason (or why 'empty)
+          :method method
+          :elapsed elapsed
+          :text msg
+          :paths 0
+          :truncated t)))  ;; treat it as truncated to prevent omission downstream
 
 (defun carriage-context--project-map--assemble-block-details (files method elapsed root)
-  "Build trie, render, possibly truncate, and cache the result for ROOT."
+  "Build trie, render, possibly truncate, and cache the result for ROOT.
+
+If files is empty, returns a minimal begin_map stub with error/warning."
   (let* ((maxp (max 0 (or carriage-context-project-map-max-paths 0)))
          (maxb (max 0 (or carriage-context-project-map-max-bytes 0)))
-         (all (sort (copy-sequence files) #'string<))
-         (paths (if (and (numberp maxp) (> maxp 0) (> (length all) maxp))
-                    (cl-subseq all 0 maxp)
-                  all))
-         (trunc-paths (and (numberp maxp) (> maxp 0) (> (length all) maxp)))
-         (root-node (carriage-context--project-map--node-make)))
-    (dolist (p paths)
-      (when (and (stringp p) (not (string-empty-p p)))
-        (carriage-context--project-map--insert root-node p)))
-    (let* ((lines (carriage-context--project-map--render root-node 0))
-           (body (string-join lines "\n"))
-           (block (concat "#+begin_map\n" body "\n#+end_map\n"))
-           (tb (carriage-context--project-map--truncate-bytes block maxb))
-           (text (car tb))
-           (trunc-bytes (cdr tb))
-           (trunc (or trunc-paths trunc-bytes))
-           (rec (list :time (float-time)
-                      :text text
-                      :paths (length paths)
-                      :truncated (if trunc t nil)
-                      :method method
-                      :elapsed elapsed)))
-      (when trunc
-        (carriage-context--dbg "project-map: truncated (method=%s paths=%s bytes=%s)"
-                               method trunc-paths trunc-bytes))
-      (carriage-context--dbg "project-map: built method=%s paths=%d bytes=%d elapsed=%.3fs"
-                             method (length paths) (string-bytes (or text "")) (or elapsed 0.0))
-      (carriage-context--project-map--cache-put root rec)
-      (list :ok t
-            :text text
-            :paths (length paths)
-            :truncated (if trunc t nil)
-            :method method
-            :elapsed elapsed))))
+         (all (sort (copy-sequence files) #'string<)))
+    (if (zerop (length all))
+        (carriage-context--project-map--empty-result 'empty method elapsed)
+      (let* ((paths (if (and (numberp maxp) (> maxp 0) (> (length all) maxp))
+                        (cl-subseq all 0 maxp)
+                      all))
+             (trunc-paths (and (numberp maxp) (> maxp 0) (> (length all) maxp)))
+             (root-node (carriage-context--project-map--node-make)))
+        (dolist (p paths)
+          (when (and (stringp p) (not (string-empty-p p)))
+            (carriage-context--project-map--insert root-node p)))
+        (let* ((lines (carriage-context--project-map--render root-node 0))
+               (body (string-join lines "\n"))
+               (block (concat "#+begin_map\n" body "\n#+end_map\n"))
+               (tb (carriage-context--project-map--truncate-bytes block maxb))
+               (text (car tb))
+               (trunc-bytes (cdr tb))
+               (trunc (or trunc-paths trunc-bytes))
+               (rec (list :time (float-time)
+                          :text text
+                          :paths (length paths)
+                          :truncated (if trunc t nil)
+                          :method method
+                          :elapsed elapsed)))
+          (when trunc
+            (carriage-context--dbg "project-map: truncated (method=%s paths=%s bytes=%s)"
+                                   method trunc-paths trunc-bytes))
+          (carriage-context--dbg "project-map: built method=%s paths=%d bytes=%d elapsed=%.3fs"
+                                 method (length paths) (string-bytes (or text "")) (or elapsed 0.0))
+          (carriage-context--project-map--cache-put root rec)
+          (list :ok t
+                :text text
+                :paths (length paths)
+                :truncated (if trunc t nil)
+                :method method
+                :elapsed elapsed))))))
 
 (defun carriage-context--project-map--validate-root-or-return (root f)
   "Validate ROOT directory and call F if valid. If not valid, returns invalid-root result plist."
@@ -2596,32 +2630,43 @@ Cache & invalidation semantics:
   (create/rename/delete). This keeps the implementation simple and avoids
   background watchers in normal usage."
   (let* ((r (or root (carriage-context--project-root)))
-         (ttl (or carriage-context-project-map-cache-ttl 0.0)))
-    (carriage-context--project-map--validate-root-or-return
-     r
-     (lambda ()
-       (carriage-context--project-map--maybe-get-cache-or-return
-        r ttl
-        (lambda ()
-          (carriage-context--project-map--maybe-allow-compute-or-return
-           (lambda ()
-             (let* ((lr (carriage-context--project-map--files r)))
-               (carriage-context--project-map--build-or-empty lr r))))))))))
+         (ttl (or carriage-context-project-map-cache-ttl 0.0))
+         (invalid-root-result (carriage-context--project-map--validate-root r)))
+    (cond
+     (invalid-root-result
+      invalid-root-result)
+     (t
+      (let ((maybe-cache (carriage-context--project-map--maybe-cache-get-ok r ttl)))
+        (cond
+         (maybe-cache
+          maybe-cache)
+         ((not carriage-context--project-map-allow-compute)
+          (carriage-context--project-map--not-allowed-result))
+         (t
+          (let ((lr (carriage-context--project-map--files r)))
+            (carriage-context--project-map--build-or-empty lr r)))))))))
 
 (defun carriage-context-project-map-block (&optional root)
   "Return a `#+begin_map … #+end_map` block string for ROOT (or current project), or nil.
 
-Best-effort: never signals. Returns nil when:
-- map is not ok,
-- map is empty,
-- map computation is not allowed in current context."
-  (let* ((res (ignore-errors (carriage-context-project-map-build root))))
-    (when (and (listp res) (plist-get res :ok))
-      (let ((s (plist-get res :text))
-            (n (plist-get res :paths)))
-        (when (and (integerp n) (> n 0)
-                   (stringp s) (not (string-empty-p (string-trim s))))
-          s)))))
+Best-effort: never signals.
+
+Important:
+- For request-building paths we prefer visibility over silence.
+- Therefore, when `carriage-context-project-map-build' returns a diagnostic
+  begin_map block in :text (for example with :ok=nil and reason information),
+  this function still returns that block instead of nil."
+  (let* ((res (ignore-errors (carriage-context-project-map-build root)))
+         (s (and (listp res) (plist-get res :text)))
+         (n (and (listp res) (plist-get res :paths))))
+    (when (and (stringp s)
+               (not (string-empty-p (string-trim s)))
+               (string-match-p "#\\+begin_map\\b" s)
+               (string-match-p "#\\+end_map\\b" s)
+               (or (and (integerp n) (> n 0))
+                   ;; Allow diagnostic begin_map blocks through too.
+                   t))
+      s)))
 
 (defvar carriage-context--project-map-trace-installed nil
   "Non-nil when Project Map trace advices were installed for this Emacs session.")

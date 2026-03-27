@@ -219,7 +219,8 @@ PAIRS — список пар вида ((:from . STR) (:to . STR) (:opts . PLIST
    "- Empty TO block is allowed (delete matched text).\n"
    "- Do NOT generate unified diff (udiff) or any :op \"patch\" blocks.\n"
    "- Answer ONLY with begin_patch blocks for :op \"aibo\"; prose is allowed, tool applies ONLY blocks.\n"
-   "- Do NOT generate patches that don't change the content (no-op patches). If no changes are needed, do not output any patch block.\n"))
+   "- Do NOT generate patches that don't change the content (no-op patches). If no changes are needed, do not output any patch block.\n"
+   "- Do NOT emit any pair where the begin_from content is exactly equal to the begin_to content.\n"))
 
 ;;; Registration
 

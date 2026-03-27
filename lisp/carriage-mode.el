@@ -2653,9 +2653,13 @@ Best-effort: never signal."
                      (trunc (and (listp res) (plist-get res :truncated)))
                      (mp (and (listp res) (plist-get res :text)))
                      (mp-bytes (if (stringp mp) (string-bytes mp) 0))
-                     (ctx-bytes-pre (if (stringp ctx-text) (string-bytes ctx-text) 0)))
+                     (ctx-bytes-pre (if (stringp ctx-text) (string-bytes ctx-text) 0))
+                     (mp-block-p (and (stringp mp)
+                                      (not (string-empty-p (string-trim mp)))
+                                      (string-match-p "#\\+begin_map\\b" mp)
+                                      (string-match-p "#\\+end_map\\b" mp))))
                 (carriage-traffic-log 'out
-                                      "context: project-map build ok=%s reason=%s method=%s paths=%s truncated=%s elapsed=%.3fs (wall=%.3fs allow=%s) mp-bytes=%d map-root=%s"
+                                      "context: project-map build ok=%s reason=%s method=%s paths=%s truncated=%s elapsed=%.3fs (wall=%.3fs allow=%s) mp-bytes=%d map-root=%s block=%s"
                                       (if ok "t" "nil")
                                       (or reason "-")
                                       (or method "-")
@@ -2665,8 +2669,23 @@ Best-effort: never signal."
                                       (if (numberp dt) dt 0.0)
                                       (if (bound-and-true-p carriage-context--project-map-allow-compute) "t" "nil")
                                       mp-bytes
-                                      (or map-root "-"))
+                                      (or map-root "-")
+                                      (if mp-block-p "t" "nil"))
                 (cond
+                 (mp-block-p
+                  (carriage-traffic-log 'out
+                                        "context: project-map append into ctx-text (ctx-bytes-pre=%d root=%s ok=%s)"
+                                        ctx-bytes-pre (or map-root "-") (if ok "t" "nil"))
+                  (setq ctx-text
+                        (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
+                            (concat (string-trim-right ctx-text) "\n\n" (string-trim-right mp) "\n")
+                          (concat (string-trim-right mp) "\n")))
+                  (carriage-traffic-log 'out
+                                        "context: project-map appended (ctx-bytes-post=%d has-begin_map=%s)"
+                                        (if (stringp ctx-text) (string-bytes ctx-text) 0)
+                                        (if (and (stringp ctx-text)
+                                                 (string-match-p "#\\+begin_map\\b" ctx-text))
+                                            "t" "nil")))
                  ((not ok)
                   (carriage-traffic-log 'out "context: project-map not appended (ok=nil reason=%s root=%s)" (or reason "-") (or map-root "-"))
                   ;; Make omission visible in the actual request payload (SYSTEM/PROMPT), not only in traffic logs.
@@ -2684,26 +2703,14 @@ Best-effort: never signal."
                           (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
                               (concat (string-trim-right ctx-text) "\n" note)
                             note))))
-                 ((not (and (stringp mp) (not (string-empty-p (string-trim mp)))))
-                  (carriage-traffic-log 'out "context: project-map not appended (empty text; bytes=%d root=%s)" mp-bytes (or map-root "-"))
+                 (t
+                  (carriage-traffic-log 'out "context: project-map not appended (empty/non-block text; bytes=%d root=%s)" mp-bytes (or map-root "-"))
                   (let* ((note (format ";; Project Map omitted: empty-text bytes=%d method=%s root=%s\n"
                                        mp-bytes (or method "-") (or map-root "-"))))
                     (setq ctx-text
                           (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
                               (concat (string-trim-right ctx-text) "\n" note)
-                            note))))
-                 (t
-                  (carriage-traffic-log 'out "context: project-map append into ctx-text (ctx-bytes-pre=%d root=%s)" ctx-bytes-pre (or map-root "-"))
-                  (setq ctx-text
-                        (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
-                            (concat (string-trim-right ctx-text) "\n\n" (string-trim-right mp) "\n")
-                          (concat (string-trim-right mp) "\n")))
-                  (carriage-traffic-log 'out
-                                        "context: project-map appended (ctx-bytes-post=%d has-begin_map=%s)"
-                                        (if (stringp ctx-text) (string-bytes ctx-text) 0)
-                                        (if (and (stringp ctx-text)
-                                                 (string-match-p "#\\+begin_map\\b" ctx-text))
-                                            "t" "nil"))))))))
+                            note)))))))))
           (carriage-traffic-log 'out
                                 "context: final ctx-text bytes=%d has-begin_map=%s"
                                 (if (stringp ctx-text) (string-bytes ctx-text) 0)

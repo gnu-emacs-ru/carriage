@@ -22,8 +22,9 @@
 ;;   spec/rag-indexing-v2.org
 ;;
 ;;; Commentary:
-;; Collects context files and document paths for inclusion into LLM requests,
-;; formats context snippets, and provides a lightweight cache for file reads.
+;; Collects context file paths from document blocks and reads file contents later
+;; during request building for inclusion into LLM requests, formats context
+;; snippets, and provides a lightweight cache for file reads.
 ;;
 ;;; Code:
 (require 'cl-lib)
@@ -139,6 +140,8 @@ This helps avoid self-duplication and reduces noise/budget usage."
 
 (defcustom carriage-doc-context-scope 'all
   "Scope for document (#+begin_context) collection: 'all or 'last.
+Important: #+begin_context stores only file paths, not embedded file contents.
+Actual file text is read later only during request/context collection.
 When 'all, collect paths from all #+begin_context blocks in the buffer.
 When 'last, collect paths only from the last #+begin_context block in the buffer
 (always the last block in the buffer; independent of point)."
@@ -454,10 +457,78 @@ This is a troubleshooting aid. Typical keys:
 
 (defun carriage-context--pm-log (fmt &rest args)
   "Log Project Map diagnostics. Never signals."
-  (condition-case _
-      (when (require 'carriage-logging nil t)
-        (apply #'carriage-log (concat "ProjectMap: " fmt) args))
+  (condition-case _e
+      (let ((msg (apply #'carriage-context--pm-fmt fmt args)))
+        (when (require 'carriage-logging nil t)
+          (carriage-log "%s" (concat "ProjectMap: " msg))))
     (error nil)))
+
+(defun carriage-context--pm-fmt (fmt &rest args)
+  "Best-effort formatter for Project Map logs. Never signals."
+  (condition-case _e
+      (cond
+       ((stringp fmt)
+        (condition-case err
+            (apply #'format fmt args)
+          (error
+           (format "fmt-error fmt=%S args=%S err=%s"
+                   fmt args (error-message-string err)))))
+       (t
+        (format "fmt-not-string fmt=%S args=%S" fmt args)))
+    (error
+     (format "fmt-wrapper-error fmt=%S args=%S"
+             fmt args))))
+
+(defun carriage-context--pm-logf (fmt &rest args)
+  "Log Project Map diagnostics using a safe formatting layer. Never signals."
+  (condition-case _e
+      (let ((msg (apply #'carriage-context--pm-fmt fmt args)))
+        (carriage-context--pm-log "%s" msg))
+    (error nil)))
+
+(defun carriage-context--project-map-disable-broken-trace-advice ()
+  "Remove known legacy/broken Project Map tracing advices from file-listing functions.
+
+Older debug wrappers could throw during logging and accidentally turn successful
+file listings into nil/empty results. This cleanup is fail-open and best-effort:
+if an advice cannot be inspected or removed, ignore it."
+  (let ((known-advices
+         '(carriage-context--project-map-trace-around
+           carriage-context--pm-trace-around
+           carriage-context--project-map-debug-around
+           carriage-context--pm-debug-around
+           carriage-context--project-map-log-around
+           carriage-context--pm-log-around)))
+    (dolist (fn '(carriage-context--project-map--git-ls-files
+                  carriage-context--project-map--fd-files
+                  carriage-context--project-map--emacs-files))
+      (when (fboundp fn)
+        (dolist (ad known-advices)
+          (when (and (symbolp ad) (advice-member-p ad fn))
+            (ignore-errors (advice-remove fn ad))
+            (carriage-context--pm-logf
+             "removed legacy trace advice fn=%S advice=%S"
+             fn ad)))
+        ;; Defensive cleanup: some older builds installed anonymous/lambda
+        ;; around-advices that produce repeated trace lines like:
+        ;;   \"carriage-context--project-map--git-ls-files: ... kind=nil len=0\"
+        ;; and can accidentally convert successful file lists into nil.
+        ;; Remove any remaining non-core around-advice from the three file-listing
+        ;; functions, keeping only the current function definition.
+        (ignore-errors
+          (advice-mapc
+           (lambda (ad _props)
+             (when (and ad
+                        (not (memq ad known-advices))
+                        (not (eq ad #'ignore)))
+               (ignore-errors (advice-remove fn ad))
+               (carriage-context--pm-logf
+                "removed unknown trace advice fn=%S advice=%S"
+                fn ad)))
+           fn)))))
+  t)
+
+(carriage-context--project-map-disable-broken-trace-advice)
 
 (defun carriage-context--pm-note (plist &optional note)
   "Store PLIST as last Project Map debug info, optionally with NOTE."
@@ -612,7 +683,7 @@ Policy:
                   (while (< (point) block-end)
                     (let ((ln (buffer-substring-no-properties
                                (line-beginning-position) (line-end-position))))
-                      (unless (or (string-match-p "^[ \t]*\\(#\\|;\\|$\\)" ln))
+                      (unless (or (string-match-p "^[ \t]*\\(#\\|;;\\|$\\)" ln))
                         (push (string-trim ln) paths)))
                     (forward-line 1)))))))
         (let ((res (delete-dups (delq nil (nreverse paths)))))
@@ -1560,7 +1631,15 @@ is used for the next iteration and it must contain the full list of needed paths
             (mapcar
              (lambda (f)
                (let* ((rel (or (plist-get f :rel) ""))
-                      (exists (if (string-prefix-p "visible:/" rel) "false" "true"))
+                      (ex (cond
+                           ;; Visible pseudo-paths are never filesystem files.
+                           ((string-prefix-p "visible:/" rel) nil)
+                           ;; Prefer explicit collector signal.
+                           ((plist-member f :exists) (plist-get f :exists))
+                           ;; Fallback: if we have a truename string, treat as existing.
+                           ((stringp (plist-get f :true)) t)
+                           (t nil)))
+                      (exists (if ex "true" "false"))
                       (has-text (if (stringp (plist-get f :content)) "true" "false")))
                  (format "%s|%s|%s" rel exists has-text)))
              files))
@@ -2287,10 +2366,22 @@ Node is a plist: (:dirs HASH :files HASH)."
                 (setq node child))))
           (setq i (1+ i)))))))
 
+(defun carriage-context--hash-table-keys (h)
+  "Return list of keys of hash table H.
+Compatibility helper: Emacs 27 lacks `hash-table-keys'."
+  (let (ks)
+    (when (hash-table-p h)
+      (maphash (lambda (k _v) (push k ks)) h))
+    ks))
+
 (defun carriage-context--project-map--sorted-keys (h)
-  "Return hash-table keys of H sorted lexicographically."
+  "Return hash-table keys of H sorted lexicographically.
+Compatibility: Emacs 27 lacks `hash-table-keys`."
   (when (hash-table-p h)
-    (sort (hash-table-keys h) #'string<)))
+    (sort (if (fboundp 'hash-table-keys)
+              (hash-table-keys h)
+            (carriage-context--hash-table-keys h))
+          #'string<)))
 
 (defun carriage-context--project-map--render (node depth)
   "Render NODE trie to a list of lines (strings), with DEPTH indentation."
@@ -2373,21 +2464,39 @@ Best-effort: never signals."
 
 (defun carriage-context--project-map--git-ls-files (root)
   "Return list of repo-relative files for ROOT via git ls-files, or nil on failure.
-Never signals. Returns nil also when list is empty (to enable fallbacks)."
+Never signals. Returns nil also when list is empty (to enable fallbacks).
+
+Important:
+- Git is an optional fast path only.
+- Absence of .git or git helper availability MUST NOT be treated as an error here;
+  callers are expected to continue with fd / Emacs directory-walk fallbacks."
   (cl-block carriage-context--project-map--git-ls-files
-    (condition-case _e
+    (condition-case e
         (progn
           (when (or (file-remote-p root) (not (file-directory-p root)))
+            (carriage-context--pm-logf "git-ls-files skipped invalid-root root=%S" root)
             (cl-return-from carriage-context--project-map--git-ls-files nil))
-          ;; Fast repo check without spawning git.
+          ;; No git repo? This is not a hard failure: just let outer code try fallbacks.
           (unless (locate-dominating-file root ".git")
+            (carriage-context--dbg "project-map: git skipped (no .git under %s)" root)
+            (carriage-context--pm-logf "git-ls-files skipped no-dot-git root=%S" root)
             (cl-return-from carriage-context--project-map--git-ls-files nil))
           (when (not (fboundp 'carriage--call-git))
+            (carriage-context--dbg "project-map: git skipped (carriage--call-git unavailable)")
+            (carriage-context--pm-logf "git-ls-files skipped helper-unavailable")
             (cl-return-from carriage-context--project-map--git-ls-files nil))
-          (let* ((carriage-mode-git-timeout-seconds (or carriage-context-project-map-git-timeout-seconds 1.5))
+          (let* ((carriage-mode-git-timeout-seconds
+                  (or carriage-context-project-map-git-timeout-seconds 1.5))
                  (res (carriage--call-git root "ls-files" "-co" "--exclude-standard"))
                  (exit (plist-get res :exit))
-                 (out (plist-get res :stdout)))
+                 (out (plist-get res :stdout))
+                 (errout (plist-get res :stderr)))
+            (carriage-context--pm-logf
+             "git-ls-files raw exit=%S stdout-len=%S stderr-len=%S root=%S"
+             exit
+             (and (stringp out) (length out))
+             (and (stringp errout) (length errout))
+             root)
             (when (and (numberp exit) (zerop exit) (stringp out))
               (let* ((lines (split-string out "\n" t))
                      (files
@@ -2396,11 +2505,21 @@ Never signals. Returns nil also when list is empty (to enable fallbacks)."
                          (or (string-empty-p p)
                              (string-prefix-p ".git/" p)
                              (string= p ".git")))
-                       (mapcar (lambda (s) (replace-regexp-in-string "\\\\" "/" (string-trim s)))
+                       (mapcar (lambda (s)
+                                 (replace-regexp-in-string "\\\\" "/" (string-trim s)))
                                lines))))
+                (carriage-context--pm-logf
+                 "git-ls-files parsed lines=%S files=%S first=%S"
+                 (length lines)
+                 (length files)
+                 (car files))
                 (when (> (length files) 0)
                   files)))))
-      (error nil))))
+      (error
+       (carriage-context--pm-logf "git-ls-files error root=%S err=%s"
+                                  root (error-message-string e))
+       nil))))
+
 
 (defun carriage-context--project-map--fd-files (root)
   "Return list of repo-relative files for ROOT using `fd`, or nil.
@@ -2408,13 +2527,20 @@ Never signals. Returns nil also when list is empty (to enable fallbacks)."
 Notes:
 - `fd` is optional; this is a best-effort speed fallback.
 - Runs with `-H` to include hidden files but still respects ignore files."
-  (condition-case _e
+  (condition-case e
       (when (and (stringp root) (file-directory-p root) (not (file-remote-p root))
                  (executable-find "fd"))
         (let* ((res (carriage-context--project-map--call
                      root "fd" (list "-t" "f" "-H" ".") carriage-context-project-map-fd-timeout-seconds))
                (exit (plist-get res :exit))
-               (out (plist-get res :stdout)))
+               (out (plist-get res :stdout))
+               (errout (plist-get res :stderr)))
+          (carriage-context--pm-logf
+           "fd-files raw exit=%S stdout-len=%S stderr-len=%S root=%S"
+           exit
+           (and (stringp out) (length out))
+           (and (stringp errout) (length errout))
+           root)
           (when (and (numberp exit) (zerop exit) (stringp out))
             (let* ((lines (split-string out "\n" t))
                    (paths
@@ -2425,9 +2551,17 @@ Notes:
                            (string= p ".git")))
                      (mapcar (lambda (s) (replace-regexp-in-string "\\\\" "/" (string-trim s)))
                              lines))))
+              (carriage-context--pm-logf
+               "fd-files parsed lines=%S files=%S first=%S"
+               (length lines)
+               (length paths)
+               (car paths))
               (when (> (length paths) 0)
                 paths)))))
-    (error nil)))
+    (error
+     (carriage-context--pm-logf "fd-files error root=%S err=%s"
+                                root (error-message-string e))
+     nil)))
 
 (defun carriage-context--project-map--skip-dir-p (name)
   "Return non-nil when directory NAME should be skipped in Emacs fallback walk."
@@ -2441,13 +2575,16 @@ This is the last-resort fallback when git/fd are unavailable or failed.
 It enforces a soft time budget and stops when max-paths is reached.
 
 Best-effort: never signals."
-  (condition-case _e
+  (condition-case e
       (when (and (stringp root) (file-directory-p root) (not (file-remote-p root)))
         (let* ((start (float-time))
                (budget (max 0.05 (float (or carriage-context-project-map-emacs-walk-max-seconds 0.8))))
                (maxp (max 0 (or carriage-context-project-map-max-paths 0)))
                (acc '())
                (stack (list (file-name-as-directory (expand-file-name root)))))
+          (carriage-context--pm-logf
+           "emacs-files start root=%S budget=%S max-paths=%S"
+           root budget maxp)
           (while (and stack
                       (or (<= maxp 0) (< (length acc) maxp))
                       (< (- (float-time) start) budget))
@@ -2466,9 +2603,18 @@ Best-effort: never signals."
                      (t nil)))))))
           (setq acc (delete-dups (mapcar (lambda (s) (replace-regexp-in-string "\\\\" "/" s)) acc)))
           (setq acc (sort acc #'string<))
+          (carriage-context--pm-logf
+           "emacs-files done root=%S files=%S elapsed=%.3fs first=%S"
+           root
+           (length acc)
+           (- (float-time) start)
+           (car acc))
           (when (> (length acc) 0)
             acc)))
-    (error nil)))
+    (error
+     (carriage-context--pm-logf "emacs-files error root=%S err=%s"
+                                root (error-message-string e))
+     nil)))
 
 (defun carriage-context--project-map--files (root)
   "Return plist describing Project Map file listing for ROOT.
@@ -2485,6 +2631,7 @@ Order (fastest-first, with short timeouts):
 2) fd (usually fast; respects ignore files)
 3) Emacs directory walk (last resort; may be slower)."
   (let* ((t0 (float-time)))
+    (carriage-context--project-map-disable-broken-trace-advice)
     (cl-labels
         ((mk (ok files method reason)
            (list :ok ok
@@ -2495,26 +2642,33 @@ Order (fastest-first, with short timeouts):
          (ok-files-p (x) (and (listp x) (> (length x) 0)))
          (try (method thunk)
            (let* ((t1 (float-time))
-                  (files (ignore-errors (funcall thunk)))
+                  (files
+                   (condition-case e
+                       (funcall thunk)
+                     (error
+                      (carriage-context--pm-logf
+                       "files/%s error root=%S err=%s"
+                       method root (error-message-string e))
+                      nil)))
                   (dt (- (float-time) t1)))
              (when (ok-files-p files)
                (carriage-context--dbg "project-map: method=%s ok files=%d elapsed=%.3fs"
                                       method (length files) dt))
-             files))))
-    (let ((g (try 'git (lambda () (carriage-context--project-map--git-ls-files root)))))
-      (cond
-       ((ok-files-p g)
-        (mk t g 'git nil))
-       (t
-        (let ((f (try 'fd (lambda () (carriage-context--project-map--fd-files root)))))
-          (cond
-           ((ok-files-p f)
-            (mk t f 'fd nil))
-           (t
-            (let ((e (try 'emacs (lambda () (carriage-context--project-map--emacs-files root)))))
-              (if (ok-files-p e)
-                  (mk t e 'emacs nil)
-                (mk nil nil 'none 'empty)))))))))))
+             files)))
+      (let ((g (try 'git (lambda () (carriage-context--project-map--git-ls-files root)))))
+        (cond
+         ((ok-files-p g)
+          (mk t g 'git nil))
+         (t
+          (let ((f (try 'fd (lambda () (carriage-context--project-map--fd-files root)))))
+            (cond
+             ((ok-files-p f)
+              (mk t f 'fd nil))
+             (t
+              (let ((e (try 'emacs (lambda () (carriage-context--project-map--emacs-files root)))))
+                (if (ok-files-p e)
+                    (mk t e 'emacs nil)
+                  (mk nil nil 'none 'empty))))))))))))
 
 (defun carriage-context--project-map--truncate-bytes (s max-bytes)
   "Return (cons TEXT TRUNCATEDP) truncating S to MAX-BYTES bytes deterministically."
@@ -2548,8 +2702,17 @@ Order (fastest-first, with short timeouts):
       (append (list :ok t) ce))))
 
 (defun carriage-context--project-map--not-allowed-result ()
-  "Return result plist for Project Map when computation is not allowed."
-  (list :ok nil :reason 'not-allowed))
+  "Return result plist for Project Map when computation is not allowed.
+Fail-open: includes a minimal diagnostic begin_map block so the caller can
+include it into the request instead of silently dropping Project Map."
+  (list :ok nil
+        :reason 'not-allowed
+        :text (concat "#+begin_map\n"
+                      ";; Project Map not available (cache miss; not-allowed during redisplay/timer)\n"
+                      ";; Retry with allow-compute=t during the send pipeline.\n"
+                      "#+end_map\n")
+        :paths 0
+        :truncated t))
 
 (defun carriage-context--project-map--empty-result (why method elapsed)
   "Return result plist if no files could be found for Project Map.
@@ -2599,10 +2762,10 @@ If files is empty, returns a minimal begin_map stub with error/warning."
                           :method method
                           :elapsed elapsed)))
           (when trunc
-            (carriage-context--dbg "project-map: truncated (method=%s paths=%s bytes=%s)"
-                                   method trunc-paths trunc-bytes))
-          (carriage-context--dbg "project-map: built method=%s paths=%d bytes=%d elapsed=%.3fs"
-                                 method (length paths) (string-bytes (or text "")) (or elapsed 0.0))
+            (carriage-context--pm-logf "truncated (method=%s paths=%s bytes=%s)"
+                                       method trunc-paths trunc-bytes))
+          (carriage-context--pm-logf "built method=%s paths=%d bytes=%d elapsed=%.3fs"
+                                     method (length paths) (string-bytes (or text "")) (or elapsed 0.0))
           (carriage-context--project-map--cache-put root rec)
           (list :ok t
                 :text text
@@ -2642,8 +2805,8 @@ If a fresh cache record is found, returns it early."
     (if (and ok (listp files) (> (length files) 0))
         (carriage-context--project-map--assemble-block-details files method elapsed r)
       (progn
-        (carriage-context--dbg "project-map: omitted reason=%s method=%s elapsed=%.3fs root=%s"
-                               why method (or elapsed 0.0) r)
+        (carriage-context--pm-logf "omitted reason=%s method=%s elapsed=%.3fs root=%s"
+                                   why method (or elapsed 0.0) r)
         (carriage-context--project-map--empty-result why method elapsed)))))
 
 (defun carriage-context-project-map-build (&optional root &rest _args)
@@ -2707,63 +2870,55 @@ Important:
                    t))
       s)))
 
-(defvar carriage-context--project-map-trace-installed nil
-  "Non-nil when Project Map trace advices were installed for this Emacs session.")
+;;;###autoload
+(defun carriage-context-project-map-diagnose (&optional root)
+  "Diagnose Project Map building for ROOT (or current project root) and print a plist.
 
-(defun carriage-context--pm--trace-wrap (name)
-  "Return an around-advice wrapper for function NAME that logs timing/result summary.
+This helper is intended for interactive troubleshooting of cases where logs show
+successful file listing, but `begin_map' is still absent from the final request.
 
-Always logs failures/empty results. Logs successes only when
-`carriage-context-project-map-trace' is non-nil."
-  (lambda (orig &rest args)
-    (let* ((t0 (float-time))
-           (root (ignore-errors (carriage-context--project-root)))
-           (ret nil)
-           (err nil))
-      (condition-case e
-          (setq ret (apply orig args))
-        (error
-         ;; Project-map helpers should be best-effort and must not break UI/send.
-         (setq err e)
-         (setq ret nil)))
-      (let* ((elapsed (truncate (* 1000 (max 0.0 (- (float-time) t0)))))
-             (len (carriage-context--pm--len ret))
-             (kind (cond
-                    (and err 'error)
-                    ((null ret) 'nil)
-                    ((stringp ret) 'string)
-                    ((listp ret) 'list)
-                    ((hash-table-p ret) 'hash)
-                    (t 'other)))
-             (dbg (list :fn name :root root :elapsed-ms elapsed :kind kind :len len)))
-        (carriage-context--pm-note dbg)
-        ;; Always log when empty/error; log successes only in trace mode.
-        (when (or carriage-context-project-map-trace
-                  err
-                  (memq kind '(nil error))
-                  ;; Special: empty begin_map block string still looks like \"string\" but is tiny.
-                  (and (eq name 'carriage-context-project-map-block)
-                       (stringp ret)
-                       (< (length ret) 40)))
-          (carriage-context--pm-log \"%s: root=%s elapsed=%sms kind=%s len=%s%s\"
-                                    name (or root \"-\") elapsed kind len
-                                    (if err
-                                        (format \" err=%s\" (error-message-string err))
-                                      \"\"))))
-      ret)))
+The returned plist contains:
+- :root
+- :cache-hit
+- :files-ok / :files-method / :files-count / :files-reason
+- :build-ok / :build-paths / :build-truncated / :has-begin-map
+- :text-bytes
+- :sample
 
-(unless carriage-context--project-map-trace-installed
-  (setq carriage-context--project-map-trace-installed t)
-  ;; Attach tracing to whichever functions exist in the current build.
-  (dolist (fn '(carriage-context-project-map-block
-                carriage-context--project-map--get-file-list
-                carriage-context--project-map--git-ls-files
-                carriage-context--project-map--fd-files
-                carriage-context--project-map--emacs-files
-                carriage-context--project-map--render
-                carriage-context--project-map--build))
-    (when (fboundp fn)
-      (advice-add fn :around (carriage-context--pm--trace-wrap fn)))))
+Best-effort: never signals."
+  (interactive)
+  (let* ((r (or root (carriage-context--project-root)))
+         (ttl (or carriage-context-project-map-cache-ttl 0.0))
+         (cache (ignore-errors (carriage-context--project-map--cache-get r)))
+         (cache-hit (and cache
+                         (carriage-context--project-map--cache-fresh-p cache ttl)))
+         (carriage-context--project-map-allow-compute t)
+         (files-res (ignore-errors (carriage-context--project-map--files r)))
+         (build-res (ignore-errors (carriage-context-project-map-build r)))
+         (text (and (listp build-res) (plist-get build-res :text)))
+         (sample (and (stringp text)
+                      (substring text 0 (min 240 (length text)))))
+         (diag
+          (list
+           :root r
+           :cache-hit (and cache-hit t)
+           :files-ok (and (listp files-res) (plist-get files-res :ok))
+           :files-method (and (listp files-res) (plist-get files-res :method))
+           :files-count (let ((fs (and (listp files-res) (plist-get files-res :files))))
+                          (and (listp fs) (length fs)))
+           :files-reason (and (listp files-res) (plist-get files-res :reason))
+           :build-ok (and (listp build-res) (plist-get build-res :ok))
+           :build-paths (and (listp build-res) (plist-get build-res :paths))
+           :build-truncated (and (listp build-res) (plist-get build-res :truncated))
+           :has-begin-map (and (stringp text)
+                               (string-match-p "#\\+begin_map\\b" text)
+                               (string-match-p "#\\+end_map\\b" text))
+           :text-bytes (and (stringp text) (string-bytes text))
+           :sample sample)))
+    (when (called-interactively-p 'interactive)
+      (message "%S" diag))
+    diag))
+
 
 (provide 'carriage-context)
 ;;; carriage-context.el ends here

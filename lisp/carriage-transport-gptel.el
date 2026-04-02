@@ -1807,8 +1807,27 @@ Keys:
                     (if (stringp inline-text) (string-bytes inline-text) 0)
                     (if (stringp attachments-note) (string-bytes attachments-note) 0)))))
 
+(defun carriage-transport-gptel--dispatch--log-request-map-presence (prompt system)
+  "Log whether begin_map is present in PROMPT and SYSTEM right before `gptel-request'."
+  (let ((prompt-has-map (and (stringp prompt)
+                             (string-match-p "#\\+begin_map\\b" prompt)))
+        (system-has-map (and (stringp system)
+                             (string-match-p "#\\+begin_map\\b" system))))
+    (carriage-log
+     "Transport[gptel] REQUEST-MAP prompt-has-map=%s system-has-map=%s prompt-bytes=%s system-bytes=%s"
+     (if prompt-has-map "t" "nil")
+     (if system-has-map "t" "nil")
+     (if (stringp prompt) (string-bytes prompt) "—")
+     (if (stringp system) (string-bytes system) "—"))
+    (carriage-traffic-log
+     'out
+     "gptel-request: begin_map before call: prompt=%s system=%s"
+     (if prompt-has-map "yes" "no")
+     (if system-has-map "yes" "no"))))
+
 (defun carriage-transport-gptel--dispatch--call-gptel (prompt system buffer cb)
   "Call `gptel-request' with PROMPT/SYSTEM, writing into BUFFER, using callback CB."
+  (carriage-transport-gptel--dispatch--log-request-map-presence prompt system)
   (gptel-request
       prompt
     :callback cb

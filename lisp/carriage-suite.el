@@ -214,16 +214,22 @@ Return STRING or nil."
   "Resolve intent fragment for INTENT using overrides or registry.
 Return STRING (empty string when not found)."
   (let* ((ov (and (boundp 'carriage-intent-fragment-overrides)
-                  (alist-get intent carriage-intent-fragment-overrides))))
-    (cond
-     ((stringp ov) ov)
-     ((functionp ov) (ignore-errors (funcall ov ctx)))
-     (t
-      (let ((frag (ignore-errors (carriage-intent-get intent))))
-        (cond
-         ((stringp frag) frag)
-         ((functionp frag) (ignore-errors (funcall frag ctx)))
-         (t "")))))))
+                  (alist-get intent carriage-intent-fragment-overrides)))
+         (base
+          (cond
+           ((stringp ov) ov)
+           ((functionp ov) (ignore-errors (funcall ov ctx)))
+           (t
+            (let ((frag (ignore-errors (carriage-intent-get intent))))
+              (cond
+               ((stringp frag) frag)
+               ((functionp frag) (ignore-errors (funcall frag ctx)))
+               (t "")))))))
+    (carriage--join-nonempty
+     (list base
+           (plist-get ctx :file-visibility-note)
+           (carriage--typedblocks-hint-fragment intent ctx))
+     "\n")))
 
 (defun carriage--assert-suite-safety (suite-id system-str)
   "Signal MODE_E_DISPATCH when SYSTEM-STR contains markers forbidden for SUITE-ID."
@@ -314,10 +320,18 @@ CTX may contain keys like :payload, :context-text, :context-target, :delim, :fil
                          "\n"))
               ;; Structure hint conflicts with Code intent (patch-only output), so ignore it there.
               (base (carriage--join-nonempty
-                     (list (and (not (eq intent 'Code)) org-note)
+                     ;; org-note excluded from Code intent:
+                     ;; Code requires block-only output; heading-first conflicts with that.
+                     ;; Also excluded from Hybrid when typedblocks-structure-hint is off —
+                     ;; Hybrid prose answers don't need forced heading structure.
+                     (list (when (and (not (memq intent '(Code)))
+                                      (or (memq intent '(Ask Hybrid))
+                                          (plist-get ctx :org-structure-note)))
+                             org-note)
                            sys-core
                            intent-note)
                      "\n"))
+
               (system (if (and (eq ctx-target 'system)
                                (stringp ctx-text) (not (string-empty-p ctx-text)))
                           (concat base "\n" ctx-text)

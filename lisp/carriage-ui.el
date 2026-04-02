@@ -1386,7 +1386,7 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
                                                    :v-adjust (- carriage-mode-icon-v-adjust 0.14)
                                                    :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-purple-face)))))
                  ('ctx-limit (when (fboundp 'all-the-icons-material)
-                               (all-the-icons-material "warning"
+                               (all-the-icons-material "data_usage"
                                                        :height carriage-mode-icon-height
                                                        :v-adjust (- carriage-mode-icon-v-adjust 0.12)
                                                        :face (list :inherit nil :foreground (carriage-ui--accent-hex 'carriage-ui-accent-yellow-face)))))

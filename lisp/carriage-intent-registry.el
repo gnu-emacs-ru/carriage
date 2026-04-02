@@ -136,13 +136,24 @@ CTX MAY carry:
     (concat
      "Output contract (two legal outputs only):\n"
      "A) Org-compatible patch blocks only (format depends on Suite).\n"
-     "B) If any required file text is missing, output ONLY one begin_context block with required paths.\n"
+     "B) If required file text is missing for EDIT, output ONLY one begin_context block with paths.\n"
+     "C) If user asks to CREATE a new file (path NOT in begin_map) -> output #+begin_patch :op create directly.\n"
      "\n"
-     "Do NOT include any prose outside those blocks. No reasoning, no commentary.\n"
+     "Do NOT include prose outside blocks. No reasoning, no commentary.\n"
      "- Use exactly one patch block per operation.\n"
      "- Paths must be RELATIVE to project root; no absolute paths, no \"..\" segments.\n"
-     "- begin_map and begin_state_manifest describe existence/current availability, not editable text by themselves.\n"
+     "- begin_map/begin_state_manifest describe existence, not editable text by themselves.\n"
+     "- begin_context is NOT a wishlist: list ONLY existing files whose text you need to read.\n"
+     "- NEVER list files you intend to create in begin_context.\n"
      "\n"
+     "DECISION TREE (CRITICAL):\n"
+     "1) User asks CREATE + path NOT in begin_map -> :op create immediately (NO begin_context).\n"
+     "2) User asks EDIT + path in begin_map exists=true + text visible -> patch/sre/aibo.\n"
+     "3) User asks EDIT + path in begin_map exists=true + text NOT visible -> ONLY begin_context.\n"
+     "4) User asks EDIT + path NOT in begin_map -> clarify or assume create if explicit.\n"
+     "\n"
+     "OPERATION ORDER (multiple ops):\n"
+     "delete -> rename -> create -> patch -> sre/aibo\n"     "\n"
      suite-note
      (or profile-note "")
      (or ctx-limit-note "")
@@ -265,15 +276,19 @@ CTX MAY carry:
            "Keep prose minimal and place it before or after the blocks. Do not insert text inside blocks.\n"
            "\n"
            "HARD CONTEXT VISIBILITY RULES (same as Intent=Code):\n"
-           "- Sections formatted as `In file <path>:` followed by the file body mean that the CURRENT TEXT of that exact file is present in this request.\n"
-           "- The full body inside such an `In file <path>:` section is the AUTHORITATIVE CURRENT FILE TEXT for that exact path in this request.\n"
-           "- That body MUST be treated as VISIBLE CONTEXT and as has_text=true for this path in this request, regardless of what begin_state_manifest says.\n"
-           "- CRITICAL: If this request contains an `In file <path>:` section with a file body for some path, you ALREADY SEE the current text of that file and MUST NOT claim that it is missing or invisible.\n"
-           "- Do NOT say that file text is absent, unavailable or unseen for any path that has an `In file <path>:` section with a real body in this SAME request.\n"
-           "- NEVER ask for begin_context for a path whose full current body is already present in an `In file <path>:` section in this request.\n"
-           "- Seeing an `In file <path>:` section with a body means the file text is already present in context for that exact path; treat this as has_text=true for this request.\n"
-           "- An `In file <path>:` body is the ACTUAL current contents of that file in this request, not a hint or summary.\n"
-           "- If you can see an `In file <path>:` section with the body for a path, you MUST proceed from that body as current text and MUST NOT guess or say \"I do not see the file\".\n")))
+           "- `In file <path>:` with body = CURRENT TEXT present; treat as has_text=true.\n"
+           "- If `In file <path>:` body is present, do NOT claim text is missing.\n"
+           "- NEVER ask begin_context for paths with visible `In file <path>:` body.\n"
+           "- begin_context is ONLY for existing files whose text is NOT visible.\n"
+           "\n"
+           "DECISION TREE (CRITICAL):\n"
+           "1) CREATE: path NOT in begin_map + explicit request -> :op create (NO begin_context).\n"
+           "2) EDIT: path in begin_map + text visible -> patch/sre/aibo.\n"
+           "3) EDIT: path in begin_map + text NOT visible -> ONLY begin_context.\n"
+           "4) begin_context is NOT a wishlist: list ONLY existing files needing text.\n"
+           "\n"
+           "OPERATION ORDER (multiple ops):\n"
+           "delete -> rename -> create -> patch -> sre/aibo\n")))
     (concat base (or typed-hint "") strict)))
 
 

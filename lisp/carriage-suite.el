@@ -160,14 +160,23 @@ FRAG is STRING or function (lambda (ctx) STRING)."
                  "- Use EXACT operation names. Aliases like write/create_file/delete_file/rename_file are forbidden."
                  "- Header must include :version \"1\" and only keys defined by the selected operation."
                  "- Paths must be relative to repo root. Use :file (not :path) where applicable."
-                 "- For create: no delimiter markers are used; the file content is the raw body between begin/end."
-                 "- Do NOT print any internal CARRIAGE_* marker lines; the tool inserts them."
-                 "- Do NOT emit stray '#+end' lines; close blocks only with an exact '#+end_patch'."
-                 "- No base64 payloads; the tool will handle fallbacks itself.")))
+                 "- For create: no delimiter markers; file content is raw body between begin/end."
+                 "- Do NOT print internal CARRIAGE_* marker lines; tool inserts them."
+                 "- Do NOT emit stray '#+end' lines; close blocks only with '#+end_patch'."
+                 "- No base64 payloads; tool handles fallbacks."
+                 ""
+                 "DECISION TREE (CRITICAL):\n"
+                 "1) CREATE: If path NOT in begin_map + user asks create -> :op create immediately.\n"
+                 "2) EDIT: If path in begin_map exists=true -> patch/sre/aibo (request begin_context if text not visible).\n"
+                 "3) begin_context is NOT a wishlist: list ONLY existing files whose text you need.\n"
+                 ""
+                 "OPERATION ORDER (if multiple ops):\n"
+                 "delete -> rename -> create -> patch -> sre/aibo")))
     (when (memq 'patch ops)
       (setq lines
             (append lines
-                    '("- For patch: unified diff of EXACTLY ONE file (one ---/+++ pair), a/ and b/ paths MUST match, :strip=1. No binary or rename/copy preludes."))))
+                    '(""
+                      "- For patch: unified diff of ONE file (one ---/+++ pair), a/ and b/ paths match, :strip=1."))))
     (mapconcat #'identity lines "\n")))
 
 

@@ -4785,8 +4785,13 @@ FN must be a zero-argument function that cancels the ongoing activity."
 ;; -------------------------------------------------------------------
 ;; Project-scoped ephemeral buffer (open-buffer) and exit prompt
 
-(defvar carriage--project-buffers (make-hash-table :test 'equal)
+(defvar carriage--project-buffers nil
   "Map of project-root (string) → live buffer for Carriage ephemeral project buffers.")
+
+(defun carriage--project-buffers-table ()
+  "Return the project-buffers hash table, creating it if needed."
+  (or carriage--project-buffers
+      (setq carriage--project-buffers (make-hash-table :test 'equal))))
 
 (defvar carriage--ephemeral-exit-hook-installed nil
   "Guard to install kill-emacs query hook only once per session.")
@@ -4805,8 +4810,8 @@ FN must be a zero-argument function that cancels the ongoing activity."
     (add-hook
      'kill-emacs-query-functions
      (lambda ()
-       (let* ((bufs (cl-loop for k being the hash-keys of carriage--project-buffers
-                             for b = (gethash k carriage--project-buffers)
+       (let* ((bufs (cl-loop for k being the hash-keys of (carriage--project-buffers-table)
+                             for b = (gethash k (carriage--project-buffers-table))
                              when (and (buffer-live-p b)
                                        (with-current-buffer b
                                          (and carriage--ephemeral-project-buffer
@@ -4833,9 +4838,9 @@ Creates an org-mode buffer with carriage-mode enabled and default-directory boun
   (let* ((root (or (carriage-project-root) default-directory))
          (pname (carriage--project-name-from-root root))
          (bname (format "*carriage:%s*" (or (and pname (not (string-empty-p pname)) pname) "-")))
-         (existing (gethash root carriage--project-buffers))
+         (existing (gethash root (carriage--project-buffers-table)))
          (buf (if (and (buffer-live-p existing)) existing (get-buffer-create bname))))
-    (puthash root buf carriage--project-buffers)
+    (puthash root buf (carriage--project-buffers-table))
     (carriage--ensure-ephemeral-exit-hook)
     (unless (get-buffer-window buf t)
       (pop-to-buffer buf))

@@ -2161,7 +2161,12 @@ This segment represents *request/transport* state."
                  ('dry-run (if (> fail 0) 'dry-fail 'dry-ok))
                  ('apply   (if (> fail 0) 'apply-fail 'apply-ok))
                  (_        (if (> fail 0) 'apply-fail 'apply-ok)))))
-      (carriage-ui-apply-set-state st (carriage-ui--apply--tooltip-from-report report)))))
+       (carriage-ui-apply-set-state st (carriage-ui--apply--tooltip-from-report report)))))
+
+(defun carriage-ui--context-badge ()
+  "Return a cons (LABEL . TOOLTIP) for the context badge.
+Stub implementation — replace with actual logic if needed."
+  (cons "Ctx" "Context"))
 
 (defun carriage-ui--ml-seg-context ()
   "Build Context badge segment (click to refresh now).

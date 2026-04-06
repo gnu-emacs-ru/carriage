@@ -30,6 +30,11 @@
 (require 'cl-lib)
 (require 'subr-x)
 
+(require 'carriage-context-file)
+(require 'carriage-context-map)
+(require 'carriage-context-visible)
+(require 'carriage-context-collect)
+
 (declare-function carriage-project-root "carriage-utils" ())
 (declare-function carriage--call-git "carriage-utils" (default-dir &rest args))
 (declare-function org-back-to-heading "org" (&optional invisible-ok))

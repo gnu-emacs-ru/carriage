@@ -30,6 +30,10 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'carriage-transport-gptel-watchdog)
+(require 'gptel)
+(require 'cl-lib)
+(require 'subr-x)
 (require 'carriage-logging)
 (require 'carriage-ui)
 (require 'carriage-transport)

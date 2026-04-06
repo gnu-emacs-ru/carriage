@@ -397,5 +397,111 @@ Touches only one active overlay per command to minimize interference with vertic
     (carriage-reasoning-fold--clear-overlays)
     t))
 
+;; Internal helper: check if overlay is a reasoning fold overlay
+(defun carriage-reasoning-fold--overlay-p (ov)
+  "Return non-nil when OV looks like a reasoning-fold overlay."
+  (and (overlayp ov)
+       (overlay-buffer ov)
+       (or (overlay-get ov 'carriage-reasoning-fold)
+           (overlay-get ov 'carriage-reasoning)
+           (eq (overlay-get ov 'category) 'carriage-reasoning-fold))
+       (not (eq (overlay-get ov 'category) 'carriage-doc-state-fold))
+       (not (overlay-get ov 'carriage-fold-summary))
+       (not (overlay-get ov 'carriage-fold-tooltip))))
+
+;; Internal helper: sanitize display property
+(defun carriage-reasoning-fold--sanitize-display (disp)
+  "Return DISP with noisy hints removed (e.g., \"(TAB: toggle …)\")."
+  (if (not (stringp disp))
+      disp
+    (let* ((s disp))
+      (setq s (replace-regexp-in-string
+               "(\\s-*\\(TAB\\|Tab\\):\\s-*toggle\\([^)]*\\))" "" s t))
+      (setq s (replace-regexp-in-string
+               "\\s-*\\(TAB\\|Tab\\):\\s-*toggle\\b.*\\'" "" s t))
+      (setq s (replace-regexp-in-string "[ \t][ \t]+" " " s t t))
+      (setq s (string-trim s))
+      (if (string-empty-p s) "…" s))))
+
+;; Internal helper: reveal overlay
+(defun carriage-reasoning-fold--reveal (ov)
+  "Reveal OV by removing hiding properties, saving them for restoration."
+  (when (overlayp ov)
+    (unless (overlay-get ov 'carriage--saved-invisible)
+      (overlay-put ov 'carriage--saved-invisible (overlay-get ov 'invisible)))
+    (unless (overlay-get ov 'carriage--saved-display)
+      (overlay-put ov 'carriage--saved-display (overlay-get ov 'display)))
+    (unless (overlay-get ov 'carriage--saved-before-string)
+      (overlay-put ov 'carriage--saved-before-string (overlay-get ov 'before-string)))
+    (overlay-put ov 'invisible nil)
+    (overlay-put ov 'display nil)
+    (overlay-put ov 'before-string nil)
+    (overlay-put ov 'intangible nil)
+    (overlay-put ov 'cursor-intangible nil)))
+
+;; Internal helper: restore overlay
+(defun carriage-reasoning-fold--restore (ov)
+  "Restore OV hiding properties if previously saved."
+  (when (overlayp ov)
+    (when (overlay-get ov 'carriage--saved-invisible)
+      (overlay-put ov 'invisible (overlay-get ov 'carriage--saved-invisible)))
+    (when (overlay-get ov 'carriage--saved-display)
+      (overlay-put ov 'display (carriage-reasoning-fold--sanitize-display
+                               (overlay-get ov 'carriage--saved-display))))
+    (when (overlay-get ov 'carriage--saved-before-string)
+      (overlay-put ov 'before-string (carriage-reasoning-fold--sanitize-display
+                                      (overlay-get ov 'carriage--saved-before-string))))
+    (overlay-put ov 'intangible nil)
+    (overlay-put ov 'cursor-intangible nil)))
+
+(defvar-local carriage-reasoning-fold--revealed-ovs nil
+  "Internal list of reasoning fold overlays currently revealed due to point being inside.")
+
+;; Public: sanitize all reasoning fold overlays
+(defun carriage-reasoning-fold-sanitize-all (&optional buffer)
+  "Best-effort sanitize all reasoning-fold overlays in BUFFER (or current buffer)."
+  (with-current-buffer (or buffer (current-buffer))
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when (carriage-reasoning-fold--overlay-p ov)
+        (ignore-errors
+          (let ((d (overlay-get ov 'display)))
+            (when d
+              (overlay-put ov 'display (carriage-reasoning-fold--sanitize-display d))))
+          (let ((b (overlay-get ov 'before-string)))
+            (when b
+              (overlay-put ov 'before-string (carriage-reasoning-fold--sanitize-display b))))
+          (overlay-put ov 'intangible nil)
+          (overlay-put ov 'cursor-intangible nil))))
+    t))
+
+;; Public: post-command hook to reveal folded reasoning block at point
+(defun carriage-reasoning-fold-post-command ()
+  "Post-command hook to reveal folded reasoning block at point and refold on leave."
+  (condition-case _e
+      (let* ((pt (point))
+             (lo (max (point-min) (1- pt)))
+             (hi (min (point-max) (1+ pt)))
+             (near (cl-remove-if-not #'carriage-reasoning-fold--overlay-p
+                                     (overlays-in lo hi)))
+             (cur  (cl-remove-if-not #'carriage-reasoning-fold--overlay-p
+                                     (overlays-at pt)))
+             (prev (or carriage-reasoning-fold--revealed-ovs '())))
+         (dolist (ov near)
+           (ignore-errors
+             (overlay-put ov 'intangible nil)
+             (overlay-put ov 'cursor-intangible nil)
+             (let ((d (overlay-get ov 'display))
+                   (b (overlay-get ov 'before-string)))
+               (when d (overlay-put ov 'display (carriage-reasoning-fold--sanitize-display d)))
+               (when b (overlay-put ov 'before-string (carriage-reasoning-fold--sanitize-display b))))))
+         (dolist (ov prev)
+           (unless (memq ov cur)
+             (ignore-errors (carriage-reasoning-fold--restore ov))))
+         (dolist (ov cur)
+           (unless (memq ov prev)
+             (ignore-errors (carriage-reasoning-fold--reveal ov))))
+         (setq carriage-reasoning-fold--revealed-ovs cur))
+    (error nil)))
+
 (provide 'carriage-reasoning-fold)
 ;;; carriage-reasoning-fold.el ends here

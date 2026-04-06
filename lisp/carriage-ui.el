@@ -28,6 +28,8 @@
 (require 'carriage-utils)
 (require 'carriage-git)
 (require 'carriage-llm-registry)
+(require 'carriage-ui-faces)
+(require 'carriage-ui-spinner)
 (require 'carriage-pricing nil t)
 (require 'carriage-perf nil t)
 (require 'carriage-transient-async nil t)
@@ -97,107 +99,7 @@ Negative values move icons up; positive move them down."
   (when (and (stringp s) (> (length s) 0))
     (carriage-ui--log-face-prop tag (get-text-property 0 'face s))))
 
-;; Harmonious palette with explicit foregrounds (avoid theme desaturation to gray)
-(defface carriage-ui-accent-blue-face
-  '((t :inherit nil :foreground "#6fa8dc"))
-  "Accent face (blue-ish) for UI icons."
-  :group 'carriage-ui)
-
-(defface carriage-ui-accent-green-face
-  '((t :inherit nil :foreground "#93c47d"))
-  "Accent face (green) for success/apply icons."
-  :group 'carriage-ui)
-
-(defface carriage-ui-accent-yellow-face
-  '((t :inherit nil :foreground "#f1c232"))
-  "Accent face (yellow) for caution/WIP icons."
-  :group 'carriage-ui)
-
-(defface carriage-ui-accent-red-face
-  '((t :inherit nil :foreground "#e06666"))
-  "Accent face (red) for abort/error icons."
-  :group 'carriage-ui)
-
-(defface carriage-ui-accent-purple-face
-  '((t :inherit nil :foreground "#8e7cc3"))
-  "Accent face (purple) for code/report/confirm icons."
-  :group 'carriage-ui)
-
-(defface carriage-ui-accent-orange-face
-  '((t :inherit nil :foreground "#f6b26b"))
-  "Accent face (orange) for diff/dry icons."
-  :group 'carriage-ui)
-
-(defface carriage-ui-accent-cyan-face
-  '((t :inherit nil :foreground "#76a5af"))
-  "Accent face (cyan/teal) for model/reset/icons."
-  :group 'carriage-ui)
-
-(defface carriage-ui-muted-face
-  '((t :inherit nil :foreground "#9e9e9e"))
-  "Muted face for disabled toggle icons."
-  :group 'carriage-ui)
-
-;; State faces (UI v1.3)
-(defface carriage-ui-state-idle-face
-  '((t :inherit nil :foreground "#268bd2"))
-  "Mode-line face for idle state (blue)."
-  :group 'carriage-ui)
-
-(defface carriage-ui-state-sending-face
-  '((t :inherit nil :foreground "#93c47d"))
-  "Mode-line face for sending/streaming states (green)."
-  :group 'carriage-ui)
-
-(defface carriage-ui-state-error-face
-  '((t :inherit nil :foreground "#e06666"))
-  "Mode-line face for error state (red)."
-  :group 'carriage-ui)
-
-;; New state faces for refined color mapping
-(defface carriage-ui-state-success-face
-  '((t :inherit nil :foreground "#93c47d"))
-  "Mode-line face for success/idle/done states (green)."
-  :group 'carriage-ui)
-
-(defface carriage-ui-state-active-face
-  '((t :inherit nil :foreground "#f6b26b"))
-  "Mode-line face for active reasoning/waiting/streaming/dispatch states (orange)."
-  :group 'carriage-ui)
-
-;; Faces for patch block highlighting (spec/ui-v2.org)
-(defface carriage-patch-valid-face
-  '((t :inherit nil :background "#203a24"))
-  "Face for visually marking valid patch blocks."
-  :group 'carriage-ui)
-
-(defface carriage-patch-warning-face
-  '((t :inherit nil :background "#3a2f20"))
-  "Face for visually marking suspicious patch blocks."
-  :group 'carriage-ui)
-
-(defface carriage-patch-error-face
-  '((t :inherit nil :background "#3a2020"))
-  "Face for visually marking erroneous patch blocks."
-  :group 'carriage-ui)
-
-;; Faces for report rows (OK/WARN/ERR)
-(defface carriage-report-ok-face
-  '((t :inherit success))
-  "Face for OK rows in report."
-  :group 'carriage-ui)
-
-(defface carriage-report-warn-face
-  '((t :inherit warning))
-  "Face for WARN rows in report."
-  :group 'carriage-ui)
-
-(defface carriage-report-err-face
-  '((t :inherit error))
-  "Face for ERR rows in report."
-  :group 'carriage-ui)
-
-;; carriage-mode-map moved to carriage-mode.el (UI must not define keymaps; keys go via keyspec)
+;; Faces moved to carriage-ui-faces.el
 
 (defvar-local carriage--ui-state 'idle
   "Current UI state: one of 'idle 'sending 'streaming 'dispatch 'waiting 'reasoning 'done 'error.
@@ -345,69 +247,13 @@ May scan buffer text; must not be called from redisplay."
              (when (buffer-live-p buf)
                (with-current-buffer buf
                  (setq carriage-ui--doc-cost-refresh-timer nil)
-                 (ignore-errors (carriage-ui-doc-cost-refresh-now buf))))))
+                  (ignore-errors (carriage-ui-doc-cost-refresh-now buf))))))
           ))
   t)
 
-;; Spinner state (buffer-local)
-(defvar-local carriage--ui-spinner-timer nil
-  "Buffer-local spinner timer for Carriage mode-line.")
-(defvar-local carriage--ui-spinner-index 0
-  "Current spinner frame index (buffer-local).")
-(defconst carriage--ui-spinner-frames-unicode
-  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
-  "Unicode spinner frames.")
-(defconst carriage--ui-spinner-frames-ascii
-  ["-" "\\" "|" "/"]
-  "ASCII spinner frames (TTY fallback).")
+;; Spinner moved to carriage-ui-spinner.el
 
-(defun carriage-ui--spinner-frames ()
-  "Return vector of spinner frames appropriate for current display."
-  (if (display-graphic-p)
-      carriage--ui-spinner-frames-unicode
-    carriage--ui-spinner-frames-ascii))
-
-(defun carriage-ui--spinner-char ()
-  "Return current spinner frame as string."
-  (let* ((frames (carriage-ui--spinner-frames))
-         (n (length frames))
-         (i (mod (or carriage--ui-spinner-index 0) (max 1 n))))
-    (aref frames i)))
-
-(defun carriage-ui--spinner-tick (buf)
-  "Advance spinner in BUF and update mode-line.
-Update only when BUF is visible; avoid forcing window repaints."
-  (let ((wins (and (buffer-live-p buf) (get-buffer-window-list buf t t))))
-    (when wins
-      (with-current-buffer buf
-        (setq carriage--ui-spinner-index (1+ carriage--ui-spinner-index))
-        ;; Local refresh only; avoid repainting windows explicitly.
-        (force-mode-line-update)))))
-
-(defun carriage-ui--spinner-start ()
-  "Start buffer-local spinner timer if not running."
-  (unless (or (bound-and-true-p noninteractive)
-              carriage--ui-spinner-timer
-              (not carriage-ui-enable-spinner))
-    (setq carriage--ui-spinner-index 0)
-    (let* ((buf (current-buffer))
-           (interval (or (and (boundp 'carriage-mode-spinner-interval)
-                              carriage-mode-spinner-interval)
-                         0.08)))
-      (setq carriage--ui-spinner-timer
-            (run-at-time 0 interval
-                         (lambda ()
-                           (carriage-ui--spinner-tick buf)))))))
-
-(defun carriage-ui--spinner-stop (&optional reset)
-  "Stop buffer-local spinner timer. When RESET, also zero index."
-  (when (timerp carriage--ui-spinner-timer)
-    (cancel-timer carriage--ui-spinner-timer))
-  (setq carriage--ui-spinner-timer nil)
-  (when reset
-    (setq carriage--ui-spinner-index 0))
-  ;; Local refresh only; avoid repainting all windows.
-  (force-mode-line-update))
+;;; State management
 
 (defun carriage-ui-reset-timers ()
   "Cancel Carriage UI timers/overlays in this buffer and refresh the modeline.

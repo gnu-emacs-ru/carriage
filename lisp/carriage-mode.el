@@ -25,8 +25,9 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'carriage-logging)
 (require 'carriage-utils)
+(require 'carriage-mode-send)
+(require 'carriage-mode-apply)
 (require 'carriage-git)
 (require 'carriage-parser)
 (require 'carriage-apply)
@@ -40,138 +41,6 @@
 (require 'carriage-doc-state-perf nil t)
 (require 'carriage-reasoning-fold nil t)
 (require 'carriage-typedblocks nil t)
-
-;; -----------------------------------------------------------------------------
-;; Reasoning fold UX:
-;; - When reasoning blocks are folded via overlays, reveal the original text when point enters.
-;; - Restore the fold when point leaves the block.
-;; Best-effort: never signal; supports unknown overlay internals by using heuristics.
-(defvar-local carriage--reasoning-fold--revealed-ovs nil
-  "Internal list of reasoning fold overlays currently revealed due to point being inside.")
-
-(defun carriage--reasoning-fold--overlay-p (ov)
-  "Return non-nil when OV looks like a reasoning-fold overlay.
-
-Important: keep this predicate narrow to avoid touching unrelated overlays
-(e.g., doc-state/fingerprint folds)."
-  (and (overlayp ov)
-       (overlay-buffer ov)
-       (or (overlay-get ov 'carriage-reasoning-fold)
-           (overlay-get ov 'carriage-reasoning)
-           ;; carriage-reasoning-fold.el marks its overlays by category.
-           (eq (overlay-get ov 'category) 'carriage-reasoning-fold))
-       ;; Never touch doc-state/fingerprint fold overlays.
-       (not (eq (overlay-get ov 'category) 'carriage-doc-state-fold))
-       (not (overlay-get ov 'carriage-fold-summary))
-       (not (overlay-get ov 'carriage-fold-tooltip))))
-
-(defun carriage--reasoning-fold--reveal (ov)
-  "Reveal OV by removing hiding properties, saving them for restoration."
-  (when (overlayp ov)
-    (unless (overlay-get ov 'carriage--saved-invisible)
-      (overlay-put ov 'carriage--saved-invisible (overlay-get ov 'invisible)))
-    (unless (overlay-get ov 'carriage--saved-display)
-      (overlay-put ov 'carriage--saved-display (overlay-get ov 'display)))
-    (unless (overlay-get ov 'carriage--saved-before-string)
-      (overlay-put ov 'carriage--saved-before-string (overlay-get ov 'before-string)))
-    ;; Reveal (show original text)
-    ;; Also remove cursor-intangible/intangible so point can actually enter the block.
-    (overlay-put ov 'invisible nil)
-    (overlay-put ov 'display nil)
-    (overlay-put ov 'before-string nil)
-    (overlay-put ov 'intangible nil)
-    (overlay-put ov 'cursor-intangible nil)))
-
-(defun carriage--reasoning-fold--sanitize-display (disp)
-  "Return DISP with noisy hints removed (e.g., \"(TAB: toggle …)\").
-
-Important:
-- Do not remove generic words like \"toggle\" globally (it can be part of legit text).
-- If sanitization would produce an empty placeholder, return a minimal \"…\" so the
-  overlay remains visible and clickable."
-  (if (not (stringp disp))
-      disp
-    (let* ((s disp))
-      ;; Remove parenthesized hint chunks like: "(TAB: toggle ...)" (case-insensitive for TAB).
-      (setq s (replace-regexp-in-string
-               "(\\s-*\\(TAB\\|Tab\\):\\s-*toggle\\([^)]*\\))" "" s t))
-      ;; Remove non-parenthesized tail hints like: "TAB: toggle ..." (keep left side).
-      (setq s (replace-regexp-in-string
-               "\\s-*\\(TAB\\|Tab\\):\\s-*toggle\\b.*\\'" "" s t))
-      ;; Collapse whitespace.
-      (setq s (replace-regexp-in-string "[ \t][ \t]+" " " s t t))
-      (setq s (string-trim s))
-      (if (string-empty-p s) "…" s))))
-
-(defun carriage--reasoning-fold--restore (ov)
-  "Restore OV hiding properties if previously saved."
-  (when (overlayp ov)
-    (when (overlay-get ov 'carriage--saved-invisible)
-      (overlay-put ov 'invisible (overlay-get ov 'carriage--saved-invisible)))
-    (when (overlay-get ov 'carriage--saved-display)
-      (let ((d (overlay-get ov 'carriage--saved-display)))
-        (overlay-put ov 'display (carriage--reasoning-fold--sanitize-display d))))
-    (when (overlay-get ov 'carriage--saved-before-string)
-      (let ((b (overlay-get ov 'carriage--saved-before-string)))
-        (overlay-put ov 'before-string (carriage--reasoning-fold--sanitize-display b))))
-    ;; Ensure point can enter folded reasoning placeholder (avoid "cursor stuck").
-    (overlay-put ov 'intangible nil)
-    (overlay-put ov 'cursor-intangible nil)))
-
-(defun carriage--reasoning-fold--sanitize-all (&optional buffer)
-  "Best-effort sanitize all reasoning-fold overlays in BUFFER (or current buffer).
-
-- Remove noisy \"TAB: toggle …\" hints from overlay display/before-string.
-- Disable cursor-intangible/intangible so point can enter the folded placeholder."
-  (with-current-buffer (or buffer (current-buffer))
-    (dolist (ov (overlays-in (point-min) (point-max)))
-      (when (carriage--reasoning-fold--overlay-p ov)
-        (ignore-errors
-          (let ((d (overlay-get ov 'display)))
-            (when d
-              (overlay-put ov 'display (carriage--reasoning-fold--sanitize-display d))))
-          (let ((b (overlay-get ov 'before-string)))
-            (when b
-              (overlay-put ov 'before-string (carriage--reasoning-fold--sanitize-display b))))
-          (overlay-put ov 'intangible nil)
-          (overlay-put ov 'cursor-intangible nil))))
-    t))
-
-(defun carriage--reasoning-fold--post-command ()
-  "Post-command hook to reveal folded reasoning block at point and refold on leave."
-  (condition-case _e
-      (let* ((pt (point))
-             ;; Also inspect overlays adjacent to point to avoid the \"stuck at boundary\"
-             ;; behavior when approaching folded overlays from below.
-             (lo (max (point-min) (1- pt)))
-             (hi (min (point-max) (1+ pt)))
-             (near (cl-remove-if-not #'carriage--reasoning-fold--overlay-p
-                                     (overlays-in lo hi)))
-             (cur  (cl-remove-if-not #'carriage--reasoning-fold--overlay-p
-                                     (overlays-at pt)))
-             (prev (or carriage--reasoning-fold--revealed-ovs '())))
-        ;; Ensure the cursor can ENTER folded placeholders from either direction.
-        ;; If overlays remain cursor-intangible, point never enters → our reveal hook never runs.
-        (dolist (ov near)
-          (ignore-errors
-            (overlay-put ov 'intangible nil)
-            (overlay-put ov 'cursor-intangible nil)
-            ;; Also clean up noisy hints in-place (TAB: toggle ...)
-            (let ((d (overlay-get ov 'display))
-                  (b (overlay-get ov 'before-string)))
-              (when d (overlay-put ov 'display (carriage--reasoning-fold--sanitize-display d)))
-              (when b (overlay-put ov 'before-string (carriage--reasoning-fold--sanitize-display b))))))
-
-        ;; Restore overlays that are no longer under point
-        (dolist (ov prev)
-          (unless (memq ov cur)
-            (ignore-errors (carriage--reasoning-fold--restore ov))))
-        ;; Reveal current overlays under point
-        (dolist (ov cur)
-          (unless (memq ov prev)
-            (ignore-errors (carriage--reasoning-fold--reveal ov))))
-        (setq carriage--reasoning-fold--revealed-ovs cur))
-    (error nil)))
 
 ;; Autoload stub ensures calling carriage-global-mode works even if file isn't loaded yet.
 (require 'carriage-global-mode)
@@ -914,9 +783,8 @@ When STOP-AFTER is a positive integer, scanning stops early once count exceeds i
              (require 'carriage-reasoning-fold nil t))
     (ignore-errors (carriage-reasoning-fold-enable))
     (ignore-errors (carriage-reasoning-fold-hide-all (current-buffer)))
-    (ignore-errors (carriage--reasoning-fold--sanitize-all (current-buffer)))
-    ;; Reveal original reasoning text when point enters a folded block.
-    (add-hook 'post-command-hook #'carriage--reasoning-fold--post-command nil t)))
+    (ignore-errors (carriage-reasoning-fold-sanitize-all (current-buffer)))
+    (add-hook 'post-command-hook #'carriage-reasoning-fold-post-command nil t)))
 
 (defun carriage-mode--init-ui ()
   "Install header/modeline and key bindings; open optional panels."
@@ -1030,11 +898,18 @@ When STOP-AFTER is a positive integer, scanning stops early once count exceeds i
   (when (featurep 'carriage-patch-fold)
     (ignore-errors (carriage-patch-fold-disable)))
   ;; Remove reveal hook and restore any temporarily revealed overlays.
-  (remove-hook 'post-command-hook #'carriage--reasoning-fold--post-command t)
-  (when (listp carriage--reasoning-fold--revealed-ovs)
-    (dolist (ov carriage--reasoning-fold--revealed-ovs)
-      (ignore-errors (carriage--reasoning-fold--restore ov))))
-  (setq carriage--reasoning-fold--revealed-ovs nil)
+  (remove-hook 'post-command-hook #'carriage-reasoning-fold-post-command t)
+  (when (and (require 'carriage-reasoning-fold nil t)
+             (bound-and-true-p carriage-reasoning-fold--revealed-ovs))
+    (dolist (ov carriage-reasoning-fold--revealed-ovs)
+      (ignore-errors
+        (when (overlayp ov)
+          (overlay-put ov 'invisible (or (overlay-get ov 'carriage--saved-invisible) carriage-reasoning-fold-invisible-symbol))
+          (overlay-put ov 'before-string (or (overlay-get ov 'carriage--saved-before-string)
+                                             (overlay-get ov 'carriage-reasoning-placeholder)))
+          (overlay-put ov 'intangible nil)
+          (overlay-put ov 'cursor-intangible nil)))))
+  (setq carriage-reasoning-fold--revealed-ovs nil)
 
   (when (featurep 'carriage-reasoning-fold)
     (ignore-errors (carriage-reasoning-fold-disable)))
@@ -1614,7 +1489,7 @@ without auto-closing; the end marker is inserted later at tail."
                      (require 'carriage-reasoning-fold nil t))
             (carriage-reasoning-fold-refresh-now (current-buffer))
             (carriage-reasoning-fold-hide-all (current-buffer))
-            (carriage--reasoning-fold--sanitize-all (current-buffer))))))))
+            (carriage-reasoning-fold-sanitize-all (current-buffer))))))))
 
 (defun carriage--reasoning-tail-pos ()
   "Return tail position for inserting #+end_reasoning, or nil."
@@ -1712,7 +1587,7 @@ without auto-closing; the end marker is inserted later at tail."
                  (require 'carriage-reasoning-fold nil t))
         (carriage-reasoning-fold-refresh-now (current-buffer))
         (carriage-reasoning-fold-hide-all (current-buffer))
-        (carriage--reasoning-fold--sanitize-all (current-buffer))))
+        (carriage-reasoning-fold-sanitize-all (current-buffer))))
     (setq carriage--reasoning-open nil)
     t))
 
@@ -5753,166 +5628,6 @@ This variable is intended to be buffer-local and persisted via doc-state."
   (force-mode-line-update t)
   (message "Соблюдать структуру: %s"
            (if carriage-mode-org-structure-hint "ON" "OFF")))
-
-;; -----------------------------------------------------------------------------
-;; Compatibility wrappers for legacy send commands
-;;
-;; Some older configs/key bindings may still call unprefixed `send-buffer' /
-;; `send-subtree' (or deprecated `carriage-send' / `carriage-send-region').
-;; These belonged to an older send pipeline.  Redirect them to the supported
-;; entry points to avoid hard failures like:
-;;   "Legacy send pipeline removed; use carriage-send-buffer / carriage-send-subtree"
-;;
-;; Important safety rule:
-;; - Do NOT clobber unrelated package commands.  We only alias unprefixed symbols
-;;   when they appear to be defined by Carriage itself (symbol-file contains
-;;   "carriage").
-
-(defun carriage--legacy-send-command-p (sym)
-  "Return non-nil when SYM looks like a legacy Carriage send command.
-
-We try hard not to clobber unrelated package commands:
-- Prefer checking `symbol-file' for \"carriage\".
-- Fallback: detect Carriage legacy stubs by docstring markers (works when
-  `symbol-file' is nil for autoloads/native-compiled code).
-
-Best-effort: never signals."
-  (condition-case _e
-      (let* ((sf (ignore-errors (symbol-file sym 'defun)))
-             (doc (ignore-errors (documentation sym t))))
-        (or (and (stringp sf) (string-match-p "carriage" sf))
-            (and (stringp doc)
-                 (or (string-match-p "Legacy send pipeline removed" doc)
-                     (string-match-p "use carriage-send-buffer" doc)
-                     (string-match-p "use carriage-send-subtree" doc)
-                     (string-match-p "\\bcarriage-send-buffer\\b" doc)
-                     (string-match-p "\\bcarriage-send-subtree\\b" doc)))))
-    (error nil)))
-
-(defun carriage--maybe-alias-legacy-send-command (sym target)
-  "If SYM is a legacy Carriage send command, alias it to TARGET.
-Return t when aliased, nil otherwise.  Best-effort: never signals."
-  (condition-case _e
-      (when (and (symbolp sym)
-                 (symbolp target)
-                 (fboundp sym)
-                 (fboundp target)
-                 (carriage--legacy-send-command-p sym))
-        (defalias sym target)
-        t)
-    (error nil)))
-
-;;;###autoload
-(defun carriage-send ()
-  "Compatibility DWIM wrapper for older configs.
-
-Prefer calling `carriage-send-buffer' or `carriage-send-subtree' directly."
-  (interactive)
-  (carriage--log-send-entry 'carriage-send)
-  (cond
-   ((and (derived-mode-p 'org-mode)
-         (require 'org nil t)
-         (save-excursion
-           (ignore-errors (org-back-to-heading t))
-           (looking-at-p "^[ \t]*\\*+\\s-+")))
-    (call-interactively #'carriage-send-subtree))
-   (t
-    (call-interactively #'carriage-send-buffer))))
-
-;;;###autoload
-(defun carriage-send-region ()
-  "Compatibility wrapper for legacy configs.
-
-Carriage v1 does not have a region-only send pipeline; fall back to sending
-the whole buffer."
-  (interactive)
-  (carriage--log-send-entry 'carriage-send-region)
-  (call-interactively #'carriage-send-buffer))
-
-;; If legacy unprefixed commands are present and come from Carriage, just use advice-based redirect (see below).
-;; defalias-based legacy redirect убран, чтобы не вызывать потенциальную двукратную цепочку advice/alias.
-
-;; -------------------------------------------------------------------
-;; Legacy unprefixed send commands: runtime redirect (local, non-clobbering)
-;;
-;; Problem addressed:
-;; Some older configs (or stale autoloads) still call `send-buffer' / `send-subtree'
-;; symbols that may be provided by a removed legacy Carriage pipeline and error with:
-;;   "Legacy send pipeline removed; use carriage-send-buffer / carriage-send-subtree"
-;;
-;; Our previous approach tried to defalias these symbols, but that can fail when:
-;; - symbols are defined after Carriage loads (autoload/native-compiled),
-;; - symbol-file/docstring heuristics are insufficient.
-;;
-;; This redirect is safer:
-;; - It does NOT clobber global semantics: it triggers only when `carriage-mode'
-;;   is active in the current buffer and we're in org-mode.
-;; - Otherwise it delegates to the original `send-buffer' / `send-subtree'.
-
-(defcustom carriage-legacy-send-redirect-enabled t
-  "When non-nil, redirect legacy unprefixed `send-buffer' / `send-subtree'
-calls to `carriage-send-buffer' / `carriage-send-subtree' in `carriage-mode' Org buffers.
-
-This prevents hard failures from stale legacy Carriage send commands in old configs,
-while avoiding global clobbering of unrelated packages that may define similar symbols."
-  :type 'boolean
-  :group 'carriage)
-
-(defvar carriage--legacy-send-redirect-advice-installed nil
-  "Non-nil when legacy unprefixed send redirect advices were installed.")
-
-(defun carriage--legacy-send--redirect (target orig-fn args)
-  "Redirect helper used by legacy send advices.
-TARGET is a symbol like `carriage-send-buffer'. ORIG-FN is the original function.
-ARGS is the original call argument list."
-  (if (and (boundp 'carriage-legacy-send-redirect-enabled)
-           carriage-legacy-send-redirect-enabled
-           (bound-and-true-p carriage-mode)
-           (derived-mode-p 'org-mode)
-           (symbolp target)
-           (fboundp target))
-      ;; Preserve prefix arg semantics.
-      (let ((current-prefix-arg current-prefix-arg))
-        (carriage-log "legacy-send-redirect: %S -> %S buf=%s in-flight=%s scheduled=%s\n%s"
-                      orig-fn
-                      target
-                      (buffer-name (current-buffer))
-                      (if carriage--send-in-flight "t" "nil")
-                      (if carriage--send-dispatch-scheduled "t" "nil")
-                      (or (carriage--send-debug-backtrace) "<no-backtrace>"))
-        (call-interactively target))
-    (apply orig-fn args)))
-
-(defun carriage--legacy-send-redirect--around-send-buffer (orig-fn &rest args)
-  "Around-advice redirecting `send-buffer' to `carriage-send-buffer' in carriage-mode Org buffers."
-  (carriage--legacy-send--redirect 'carriage-send-buffer orig-fn args))
-
-(defun carriage--legacy-send-redirect--around-send-subtree (orig-fn &rest args)
-  "Around-advice redirecting `send-subtree' to `carriage-send-subtree' in carriage-mode Org buffers."
-  (carriage--legacy-send--redirect 'carriage-send-subtree orig-fn args))
-
-(defun carriage--legacy-send-redirect-ensure (&optional _file)
-  "Ensure legacy unprefixed send redirect advices are installed (idempotent).
-
-Important:
-This function MUST be safe to call before `send-buffer' / `send-subtree'
-are defined (autoloads loaded later). Therefore it must not \"lock in\"
-a global installed flag too early; it should attempt installation
-whenever the target function becomes available."
-  (when (fboundp 'send-buffer)
-    (unless (advice-member-p #'carriage--legacy-send-redirect--around-send-buffer 'send-buffer)
-      (ignore-errors
-        (advice-add 'send-buffer :around #'carriage--legacy-send-redirect--around-send-buffer)))
-    (setq carriage--legacy-send-redirect-advice-installed t))
-  (when (fboundp 'send-subtree)
-    (unless (advice-member-p #'carriage--legacy-send-redirect--around-send-subtree 'send-subtree)
-      (ignore-errors
-        (advice-add 'send-subtree :around #'carriage--legacy-send-redirect--around-send-subtree)))
-    (setq carriage--legacy-send-redirect-advice-installed t))
-  t)
-
-;; Install now and also on future loads (when legacy symbols may appear late).
-(ignore-errors (carriage--legacy-send-redirect-ensure))
 
 (provide 'carriage-mode)
 ;;; carriage-mode.el ends here

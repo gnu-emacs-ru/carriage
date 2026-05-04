@@ -44,8 +44,10 @@
            (insert manifest-content)
            ;; Simulate gatekeeper check with manifest present
            (let ((item (list :op 'aibo :file "test.txt" :path file-path)))
-             ;; Gatekeeper should allow this (has_text=true)
-             (should (eq (carriage--gatekeeper-check-item item root) 'ok))))
+              ;; Gatekeeper should allow this (has_text=true)
+              (let ((res (carriage--gatekeeper-check-item item root)))
+                ;; success is represented by nil (no fail row). Ensure no fail.
+                (should (null res))))
          (when (buffer-live-p buf)
            (kill-buffer buf))))))
 
@@ -68,9 +70,12 @@
              (buf (get-buffer-create "*gatekeeper-test*")))
          (with-current-buffer buf
            (insert manifest-content)
-           ;; Gatekeeper should reject edit (has_text=false)
-           (let ((item (list :op 'aibo :file "test.txt" :path file-path)))
-             (should (eq (carriage--gatekeeper-check-item item root) 'fail))))
+            ;; Gatekeeper should reject edit (has_text=false)
+            (let* ((item (list :op 'aibo :file "test.txt" :path file-path))
+                   (res (carriage--gatekeeper-check-item item root)))
+              ;; Expect a fail row plist with :status 'fail and suggestion to request context
+              (should (and (listp res) (eq (plist-get res :status) 'fail)))
+              (should (string= (plist-get res :_suggest_context) "test.txt"))))
          (when (buffer-live-p buf)
            (kill-buffer buf))))))
 
@@ -93,9 +98,10 @@
              (buf (get-buffer-create "*gatekeeper-test*")))
          (with-current-buffer buf
            (insert manifest-content)
-           ;; Create op should be rejected for existing file
-           (let ((item (list :op 'create :file "existing.txt" :path file-path)))
-             (should (eq (carriage--gatekeeper-check-item item root) 'fail))))
+            ;; Create op should be rejected for existing file
+            (let* ((item (list :op 'create :file "existing.txt" :path file-path))
+                   (res (carriage--gatekeeper-check-item item root)))
+              (should (and (listp res) (eq (plist-get res :status) 'fail)))))
          (when (buffer-live-p buf)
            (kill-buffer buf))))))
 

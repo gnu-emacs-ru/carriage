@@ -300,9 +300,16 @@ snapshot only when no explicit manifest block is present in the current buffer."
                                :details (if (eq source 'manifest)
                                             "Create forbidden: path already exists in current state manifest"
                                           "Create forbidden: path already exists in current project state")))
-       ((and (carriage--state-sensitive-op-p op) (null state))
-        (carriage--report-fail op :file (or path "-")
-                               :details "State-sensitive op rejected: path missing from current request state"))
+        ((and (carriage--state-sensitive-op-p op) (null state))
+         ;; If no explicit state manifest is present and this is an LLM-originated
+         ;; request, we FAIL-CLOSED to avoid unsafe edits. To help the model or
+         ;; UI recover, include a suggested begin_context entry for the path when
+         ;; available.
+         (let ((row (carriage--report-fail op :file (or path "-")
+                                         :details "State-sensitive op rejected: path missing from current request state")))
+           (if (and (stringp path) (not (string-empty-p path)))
+               (append row (list :_suggest_context path))
+             row)))
        ((and (carriage--state-sensitive-op-p op) (not exists))
         (carriage--report-fail op :file (or path "-")
                                :details (if (eq source 'manifest)

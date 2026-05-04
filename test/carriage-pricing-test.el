@@ -98,9 +98,9 @@
       (should (equal tokens-out 2000))
       ;; Pricing for gpt-5 is present in built-in model-prices.csv => cost must be known.
       (should (eq known t))
-      ;; 1000 * 23.75 µ₽ + 2000 * 1900 µ₽ = 23,750 + 3,800,000 = 3,823,750 µ₽
+      ;; Updated pricing: 1000 * 3.86 + 2000 * 1900 = 3,864,000 µ₽
       (should (integerp cost-total))
-      (should (= cost-total 3823750)))))
+      (should (= cost-total 3864000)))))
 
 (ert-deftest carriage-fingerprint-upsert-unknown-model-cost-is-nil ()
   (unless (fboundp 'carriage-fingerprint-note-usage-and-cost)

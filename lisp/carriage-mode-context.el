@@ -7,7 +7,7 @@
 ;;; Code:
 
 (require 'subr-x)
-(require 'carriage-context)
+(require 'carriage-context nil t)
 
 (defun carriage--context-sources-enabled-p ()
   "Return non-nil when any context source is enabled in current buffer." 
@@ -65,15 +65,21 @@ Depends on `carriage-mode-context-injection' setting."
 
 (defun carriage--context-meta-from-text (ctx-text)
   "Extract meta info from formatted CTX-TEXT. Return plist (:omitted N :limited BOOL).
-Best-effort; never signals." 
+Best-effort; never signals."
   (condition-case _e
       (let* ((s (if (stringp ctx-text) ctx-text ""))
-             (omitted (or (and (> (length s) 0) (when (string-match "omitted=\([0-9]+\)" s) (string-to-number (match-string 1 s)))) 0))
-        (list :omitted (max 0 (or omitted 0))
-              :limited (and (> (or omitted 0) 0)
+             (omitted
+              (or
+               (and (> (length s) 0)
+                    (let ((m (and (string-match "omitted=\\([0-9]+\\)" s)
+                                  (match-string 1 s))))
+                      (when m (string-to-number m))))
+               0))
+             (limited (and (> omitted 0)
                            (or (string-match-p "limit reached" s)
                                (string-match-p "CTXPLAN_W_LIMIT" s)
                                (string-match-p "truncated by max-files" s)))))
+        (list :omitted (max 0 omitted) :limited (and limited t)))
     (error (list :omitted 0 :limited nil))))
 
 (defun carriage--context-profile-symbol (&optional buffer)

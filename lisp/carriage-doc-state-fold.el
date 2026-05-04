@@ -265,5 +265,14 @@
           carriage-doc-state--fold-result-ovs nil)
     t))
 
+(defun carriage-doc-state-summary-refresh (&optional buffer)
+  "Refresh fold overlays for BUFFER (or current buffer).
+Compatibility wrapper: enables fold overlays if not already enabled,
+or refreshes them if already active."
+  (with-current-buffer (or buffer (current-buffer))
+    (unless carriage-doc-state--fold-enabled
+      (carriage-doc-state-summary-enable (current-buffer)))
+    (carriage-doc-state--fold--refresh-overlays)))
+
 (provide 'carriage-doc-state-fold)
 ;;; carriage-doc-state-fold.el ends here

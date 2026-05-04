@@ -32,19 +32,18 @@
 
 (defun carriage-doc-state--header-insertion-point ()
   "Return position for inserting canonical CARRIAGE_STATE line.
-Searches backward for last #+title or first #+begin_src, or uses point-min."
+Finds position AFTER the last #+PROPERTY line in the header, or after #+title if no properties."
   (save-excursion
     (goto-char (point-min))
-    (let ((title nil)
-          (first-block nil))
-      (while (re-search-forward "^[ \t]*#\\+\\([^:]+\\)" nil t)
-        (cond
-         ((looking-at "title:")
-          (setq title (match-beginning 0)))
-         ((and (not first-block)
-               (looking-at "begin_"))
-          (setq first-block (match-beginning 0)))))
-      (or title first-block (point-min)))))
+    (let (last-prop-end)
+      (while (re-search-forward "^[ \t]*#\\+PROPERTY:" nil t)
+        (setq last-prop-end (line-end-position)))
+      (if last-prop-end
+          (1+ last-prop-end)
+        (goto-char (point-min))
+        (if (re-search-forward "^[ \t]*#\\+title:" nil t)
+            (1+ (line-end-position))
+          (point-min))))))
 
 (defun carriage-doc-state--normalize-state (state)
   "Normalize STATE (plist or alist) into canonical plist form."

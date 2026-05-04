@@ -818,13 +818,22 @@ When STOP-AFTER is a positive integer, scanning stops early once count exceeds i
   ;; No watchdogs, no post-command hooks, no variable watchers.
   (when (fboundp 'carriage-mode--modeline-ensure-once)
     (let ((buf (current-buffer)))
-      (run-at-time
-       0 nil
-       (lambda ()
-         (when (buffer-live-p buf)
-           (with-current-buffer buf
-             (when (bound-and-true-p carriage-mode)
-               (ignore-errors (carriage-mode--modeline-ensure-once buf)))))))))
+      ;; Immediate zero-delay attempt (existing behavior)
+      (run-at-time 0 nil
+                   (lambda ()
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (when (bound-and-true-p carriage-mode)
+                           (ignore-errors (carriage-mode--modeline-ensure-once buf)))))))
+      ;; Secondary short idle retry to survive slightly later mode-line rewrites.
+      ;; This is intentionally conservative: a one-shot idle retry reduces race
+      ;; windows without adding long-running watchers or polling.
+      (run-with-idle-timer 0.05 nil
+                           (lambda ()
+                             (when (buffer-live-p buf)
+                               (with-current-buffer buf
+                                 (when (bound-and-true-p carriage-mode)
+                                   (ignore-errors (carriage-mode--modeline-ensure-once buf))))))))))
 
   ;; Warm up common modules on idle to avoid cold-start delays in first send.
   (run-at-time 0.2 nil
@@ -2326,74 +2335,6 @@ _KEEṔ-APPLIED-BODIES is deprecated and ignored (applied patches are never sent
               (goto-char (min (point-max) (+ beg-line-beg (length summary)))))))))
     (buffer-substring-no-properties (point-min) (point-max))))
 
-(defun carriage--payload-summarize-patch-blocks (text)
-  "Replace #+begin_patch blocks in TEXT with one-line history comments.
-
-Policy:
-- Collapse ANY begin_patch..end_patch block into a single line:
-    ;; patch history: <target> — <description>
-- Escape hatch: if header contains :keep t, keep that patch block verbatim.
-- If end marker is missing, treat the block as lasting until end-of-text.
-
-Goal: prevent old/failed patches in the buffer from acting as \"project state\" in the next prompt."
-  (with-temp-buffer
-    (insert (or text ""))
-    (goto-char (point-min))
-    (let ((case-fold-search t))
-      (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
-        (let* ((beg-line-beg (line-beginning-position))
-               (sexp-str (match-string 1))
-               (hdr (condition-case _e
-                        (car (read-from-string sexp-str))
-                      (error nil)))
-               (plist (if (listp hdr) hdr '()))
-               (keep (plist-get plist :keep)))
-          (if keep
-              ;; Keep verbatim; advance past end marker if present to avoid infinite loop.
-              (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
-                  (goto-char (min (point-max) (1+ (line-end-position))))
-                (goto-char (point-max)))
-            (let* ((op0 (plist-get plist :op))
-                   (op (cond
-                        ((symbolp op0) op0)
-                        ((stringp op0) (intern op0))
-                        (t nil)))
-                   (desc (or (plist-get plist :description)
-                             (plist-get plist :result)
-                             "(no description)"))
-                   (desc (string-trim (format "%s" desc)))
-                   (desc (if (string-empty-p desc) "(no description)" desc))
-                   (target
-                    (pcase op
-                      ('rename
-                       (let ((a (plist-get plist :from))
-                             (b (plist-get plist :to)))
-                         (string-trim
-                          (format "%s → %s"
-                                  (or (and (stringp a) a) "-")
-                                  (or (and (stringp b) b) "-")))))
-                      (_
-                       (cond
-                        ((stringp (plist-get plist :path)) (plist-get plist :path))
-                        ((stringp (plist-get plist :file)) (plist-get plist :file))
-                        (t "-")))))
-                   (summary (format ";; patch history: %s — %s\n"
-                                    (string-trim (format "%s" target))
-                                    desc))
-                   (block-end
-                    (save-excursion
-                      (goto-char (line-end-position))
-                      (forward-line 1)
-                      (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
-                          (min (point-max) (1+ (line-end-position)))
-                        (point-max)))))
-              (delete-region beg-line-beg block-end)
-              (goto-char beg-line-beg)
-              (insert summary)
-              ;; Continue scanning after inserted summary.
-              (goto-char (min (point-max) (+ beg-line-beg (length summary)))))))))
-    (buffer-substring-no-properties (point-min) (point-max))))
-
 (defun carriage--sanitize-payload-for-llm (text)
   "Return TEXT sanitized for LLM payload.
 Strips doc-state/markers and replaces begin_patch blocks with one-line history comments.
@@ -3133,46 +3074,8 @@ included to prevent duplicate replays of the same response body.
           :source source1
           :op op
           :target target
-          :response fp
+:response fp
           :block-hash block-hash)))
-
-(defun carriage--auto-apply-unit-key (source &optional unit response-fingerprint)
-  "Return a deduplication key for auto-apply SOURCE and UNIT.
-
-SOURCE is a short diagnostic tag like 'single-item, 'region-group or 'last-iteration.
-UNIT is an optional plan item (plist/alist) used to distinguish multiple apply
-operations inside one send entry. RESPONSE-FINGERPRINT, when non-empty, is
-included to prevent duplicate replays of the same response body."
-  (let* ((entry (and (boundp 'carriage--current-send-entry-id)
-                     carriage--current-send-entry-id))
-         (fp (and (stringp response-fingerprint)
-                  (not (string-empty-p response-fingerprint))
-                  response-fingerprint))
-         (op (and unit
-                  (or (and (listp unit) (plist-get unit :op))
-                      (alist-get :op unit))))
-         (target
-          (and unit
-               (or (and (listp unit)
-                        (or (plist-get unit :path)
-                            (plist-get unit :file)
-                            (let ((from (plist-get unit :from))
-                                  (to (plist-get unit :to)))
-                              (and (or from to)
-                                   (format "%s→%s" (or from "-") (or to "-")))))
-                        )
-                   (alist-get :path unit)
-                   (alist-get :file unit)
-                   (let ((from (alist-get :from unit))
-                         (to (alist-get :to unit)))
-                     (and (or from to)
-                          (format "%s→%s" (or from "-") (or to "-")))))))
-         (source1 (or source 'unknown)))
-    (list :entry entry
-          :source source1
-          :op op
-          :target target
-          :response fp)))
 
 (defvar-local carriage-mode--send-prepare-reentry nil
   "Non-nil while async send preflight re-enters the original send command.

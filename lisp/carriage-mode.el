@@ -833,7 +833,7 @@ When STOP-AFTER is a positive integer, scanning stops early once count exceeds i
                              (when (buffer-live-p buf)
                                (with-current-buffer buf
                                  (when (bound-and-true-p carriage-mode)
-                                   (ignore-errors (carriage-mode--modeline-ensure-once buf))))))))))
+                                   (ignore-errors (carriage-mode--modeline-ensure-once buf)))))))
 
   ;; Warm up common modules on idle to avoid cold-start delays in first send.
   (run-at-time 0.2 nil

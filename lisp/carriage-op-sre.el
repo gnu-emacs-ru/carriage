@@ -698,7 +698,12 @@ Implements NOOP→'skip when after==before and reports :matches and :changed-byt
            (sim    (carriage-sre-simulate-apply plan-item repo-root))
            (after  (or (plist-get sim :after) before))
            (matches (or (plist-get sim :count) 0))
-           (changed-bytes (max 0 (abs (- (string-bytes after) (string-bytes before))))))
+            ;; Compute changed-bytes as difference in byte-length between before/after.
+            ;; Guard against nil by treating nil as empty string.
+            (let* ((before-str (or before ""))
+                   (after-str  (or after ""))
+                   (changed-bytes (max 0 (abs (- (string-bytes after-str) (string-bytes before-str))))))
+
       (if (string= before after)
           ;; NOOP → skip
           (list :op 'sre :status 'skip :file file

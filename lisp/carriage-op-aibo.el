@@ -338,32 +338,7 @@ DETAILS is string, CONTEXT-PATH suggests begin_context if non-nil."
     (or (and (listp opts) (plist-member opts key))
         (and (listp opts) (assq key opts)))))
 
-;; Strict validation: forbid any :match in AIBO; require :expect when :occur all
-(unless (fboundp 'carriage--aibo--validate-opts)
-  (defun carriage--aibo--validate-opts (pairs)
-    "Validate PAIRS for AIBO literal-only constraints.
-- Any presence of :match is forbidden (regex not allowed).
-- :occur must be one of 'first or 'all; when 'all, :expect must be present."
-    (let ((tail pairs))
-      (while tail
-        (let* ((p (car tail))
-               (opts (cond ((and (listp p) (plist-member p :opts)) (plist-get p :opts))
-                           ((and (listp p)) (alist-get :opts p))
-                           (t nil)))
-               (occur (and opts (carriage--aibo--opt opts :occur)))
-               (expect (and opts (carriage--aibo--opt opts :expect))))
-          ;; Any :match key is not allowed in AIBO (literal-only format)
-          (when (carriage--aibo--opt-present-p opts :match)
-            (signal (carriage-error-symbol 'SRE_E_REGEX_SYNTAX)
-                    (list "AIBO forbids :match; regex not allowed")))
-          ;; Strict :occur validation
-          (when (and occur (not (memq occur '(first all))))
-            (signal (carriage-error-symbol 'SRE_E_OCCUR_VALUE) (list occur)))
-          ;; :occur all requires :expect
-          (when (and (eq occur 'all) (not expect))
-            (signal (carriage-error-symbol 'SRE_E_OCCUR_EXPECT) nil)))
-        (setq tail (cdr tail))))
-    pairs))
+;; (Validation implementation lives earlier in the file; avoid duplicate defs.)
 
 ;; Post-parse validator: ensure parse-aibo signals on invalid opts
 (defun carriage--aibo--validate-parse-result (plan)

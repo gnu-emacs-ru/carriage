@@ -308,11 +308,16 @@ snapshot only when no explicit manifest block is present in the current buffer."
                                :details (if (eq source 'manifest)
                                             "State-sensitive op rejected: file does not exist in current state manifest"
                                           "State-sensitive op rejected: file does not exist in current project state")))
-       ((and (carriage--text-required-op-p op) (not has-text))
-        (carriage--report-fail op :file (or path "-")
-                               :details (if (eq source 'manifest)
-                                            "Edit rejected: file text is not present in current request context"
-                                          "Edit rejected: file text is not available from current project state")))
+        ((and (carriage--text-required-op-p op) (not has-text))
+         ;; When text is required but not present, fail-closed but include a
+         ;; suggestion to request the file text (begin_context) so callers/UI can
+         ;; offer a constructive next step instead of a bare error.
+         (let ((details (if (eq source 'manifest)
+                            "Edit rejected: file text is not present in current request context"
+                          "Edit rejected: file text is not available from current project state")))
+           (append (carriage--report-fail op :file (or path "-") :details details)
+                   (when (and (stringp path) (not (string-empty-p path)))
+                     (list :_suggest_context path)))))
        (t nil)))))
 
 (defun carriage--dry-run-dispatch (item repo-root)

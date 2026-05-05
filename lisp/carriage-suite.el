@@ -253,6 +253,12 @@ Return STRING (empty string when not found)."
   "Build (:system :prompt) for INTENT ('Ask|'Code|'Hybrid) and SUITE-ID with CTX.
 CTX may contain keys like :payload, :context-text, :context-target, :delim, :files, etc.
 :payload is user task text. This function is pure (no side effects)."
+  (unless (memq intent '(Ask Code Hybrid))
+    (signal (carriage-error-symbol 'MODE_E_DISPATCH)
+            (list (format "Unknown intent: %S" intent))))
+  (unless (memq suite-id '(sre udiff hybrid aibo))
+    (signal (carriage-error-symbol 'MODE_E_DISPATCH)
+            (list (format "Unknown suite: %S" suite-id))))
   (let* ((payload   (or (plist-get ctx :payload) ""))
          (ctx-text  (plist-get ctx :context-text))
          (ctx-target (or (plist-get ctx :context-target) 'system)))

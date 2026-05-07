@@ -68,12 +68,12 @@ Depends on `carriage-mode-context-injection' setting."
 Best-effort; never signals." 
   (condition-case _e
       (let* ((s (if (stringp ctx-text) ctx-text ""))
-             (omitted (or (and (> (length s) 0) (when (string-match "omitted=\([0-9]+\)" s) (string-to-number (match-string 1 s)))) 0))
+             (omitted (or (and (> (length s) 0) (when (string-match "omitted=\([0-9]+\)" s) (string-to-number (match-string 1 s)))) 0)))
         (list :omitted (max 0 (or omitted 0))
               :limited (and (> (or omitted 0) 0)
-                           (or (string-match-p "limit reached" s)
-                               (string-match-p "CTXPLAN_W_LIMIT" s)
-                               (string-match-p "truncated by max-files" s)))))
+                            (or (string-match-p "limit reached" s)
+                                (string-match-p "CTXPLAN_W_LIMIT" s)
+                                (string-match-p "truncated by max-files" s)))))
     (error (list :omitted 0 :limited nil))))
 
 (defun carriage--context-profile-symbol (&optional buffer)

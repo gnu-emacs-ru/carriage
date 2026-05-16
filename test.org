@@ -1,0 +1,14 @@
+#+PROPERTY: CARRIAGE_STATE (:CAR_MODE t :CAR_INTENT Ask :CAR_SUITE aibo :CAR_MODEL "gptel-default" :CAR_BACKEND gptel :CAR_PROVIDER nil :CAR_CTX_GPTEL nil :CAR_CTX_DOC t :CAR_CTX_VISIBLE nil :CAR_CTX_MAP t :CAR_CTX_PATCHED nil :CAR_CTX_MAX_FILES 200 :CAR_CTX_MAX_BYTES 16777216 :CAR_STRUCTURE_HINT t :CAR_TYPEDBLOCKS t)
+Расскажи, что видишь?
+-----
+#+CARRIAGE_FINGERPRINT: (:CAR_TS 1778908393.6767075 :CAR_INTENT Ask :CAR_SUITE aibo :CAR_BACKEND gptel :CAR_PROVIDER nil :CAR_MODEL "gptel-default" :CAR_CTX_DOC t :CAR_CTX_GPTEL nil :CAR_CTX_VISIBLE nil :CAR_CTX_PLAIN t :CAR_CTX_PATCHED nil :CAR_CTX_MAP t :CAR_DOC_CTX_SCOPE all :CAR_CTX_PROFILE nil :CAR_CTX_MAX_FILES 200 :CAR_CTX_MAX_BYTES 16777216 :CAR_CTX_INJECTION system :CAR_CTX_LIMITED nil :CAR_CTX_OMITTED 0 :CAR_TOKENS_IN 56 :CAR_TOKENS_OUT 79 :CAR_BYTES_IN 56 :CAR_BYTES_OUT 412 :CAR_USAGE_UNIT tokens :CAR_AUDIO_IN nil :CAR_AUDIO_OUT nil :CAR_COST_KNOWN t :CAR_COST_IN_U nil :CAR_COST_OUT_U 68256 :CAR_COST_AUDIO_IN_U nil :CAR_COST_AUDIO_OUT_U nil :CAR_COST_TOTAL_U 68256)
+* Что вижу
+
+#+begin_answer
+Вижу только ваш текст-запрос: «Расскажи, что видишь?»
+
+Если вы хотите, я могу:
+- описать содержимое изображения, если вы его прикрепите;
+- разобрать текст;
+- помочь с любым фрагментом, который вы пришлёте.
+#+end_answer

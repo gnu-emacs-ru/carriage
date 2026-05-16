@@ -86,10 +86,14 @@ Optional WHAT describes the progress kind for diagnostics."
                (stringp carriage-transport--watchdog-abort-rid)
                (string= rid carriage-transport--watchdog-abort-rid))
           (condition-case e
-              (funcall carriage-transport--watchdog-abort-fn)
+              (progn
+                (funcall carriage-transport--watchdog-abort-fn)
+                ;; Clear abort fn to avoid duplicate invocations if watchdog triggers again.
+                (setq carriage-transport--watchdog-abort-fn nil))
             (error
              (carriage-log "Transport: watchdog abort-fn error rid=%s: %s"
-                           (or rid "-") (error-message-string e))))
+                           (or rid "-") (error-message-string e))
+             (setq carriage-transport--watchdog-abort-fn nil)))
         (when carriage-transport-watchdog-debug
           (carriage-log "Transport: watchdog abort-fn missing/stale rid=%s abort-rid=%s"
                         (or rid "-")
@@ -99,7 +103,9 @@ Optional WHAT describes the progress kind for diagnostics."
         (carriage-log "Transport: watchdog -> complete(error) rid=%s current-rid=%s"
                       (or rid "-")
                       (or (carriage-transport-current-request-id (current-buffer)) "-")))
-      (ignore-errors (carriage-transport-complete t (current-buffer))))))
+      ;; Finalize asynchronously to avoid reentrancy into adapter sentinels/cleanup.
+      (ignore-errors
+       (run-at-time 0 nil (lambda (b) (ignore-errors (carriage-transport-complete t b))) (current-buffer))))))
 
 (defun carriage-transport--watchdog-start (&optional buffer)
   "Start watchdog timer for BUFFER if enabled."

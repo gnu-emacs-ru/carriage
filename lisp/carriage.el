@@ -23,6 +23,12 @@
 ;;
 ;;; Code:
 
+(eval-and-compile
+  (let ((source-file (or load-file-name buffer-file-name)))
+    (when source-file
+      (let ((this-dir (file-name-directory source-file)))
+        (when this-dir (add-to-list 'load-path this-dir))))))
+
 (require 'carriage-errors)
 (carriage-define-errors)
 

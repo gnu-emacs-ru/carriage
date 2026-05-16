@@ -159,6 +159,22 @@ to a compact label if context counting fails."
                              (mapconcat #'carriage-ui--context-item->line items "\n"))))))
     (cons (format "[Ctx:%d]" count) tooltip)))
 
+(defun carriage-ui--context-badge ()
+  "Return a (LABEL . TOOLTIP) for the context badge.
+
+This is a lightweight, robust wrapper used from the modeline. It derives
+current toggle states and delegates to `carriage-ui--compute-context-badge'.
+Any errors are swallowed to avoid signalling from redisplay/modeline.
+"
+  (condition-case _err
+      (let* ((toggles (carriage-ui--context-toggle-states))
+             (inc-doc (plist-get toggles :doc))
+             (inc-gpt (plist-get toggles :gpt))
+             (inc-vis (plist-get toggles :vis))
+             (inc-patched (plist-get toggles :patched)))
+        (carriage-ui--compute-context-badge inc-doc inc-gpt inc-vis inc-patched))
+    (error nil)))
+
 (defun carriage-ui-refresh-context-badge (&optional _event)
   "Refresh the context badge now."
   (interactive "e")

@@ -718,7 +718,7 @@ Implements NOOP→'skip when after==before and reports :matches and :changed-byt
             (carriage-git-add repo-root file))
           (list :op 'sre :status 'ok :file file
                 :matches matches :changed-bytes changed-bytes
-                :details (format "Applied %d replacements" matches)))))))
+                :details (format "Applied %d replacements" matches)))))))))
 
 ;;;; Conflict Resolution Helpers
 

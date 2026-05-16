@@ -1095,6 +1095,34 @@ RID presence is used only as a liveness flag here."
      'error)
    resp info requested-model))
 
+(defun carriage-transport-gptel--info-terminal-p (info)
+  "Return non-nil when INFO indicates a terminal callback."
+  (and (listp info)
+       (or (plist-member info :done)
+           (plist-member info :finished)
+           (plist-member info :finish)
+           (plist-member info :end)
+           (plist-member info :eof)
+           (let ((fr (or (plist-get info :finish_reason)
+                         (plist-get info :finish-reason)
+                         (plist-get info :stop_reason)
+                         (plist-get info :stop-reason))))
+             (or (eq fr t)
+                 (and (symbolp fr)
+                      (memq fr '(done finished finish end eof stop)))
+                 (and (stringp fr)
+                      (member (downcase fr)
+                              '("done" "finished" "finish" "end" "eof" "stop"))))))))
+
+(defun carriage-transport-gptel--response-terminal-p (resp info)
+  "Return non-nil when RESP/INFO should end the request lifecycle."
+  (or (memq resp '(done finished finish end eof :done :finished :finish :end :eof))
+      (and (stringp resp)
+           (or (string-match-p "#\\+end_answer\\b" resp)
+               (carriage-transport-gptel--info-terminal-p info)))
+      (eq resp t)
+      (null resp)))
+
 (defun carriage-transport-gptel--callback-handle-unknown (id resp info first-stream)
   "Log unknown callback RESP/INFO for ID and preserve FIRST-STREAM."
   (when carriage-transport-gptel-diagnostics
@@ -1111,13 +1139,30 @@ RID presence is used only as a liveness flag here."
     (origin-buffer id requested-model resp info first-stream)
   "Dispatch one callback event and return updated callback state."
   (cond
-   ((stringp resp)
-    (list :finished nil
-          :first-stream
-          (carriage-transport-gptel--callback-handle-text
-           origin-buffer resp first-stream)
+   ((and (not (stringp resp))
+         (carriage-transport-gptel--response-terminal-p resp info))
+    (carriage-transport-gptel--callback-finalize-simple
+     origin-buffer id 'done resp info requested-model)
+    (list :finished t
+          :first-stream first-stream
           :last-resp resp
           :last-info info))
+   ((stringp resp)
+    (let ((first-stream1
+           (carriage-transport-gptel--callback-handle-text
+            origin-buffer resp first-stream)))
+      (if (carriage-transport-gptel--response-terminal-p resp info)
+          (progn
+            (carriage-transport-gptel--callback-finalize-simple
+             origin-buffer id 'done resp info requested-model)
+            (list :finished t
+                  :first-stream first-stream1
+                  :last-resp resp
+                  :last-info info))
+        (list :finished nil
+              :first-stream first-stream1
+              :last-resp resp
+              :last-info info))))
    ((and (consp resp) (eq (car resp) 'reasoning))
     (list :finished nil
           :first-stream

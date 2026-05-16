@@ -3,6 +3,12 @@
 (require 'ert)
 (require 'carriage)
 
+(ert-deftest carriage-smoke-package-loads-and-provides-mode ()
+  (require 'carriage)
+  (should (featurep 'carriage))
+  (should (fboundp 'carriage-mode))
+  (should (boundp 'carriage-mode-map)))
+
 (ert-deftest carriage-mode-present ()
   (should (fboundp 'carriage-mode))
   (should (boundp 'carriage-mode-map)))

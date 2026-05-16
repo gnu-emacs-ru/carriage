@@ -145,8 +145,13 @@ Side-effect-only; never alters REPORT (REQ-apply-010)."
                                              (plist-put plist :result res) plist)))
                              (plist    (let ((m (plist-get row :matches)))
                                          (if (numberp m) (plist-put plist :matches m) plist)))
-                             (plist    (let ((b (plist-get row :changed-bytes)))
-                                         (if (numberp b) (plist-put plist :bytes b) plist)))
+                              (plist    (let ((b (or (plist-get row :changed-bytes) (plist-get row :bytes))))
+                                          ;; Normalize: prefer :changed-bytes as external contract, but
+                                          ;; keep :bytes for backward compatibility in-file.
+                                          (when (numberp b)
+                                            (setq plist (plist-put plist :changed-bytes b))
+                                            (setq plist (plist-put plist :bytes b)))
+                                          plist)))
                              (new-hdr  (concat "#+begin_patch " (prin1-to-string plist))))
                         ;; Rewrite header line
                         (delete-region (line-beginning-position) (line-end-position))
@@ -184,7 +189,7 @@ Side-effect-only; never alters REPORT (REQ-apply-010)."
                            (<= pt (marker-position me)))
                   (goto-char (marker-position me))
                   (forward-line 1)
-                  (beginning-of-line)))))))))
+                  (beginning-of-line))))))))
   t)
 
 

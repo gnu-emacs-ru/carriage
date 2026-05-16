@@ -23,6 +23,12 @@
 ;;
 ;;; Code:
 
+(eval-and-compile
+  (let ((source-file (or load-file-name buffer-file-name)))
+    (when source-file
+      (let ((this-dir (file-name-directory source-file)))
+        (when this-dir (add-to-list 'load-path this-dir))))))
+
 (require 'cl-lib)
 (require 'subr-x)
 (require 'carriage-utils)
@@ -695,29 +701,21 @@ BEGIN-RE and END-RE are regexps matching marker lines (BOL-anchored recommended)
                  (>= pt beg) (<= pt end))))))))
 
 (defun carriage-ctrl-c-ctrl-c ()
-  "Context-sensitive handler for C-c C-c in carriage-mode buffers.
-
-Routing:
-- Inside begin_context_plan → compile it to begin_context.
-- Inside begin_patch        → apply at point or region.
-- Otherwise                 → delegate to Org's `org-ctrl-c-ctrl-c`."
+  "Context-sensitive handler for C-c C-c in carriage-mode buffers."
   (interactive)
   (cond
-   ;; 1) Context plan compilation
    ((carriage--point-in-org-block-p
      "^[ \t]*#\\+begin_context_plan\\b"
      "^[ \t]*#\\+end_context_plan\\b")
     (if (fboundp 'carriage-context-plan-compile-at-point)
         (call-interactively #'carriage-context-plan-compile-at-point)
       (user-error "carriage-context-plan not available")))
-   ;; 2) Patch apply (legacy convenience; keeps prior semantics)
    ((carriage--point-in-org-block-p
      "^[ \t]*#\\+begin_patch\\b"
      "^[ \t]*#\\+end_patch\\b")
     (if (fboundp 'carriage-apply-at-point-or-region)
         (call-interactively #'carriage-apply-at-point-or-region)
       (user-error "carriage apply commands are not available")))
-   ;; 3) Delegate to Org
    (t
     (require 'org)
     (call-interactively #'org-ctrl-c-ctrl-c))))
@@ -833,7 +831,7 @@ When STOP-AFTER is a positive integer, scanning stops early once count exceeds i
                              (when (buffer-live-p buf)
                                (with-current-buffer buf
                                  (when (bound-and-true-p carriage-mode)
-                                   (ignore-errors (carriage-mode--modeline-ensure-once buf)))))))
+                                   (ignore-errors  (carriage-mode--modeline-ensure-once buf)))))))
 
   ;; Warm up common modules on idle to avoid cold-start delays in first send.
   (run-at-time 0.2 nil
@@ -857,7 +855,7 @@ When STOP-AFTER is a positive integer, scanning stops early once count exceeds i
     (ignore-errors
       (when (and (boundp 'carriage-doc-state-save-on-save)
                  carriage-doc-state-save-on-save)
-        (carriage-doc-state-install-save-hook)))))
+        (carriage-doc-state-install-save-hook)))))))
 
 (defun carriage-mode--disable ()
   "Disable Carriage mode in the current buffer (internal)."
@@ -2411,168 +2409,66 @@ Best-effort: never signal.
 
 When context is truncated due to limits, prompt user for confirmation before
 proceeding with incomplete context (unless `carriage-mode-confirm-truncated-context' is nil)."
-  (condition-case _e
-      (when (and (require 'carriage-context nil t)
-                 (carriage--context-sources-enabled-p))
-        (let* ((root (or (carriage-project-root) default-directory))
-               (col (carriage-context-collect buffer root))
-               (ctx-text (when col (carriage-context-format col :where target)))
-               ;; Ensure ctx-text is always a string (never nil)
-               (ctx-text (if (and (stringp ctx-text) (> (length ctx-text) 0))
-                             ctx-text
-                           "")))
-          (when col
-            ;; Traffic: log context summary and individual elements (paths only)
-            (let* ((files (plist-get col :files))
-                   (stats (plist-get col :stats))
-                   (inc   (and stats (plist-get stats :included)))
-                   (sk    (and stats (plist-get stats :skipped)))
-                   (bytes (and stats (plist-get stats :total-bytes))))
-              (carriage-traffic-log 'out "context: target=%s included=%s skipped=%s total-bytes=%s"
-                                    target (or inc 0) (or sk 0) (or bytes 0))
-              (dolist (f files)
-                (let ((rel (plist-get f :rel))
-                      (included (plist-get f :content))
-                      (reason (plist-get f :reason)))
-                  (carriage-traffic-log 'out " - %s (%s)"
-                                        rel
-                                        (if (stringp included)
-                                            "included"
-                                          (format "omitted%s"
-                                                  (if reason (format ": %s" reason) ""))))))))
-          ;; Append Project Map (begin_map) when enabled.
-          ;;
-          ;; IMPORTANT: Project Map computation MUST NOT run from redisplay/timers.
-          ;; It is allowed only in the send pipeline (this function).
-          ;;
-          ;; Root selection policy (important for real-world usage):
-          ;; - Prefer `carriage-project-root' (git root of buffer's default-directory).
-          ;; - If buffer is outside the repo (common for notes/org tasks), try to infer git root
-          ;;   from absolute paths listed in #+begin_context / patched-files.
-          ;; - Fallback: `default-directory' (may yield no map if not a repo).
-          (let* ((map-enabled (and (boundp 'carriage-mode-include-project-map)
-                                   carriage-mode-include-project-map))
-                 (map-build-fn (and map-enabled (fboundp 'carriage-context-project-map-build)))
-                 (proj-root (ignore-errors (carriage-project-root)))
-                 (ctx-root (and (not proj-root)
-                                (ignore-errors (carriage--context--infer-project-root-from-context buffer))))
-                 (map-root (or proj-root ctx-root root))
-                 (map-root-src (cond
-                                (proj-root "project-root")
-                                (ctx-root  "context-root")
-                                (t         "default-dir")))
-                 (ctx-bytes-before (if (stringp ctx-text) (string-bytes ctx-text) 0)))
-            (carriage-traffic-log 'out
-                                  "context: project-map preflight enabled=%s fbound=%s target=%s map-root=%s (src=%s) buf-root=%s ctx-bytes=%d"
-                                  (if map-enabled "t" "nil")
-                                  (if map-build-fn "t" "nil")
-                                  target
-                                  (or map-root "-")
-                                  map-root-src
-                                  (or root "-")
-                                  ctx-bytes-before)
-            (cond
-             ((not map-enabled)
-              (carriage-traffic-log 'out "context: project-map skipped (toggle=off)"))
-             ((not map-build-fn)
-              (carriage-traffic-log 'out "context: project-map skipped (missing build fn)"))
-             ((or (not (stringp map-root)) (string-empty-p (string-trim map-root)))
-              (carriage-traffic-log 'out "context: project-map skipped (no map-root)"))
-             ((file-remote-p map-root)
-              (carriage-traffic-log 'out "context: project-map skipped (remote map-root=%s)" map-root))
-             (t
-              (let* ((carriage-context--project-map-allow-compute t)
-                     (t0 (float-time))
-                     (res (ignore-errors (carriage-context-project-map-build map-root)))
-                     (dt (- (float-time) t0))
-                     (ok (and (listp res) (plist-get res :ok)))
-                     (reason (and (listp res) (plist-get res :reason)))
-                     (method (and (listp res) (plist-get res :method)))
-                     (elapsed (and (listp res) (plist-get res :elapsed)))
-                     (paths (and (listp res) (plist-get res :paths)))
-                     (trunc (and (listp res) (plist-get res :truncated)))
-                     (mp (and (listp res) (plist-get res :text)))
-                     (mp-bytes (if (stringp mp) (string-bytes mp) 0))
-                     (ctx-bytes-pre (if (stringp ctx-text) (string-bytes ctx-text) 0))
-                     (mp-block-p (and (stringp mp)
-                                      (not (string-empty-p (string-trim mp)))
-                                      (string-match-p "#\\+begin_map\\b" mp)
-                                      (string-match-p "#\\+end_map\\b" mp))))
-                (carriage-traffic-log 'out
-                                      "context: project-map build ok=%s reason=%s method=%s paths=%s truncated=%s elapsed=%.3fs (wall=%.3fs allow=%s) mp-bytes=%d map-root=%s block=%s"
-                                      (if ok "t" "nil")
-                                      (or reason "-")
-                                      (or method "-")
-                                      (if (integerp paths) paths (or paths "-"))
-                                      (if trunc "t" "nil")
-                                      (if (numberp elapsed) elapsed 0.0)
-                                      (if (numberp dt) dt 0.0)
-                                      (if (bound-and-true-p carriage-context--project-map-allow-compute) "t" "nil")
-                                      mp-bytes
-                                      (or map-root "-")
-                                      (if mp-block-p "t" "nil"))
-                (cond
-                 (mp-block-p
-                  (carriage-traffic-log 'out
-                                        "context: project-map append into ctx-text (ctx-bytes-pre=%d root=%s ok=%s)"
-                                        ctx-bytes-pre (or map-root "-") (if ok "t" "nil"))
+  (condition-case _err
+      (if (and (require 'carriage-context nil t)
+               (carriage--context-sources-enabled-p))
+          (let* ((root (or (ignore-errors (carriage-project-root)) default-directory))
+                 (col (ignore-errors (carriage-context-collect buffer root)))
+                 (ctx-text ""))
+            (when col
+              (let* ((files (plist-get col :files))
+                     (stats (plist-get col :stats))
+                     (inc (and stats (plist-get stats :included)))
+                     (sk (and stats (plist-get stats :skipped)))
+                     (bytes (and stats (plist-get stats :total-bytes))))
+                (carriage-traffic-log 'out "context: target=%s included=%s skipped=%s total-bytes=%s"
+                                      target (or inc 0) (or sk 0) (or bytes 0))
+                (dolist (f files)
+                  (let ((rel (plist-get f :rel))
+                        (included (plist-get f :content))
+                        (reason (plist-get f :reason)))
+                    (carriage-traffic-log 'out " - %s (%s)"
+                                          rel
+                                          (if (stringp included)
+                                              "included"
+                                            (format "omitted%s"
+                                                    (if reason (format ": %s" reason) ""))))))
+                (setq ctx-text (or (ignore-errors (carriage-context-format col :where target)) "")))
+            (when (and (boundp 'carriage-mode-include-project-map)
+                       carriage-mode-include-project-map
+                       (fboundp 'carriage-context-project-map-build))
+              (let* ((proj-root (ignore-errors (carriage-project-root)))
+                     (ctx-root (and (not proj-root)
+                                    (ignore-errors (carriage--context--infer-project-root-from-context buffer))))
+                     (map-root (or proj-root ctx-root root))
+                     (map-text (and (stringp map-root)
+                                  (not (string-empty-p (string-trim map-root)))
+                                  (not (file-remote-p map-root))
+                                  (let ((carriage-context--project-map-allow-compute t))
+                                    (ignore-errors
+                                      (plist-get (carriage-context-project-map-build map-root) :text)))))
+                     (map-text (if (stringp map-text) map-text "")))
+                (when (and (stringp map-text)
+                           (string-match-p "#\\+begin_map\\b" map-text)
+                           (string-match-p "#\\+end_map\\b" map-text))
                   (setq ctx-text
-                        (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
-                            (concat (string-trim-right ctx-text) "\n\n" (string-trim-right mp) "\n")
-                          (concat (string-trim-right mp) "\n")))
-                  (carriage-traffic-log 'out
-                                        "context: project-map appended (ctx-bytes-post=%d has-begin_map=%s)"
-                                        (if (stringp ctx-text) (string-bytes ctx-text) 0)
-                                        (if (and (stringp ctx-text)
-                                                 (string-match-p "#\\+begin_map\\b" ctx-text))
-                                            "t" "nil")))
-                 ((not ok)
-                  (carriage-traffic-log 'out "context: project-map not appended (ok=nil reason=%s root=%s)" (or reason "-") (or map-root "-"))
-                  ;; Make omission visible in the actual request payload (SYSTEM/PROMPT), not only in traffic logs.
-                  (let* ((note (format ";; Project Map omitted: reason=%s method=%s root=%s\n"
-                                       (or reason "-") (or method "-") (or map-root "-"))))
-                    (setq ctx-text
-                          (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
-                              (concat (string-trim-right ctx-text) "\n" note)
-                            note))))
-                 ((not (and (integerp paths) (> paths 0)))
-                  (carriage-traffic-log 'out "context: project-map not appended (paths=%s root=%s)" (or paths "-") (or map-root "-"))
-                  (let* ((note (format ";; Project Map omitted: paths=%s method=%s root=%s\n"
-                                       (or paths "-") (or method "-") (or map-root "-"))))
-                    (setq ctx-text
-                          (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
-                              (concat (string-trim-right ctx-text) "\n" note)
-                            note))))
-                 (t
-                  (carriage-traffic-log 'out "context: project-map not appended (empty/non-block text; bytes=%d root=%s)" mp-bytes (or map-root "-"))
-                  (let* ((note (format ";; Project Map omitted: empty-text bytes=%d method=%s root=%s\n"
-                                       mp-bytes (or method "-") (or map-root "-"))))
-                    (setq ctx-text
-                          (if (and (stringp ctx-text) (not (string-empty-p (string-trim ctx-text))))
-                              (concat (string-trim-right ctx-text) "\n" note)
-                            note)))))))))
-          (carriage-traffic-log 'out
-                                "context: final ctx-text bytes=%d has-begin_map=%s"
-                                (if (stringp ctx-text) (string-bytes ctx-text) 0)
-                                (if (and (stringp ctx-text)
-                                         (string-match-p "#\\+begin_map\\b" ctx-text))
-                                    "t" "nil"))
-          ;; Prompt for confirmation if context was truncated (only if omitted > 0)
-          (let* ((meta (carriage--context-meta-from-text ctx-text))
-                 (limited (plist-get meta :limited))
-                 (omitted (or (plist-get meta :omitted) 0))
-                 (need-confirm (and limited (> omitted 0)))
-                 (confirmed
-                  (or (not need-confirm)
-                      (not (boundp 'carriage-mode-confirm-truncated-context))
-                      (not carriage-mode-confirm-truncated-context)
-                      (bound-and-true-p noninteractive)
-                      (y-or-n-p (format "Контекст усечён: пропущено %d файл(ов). Отправить? " omitted)))))
-            (if confirmed
-                ctx-text
-              (carriage-log "context: send cancelled by user (truncated context)")
-              (signal 'quit nil)))
-          (error (or ctx-text ""))))))
+                        (if (string-empty-p (string-trim ctx-text))
+                            map-text
+                          (concat (string-trim-right ctx-text) "\n\n" (string-trim-right map-text) "\n"))))))
+            (let* ((meta (carriage--context-meta-from-text ctx-text))
+                   (limited (plist-get meta :limited))
+                   (omitted (or (plist-get meta :omitted) 0))
+                   (confirmed (or (not (and limited (> omitted 0)))
+                                  (not (boundp 'carriage-mode-confirm-truncated-context))
+                                  (not carriage-mode-confirm-truncated-context)
+                                  (bound-and-true-p noninteractive)
+                                  (y-or-n-p (format "Контекст усечён: пропущено %d файл(ов). Отправить? " omitted)))))
+              (if confirmed
+                  ctx-text
+                (carriage-log "context: send cancelled by user (truncated context)")
+                "")))
+        "")
+    (error ""))))
 
 (defun carriage--context-meta-from-text (ctx-text)
   "Extract meta info from formatted CTX-TEXT (see `carriage-context-format').
@@ -3228,10 +3124,7 @@ Runs in the main thread (timer callback)."
            nil))))))
 
 (defun carriage--send-prepare-and-dispatch (source srcbuf backend model intent suite insert-marker)
-  "Prepare payload/context+prompt for SOURCE and dispatch once ready.
-
-When async is enabled, preparation runs in a background thread; otherwise runs
-synchronously (still outside the immediate interactive command tick)."
+  "Prepare payload/context+prompt for SOURCE and dispatch once ready."
   (when (buffer-live-p srcbuf)
     (with-current-buffer srcbuf
       (carriage-log "send: start source=%s async=%s backend=%s model=%s intent=%s suite=%s"
@@ -3240,143 +3133,26 @@ synchronously (still outside the immediate interactive command tick)."
                     backend model intent suite)
       (setq carriage--send-prep-cancelled nil)
       (setq carriage--send-prep-job-id (1+ (or carriage--send-prep-job-id 0)))
-      (let* ((job-id carriage--send-prep-job-id))
-        ;; Prep watchdog: catches hangs before we even reach transport dispatch.
+      (let ((job-id carriage--send-prep-job-id))
         (carriage--send-prep-watchdog-start job-id source)
-        ;; Install an abort handler for the PREP phase (transport will override it later).
         (carriage-register-abort-handler
          (lambda ()
            (carriage--send-prep-cancel job-id)))
-        ;; Keep UI responsive and show activity while we prepare.
         (carriage-ui-set-state 'sending)
-
         (if (carriage--send-prep-async-enabled-p)
-            ;; ---------------------------
-            ;; Async preparation (thread)
-            (progn
-              (setq carriage--send-prep-thread
-                    (make-thread
-                     (lambda ()
-                       (let* ((res
-                               (condition-case e
-                                   (let* ((t0 (float-time))
-                                          (_ (carriage-log "send: prep job=%s step=build-context start source=%s"
-                                                           job-id source))
-                                          (ctx (carriage--build-context source srcbuf))
-                                          (meta (plist-get ctx :context-meta))
-                                          (t1 (float-time))
-                                          (_ (carriage-log "send: prep job=%s step=build-context done elapsed=%.3fs"
-                                                           job-id (max 0.0 (- t1 t0))))
-                                          (_ (carriage-log "send: prep job=%s step=build-prompt start"
-                                                           job-id))
-                                          (built (carriage-build-prompt intent suite ctx))
-                                          (sys (plist-get built :system))
-                                          (pr  (plist-get built :prompt))
-                                          (t2 (float-time))
-                                          (_ (carriage-log "send: prep job=%s step=build-prompt done elapsed=%.3fs total=%.3fs"
-                                                           job-id (max 0.0 (- t2 t1)) (max 0.0 (- t2 t0)))))
-                                     (list :ok t :system sys :prompt pr :ctx-meta meta :elapsed (- (float-time) t0)))
-                                 (quit (list :ok nil :quit t))
-                                 (error (list :ok nil :error (error-message-string e))))))
-                         (run-at-time
-                          0 nil
-                          (lambda ()
-                            (when (buffer-live-p srcbuf)
-                              (with-current-buffer srcbuf
-                                (when (= job-id (or carriage--send-prep-job-id 0))
-                                  ;; Prep completed (success/fail/cancel): stop watchdog now.
-                                  (carriage--send-prep-watchdog-stop)
-                                  (setq carriage--send-prep-thread nil)
-                                  (cond
-                                   ((or carriage--send-prep-cancelled
-                                        (plist-get res :quit))
-                                    (carriage-log "send: prep done but cancelled source=%s job=%s"
-                                                  source job-id)
-                                    (ignore-errors (carriage--preloader-stop))
-                                    (ignore-errors (carriage-ui-set-state 'idle))
-                                    (setq carriage--send-in-flight nil)
-                                    (setq carriage--send-dispatch-scheduled nil))
-                                   ((plist-get res :ok)
-                                    (carriage-log "send: prep ok source=%s job=%s elapsed=%.3fs"
-                                                  source job-id (or (plist-get res :elapsed) 0.0))
-                                    (carriage-traffic-log 'out
-                                                          "send: prep ok source=%s elapsed=%.3fs"
-                                                          source (or (plist-get res :elapsed) 0.0))
-                                    ;; Transport overrides abort handler; drop PREP handler now.
-                                    (ignore-errors (carriage-clear-abort-handler))
-                                    ;; Update fingerprint + UI with context-limit indicator before dispatch.
-                                    (ignore-errors
-                                      (carriage-fingerprint-note-context-meta
-                                       (plist-get res :ctx-meta)))
-                                    (carriage--send-dispatch-with-prompt
-                                     source srcbuf backend model intent suite
-                                     (plist-get res :prompt)
-                                     (plist-get res :system)
-                                     insert-marker))
-                                   (t
-                                    (carriage-log "send: prep failed source=%s job=%s err=%s"
-                                                  source job-id (or (plist-get res :error) "-"))
-                                    (ignore-errors (carriage-clear-abort-handler))
-                                    (ignore-errors (carriage--preloader-stop))
-                                    (ignore-errors (carriage-ui-set-state 'error))
-                                    (setq carriage--send-in-flight nil)
-                                    (setq carriage--send-dispatch-scheduled nil)
-                                    (when (not (bound-and-true-p noninteractive))
-                                      (message "Carriage: подготовка запроса не удалась: %s"
-                                               (or (plist-get res :error) "unknown error"))))))))))))))
-              t)
-
-          ;; ---------------------------
-          ;; Sync preparation (main thread)
-          (let ((t0 (float-time)))
-            (carriage-log "send: prep sync job=%s step=build-context start source=%s" job-id source)
-            (condition-case e
-                (let* ((ctx (carriage--build-context source srcbuf))
-                       (t1 (float-time))
-                       (_ (carriage-log "send: prep sync job=%s step=build-context done elapsed=%.3fs"
-                                        job-id (max 0.0 (- t1 t0))))
-                       (_ (carriage-log "send: prep sync job=%s step=build-prompt start" job-id))
-                       (built (carriage-build-prompt intent suite ctx))
-                       (sys (plist-get built :system))
-                       (pr  (plist-get built :prompt))
-                       (t2 (float-time)))
-                  (carriage-log "send: prep sync job=%s step=build-prompt done elapsed=%.3fs total=%.3fs"
-                                job-id (max 0.0 (- t2 t1)) (max 0.0 (- t2 t0)))
-                  ;; Sync prep finished: stop watchdog, drop PREP abort handler.
-                  (carriage--send-prep-watchdog-stop)
-                  (setq carriage--send-prep-thread nil)
-                  (ignore-errors (carriage-clear-abort-handler))
-                  ;; Update fingerprint + UI with context-limit indicator before dispatch.
-                  (ignore-errors
-                    (carriage-fingerprint-note-context-meta
-                     (plist-get ctx :context-meta)))
-                  (carriage--send-dispatch-with-prompt
-                   source srcbuf backend model intent suite pr sys insert-marker)
-                  t)
-              (quit
-               (carriage-log "send: prep sync keyboard-quit source=%s job=%s" source job-id)
-               (carriage--send-prep-watchdog-stop)
-               (setq carriage--send-prep-thread nil)
-               (ignore-errors (carriage-clear-abort-handler))
-               (ignore-errors (carriage--preloader-stop))
-               (ignore-errors (carriage-ui-set-state 'idle))
-               (setq carriage--send-in-flight nil)
-               (setq carriage--send-dispatch-scheduled nil)
-               nil)
-              (error
-               (carriage-log "send: prep sync failed source=%s job=%s err=%s"
-                             source job-id (error-message-string e))
-               (carriage--send-prep-watchdog-stop)
-               (setq carriage--send-prep-thread nil)
-               (ignore-errors (carriage-clear-abort-handler))
-               (ignore-errors (carriage--preloader-stop))
-               (ignore-errors (carriage-ui-set-state 'error))
-               (setq carriage--send-in-flight nil)
-               (setq carriage--send-dispatch-scheduled nil)
-               (when (not (bound-and-true-p noninteractive))
-                 (message "Carriage: подготовка запроса не удалась: %s"
-                          (error-message-string e)))
-               nil))))))))
+            (setq carriage--send-prep-thread
+                  (make-thread
+                   (lambda ()
+                     (let ((res (carriage--send-prepare--result-from-thread
+                                 job-id source srcbuf intent suite)))
+                       (run-at-time
+                        0 nil
+                        (lambda ()
+                          (carriage--send-prepare--dispatch-result
+                           source srcbuf backend model intent suite insert-marker
+                           job-id res)))))))
+          (carriage--send-prepare--sync-path
+           source srcbuf backend model intent suite insert-marker job-id))))))
 
 ;;; Helper: initialize carriage stream for buffer
 (defun carriage--send-buffer--prepare-stream (origin-marker)
@@ -5299,6 +5075,60 @@ Logs the gate arm event."
         (carriage--send-buffer--prepare-stream origin-marker))
       (sit-for 0))))
 
+(defun carriage--send-prepare--complete-dispatch (params entry-id generation backend model intent suite buf)
+  "Handle a preflight completion for PARAMS in BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq carriage--send-dispatch-scheduled nil)
+      (let* ((cur-gen (and (boundp 'carriage--active-send-generation)
+                           carriage--active-send-generation))
+             (stale (and generation cur-gen (/= generation cur-gen))))
+        (when stale
+          (carriage-log "send-prepare: stale completion ignored entry=%s gen=%s active-gen=%s"
+                        (or entry-id "-") (or generation "-") (or cur-gen "-"))
+          (setq carriage--send-in-flight nil)
+          (setq carriage--send-dispatch-scheduled nil)
+          (ignore-errors (carriage--preloader-stop))
+          (ignore-errors (carriage-ui-set-state 'idle)))
+        (unless stale
+          (let ((origin-marker
+                 (or (and (plist-member params :origin-marker)
+                          (plist-get params :origin-marker)
+                          (markerp (plist-get params :origin-marker))
+                          (buffer-live-p (marker-buffer (plist-get params :origin-marker)))
+                          (plist-get params :origin-marker))
+                     (and (boundp 'carriage--stream-origin-marker)
+                          (markerp carriage--stream-origin-marker)
+                          (buffer-live-p (marker-buffer carriage--stream-origin-marker))
+                          carriage--stream-origin-marker)
+                     (copy-marker (point) t))))
+            (condition-case err
+                (progn
+                  (carriage-log "send-prepare: ready; direct dispatch entry=%s backend=%s model=%s"
+                                (or entry-id "-") backend model)
+                  (carriage--send-prepare-and-dispatch
+                   'buffer buf backend model intent suite origin-marker))
+              (quit
+               (carriage-log "send-prepare: direct dispatch quit")
+               (setq carriage--send-in-flight nil)
+               (setq carriage--send-dispatch-scheduled nil)
+               (setq carriage-mode--send-prepare-token nil)
+               (ignore-errors (carriage-clear-abort-handler))
+               (ignore-errors (carriage--preloader-stop))
+               (ignore-errors (carriage-ui-set-state 'idle)))
+              (error
+               (carriage-log "send-prepare: direct dispatch ERROR: %s"
+                             (error-message-string err))
+               (setq carriage--send-in-flight nil)
+               (setq carriage--send-dispatch-scheduled nil)
+               (setq carriage-mode--send-prepare-token nil)
+               (ignore-errors (carriage-clear-abort-handler))
+               (ignore-errors (carriage--preloader-stop))
+               (ignore-errors (carriage-ui-set-state 'error))
+               (unless (bound-and-true-p noninteractive)
+                 (message "Carriage: send failed after async preflight: %s"
+                          (error-message-string err)))))))))))
+
 (defun carriage--send-prepare--on-complete-handler (params)
   "Return a callback lambda for Send preflight completion using PARAMS.
 
@@ -5319,59 +5149,138 @@ done synchronously in `carriage--send-prepare--arm-gate'."
          (intent     (plist-get params :intent))
          (suite      (plist-get params :suite))
          (buf        (plist-get params :buf)))
-    (lambda ()
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
+     (lambda ()
+       (carriage--send-prepare--complete-dispatch
+        params entry-id generation backend model intent suite buf))))
+
+(defun carriage--send-prepare--result-from-thread (job-id source srcbuf intent suite)
+  "Build context and prompt for JOB-ID in SRCBUF and return a result plist."
+  (condition-case e
+      (let* ((t0 (float-time))
+             (_ (carriage-log "send: prep job=%s step=build-context start source=%s"
+                              job-id source))
+             (ctx (carriage--build-context source srcbuf))
+             (meta (plist-get ctx :context-meta))
+             (t1 (float-time))
+             (_ (carriage-log "send: prep job=%s step=build-context done elapsed=%.3fs"
+                              job-id (max 0.0 (- t1 t0))))
+             (_ (carriage-log "send: prep job=%s step=build-prompt start" job-id))
+             (built (carriage-build-prompt intent suite ctx))
+             (sys (plist-get built :system))
+             (pr  (plist-get built :prompt))
+             (t2 (float-time))
+             (_ (carriage-log "send: prep job=%s step=build-prompt done elapsed=%.3fs total=%.3fs"
+                              job-id (max 0.0 (- t2 t1)) (max 0.0 (- t2 t0)))))
+        (list :ok t :system sys :prompt pr :ctx-meta meta :elapsed (- (float-time) t0)))
+    (quit (list :ok nil :quit t))
+    (error (list :ok nil :error (error-message-string e)))))
+
+(defun carriage--send-prepare--dispatch-result (source srcbuf backend model intent suite insert-marker job-id res)
+  "Apply a Send prep RES result on the main thread."
+  (when (buffer-live-p srcbuf)
+    (with-current-buffer srcbuf
+      (when (= job-id (or carriage--send-prep-job-id 0))
+        (carriage--send-prep-watchdog-stop)
+        (setq carriage--send-prep-thread nil)
+        (cond
+         ((or carriage--send-prep-cancelled
+              (plist-get res :quit))
+          (carriage-log "send: prep done but cancelled source=%s job=%s"
+                        source job-id)
+          (ignore-errors (carriage--preloader-stop))
+          (ignore-errors (carriage-ui-set-state 'idle))
+          (setq carriage--send-in-flight nil)
+          (setq carriage--send-dispatch-scheduled nil))
+         ((plist-get res :ok)
+          (carriage-log "send: prep ok source=%s job=%s elapsed=%.3fs"
+                        source job-id (or (plist-get res :elapsed) 0.0))
+          (carriage-traffic-log 'out
+                                "send: prep ok source=%s elapsed=%.3fs"
+                                source (or (plist-get res :elapsed) 0.0))
+          (ignore-errors (carriage-clear-abort-handler))
+          (ignore-errors
+            (carriage-fingerprint-note-context-meta
+             (plist-get res :ctx-meta)))
+          (carriage--send-dispatch-with-prompt
+           source srcbuf backend model intent suite
+           (plist-get res :prompt)
+           (plist-get res :system)
+           insert-marker))
+         (t
+          (carriage-log "send: prep failed source=%s job=%s err=%s"
+                        source job-id
+                        (carriage--sanitize-prep-error-message
+                         (or (plist-get res :error) "-")))
+          (ignore-errors (carriage-clear-abort-handler))
+          (ignore-errors (carriage--preloader-stop))
+          (ignore-errors (carriage-ui-set-state 'error))
+          (setq carriage--send-in-flight nil)
           (setq carriage--send-dispatch-scheduled nil)
-          ;; Stale check: if generation changed while preflight ran, drop.
-          (let* ((cur-gen (and (boundp 'carriage--active-send-generation)
-                               carriage--active-send-generation))
-                 (stale (and generation cur-gen (/= generation cur-gen))))
-            (when stale
-              (carriage-log "send-prepare: stale completion ignored entry=%s gen=%s active-gen=%s"
-                            (or entry-id "-") (or generation "-") (or cur-gen "-"))
-              (setq carriage--send-in-flight nil)
-              (setq carriage--send-dispatch-scheduled nil)
-              (ignore-errors (carriage--preloader-stop))
-              (ignore-errors (carriage-ui-set-state 'idle)))
-            (unless stale
-              (let ((origin-marker
-                     (or (and (plist-member params :origin-marker)
-                              (plist-get params :origin-marker)
-                              (markerp (plist-get params :origin-marker))
-                              (buffer-live-p (marker-buffer (plist-get params :origin-marker)))
-                              (plist-get params :origin-marker))
-                         (and (boundp 'carriage--stream-origin-marker)
-                              (markerp carriage--stream-origin-marker)
-                              (buffer-live-p (marker-buffer carriage--stream-origin-marker))
-                              carriage--stream-origin-marker)
-                         (copy-marker (point) t))))
-                (condition-case err
-                    (progn
-                      (carriage-log "send-prepare: ready; direct dispatch entry=%s backend=%s model=%s"
-                                    (or entry-id "-") backend model)
-                      (carriage--send-prepare-and-dispatch
-                       'buffer buf backend model intent suite origin-marker))
-                  (quit
-                   (carriage-log "send-prepare: direct dispatch quit")
-                   (setq carriage--send-in-flight nil)
-                   (setq carriage--send-dispatch-scheduled nil)
-                   (setq carriage-mode--send-prepare-token nil)
-                   (ignore-errors (carriage-clear-abort-handler))
-                   (ignore-errors (carriage--preloader-stop))
-                   (ignore-errors (carriage-ui-set-state 'idle)))
-                  (error
-                   (carriage-log "send-prepare: direct dispatch ERROR: %s"
-                                 (error-message-string err))
-                   (setq carriage--send-in-flight nil)
-                   (setq carriage--send-dispatch-scheduled nil)
-                   (setq carriage-mode--send-prepare-token nil)
-                   (ignore-errors (carriage-clear-abort-handler))
-                   (ignore-errors (carriage--preloader-stop))
-                   (ignore-errors (carriage-ui-set-state 'error))
-                   (unless (bound-and-true-p noninteractive)
-                     (message "Carriage: send failed after async preflight: %s"
-                              (error-message-string err)))))))))))))
+          (when (not (bound-and-true-p noninteractive))
+            (message "Carriage: подготовка запроса не удалась: %s"
+                     (carriage--sanitize-prep-error-message
+                      (or (plist-get res :error) "unknown error"))))))))))
+
+(defun carriage--sanitize-prep-error-message (msg)
+  "Return a user-friendly MSG for prep failures.
+
+Collapse header-only context messages that can leak out of context formatting.
+"
+  (let ((s (or msg "")))
+    (if (and (stringp s)
+             (string-match-p "\`[; \t]*;;[ \t]*Context[ \t]*(" s))
+        "context: no files included"
+      s)))
+
+(defun carriage--send-prepare--sync-path (source srcbuf backend model intent suite insert-marker job-id)
+  "Run synchronous prep for JOB-ID and dispatch on success."
+  (let ((t0 (float-time)))
+    (carriage-log "send: prep sync job=%s step=build-context start source=%s" job-id source)
+    (condition-case e
+        (let* ((ctx (carriage--build-context source srcbuf))
+               (t1 (float-time))
+               (_ (carriage-log "send: prep sync job=%s step=build-context done elapsed=%.3fs"
+                                job-id (max 0.0 (- t1 t0))))
+               (_ (carriage-log "send: prep sync job=%s step=build-prompt start" job-id))
+               (built (carriage-build-prompt intent suite ctx))
+               (sys (plist-get built :system))
+               (pr  (plist-get built :prompt))
+               (t2 (float-time)))
+          (carriage-log "send: prep sync job=%s step=build-prompt done elapsed=%.3fs total=%.3fs"
+                        job-id (max 0.0 (- t2 t1)) (max 0.0 (- t2 t0)))
+          (carriage--send-prep-watchdog-stop)
+          (setq carriage--send-prep-thread nil)
+          (ignore-errors (carriage-clear-abort-handler))
+          (ignore-errors
+            (carriage-fingerprint-note-context-meta
+             (plist-get ctx :context-meta)))
+          (carriage--send-dispatch-with-prompt
+           source srcbuf backend model intent suite pr sys insert-marker)
+          t)
+      (quit
+       (carriage-log "send: prep sync keyboard-quit source=%s job=%s" source job-id)
+       (carriage--send-prep-watchdog-stop)
+       (setq carriage--send-prep-thread nil)
+       (ignore-errors (carriage-clear-abort-handler))
+       (ignore-errors (carriage--preloader-stop))
+       (ignore-errors (carriage-ui-set-state 'idle))
+       (setq carriage--send-in-flight nil)
+       (setq carriage--send-dispatch-scheduled nil)
+       nil)
+      (error
+       (carriage-log "send: prep sync failed source=%s job=%s err=%s"
+                     source job-id (error-message-string e))
+       (carriage--send-prep-watchdog-stop)
+       (setq carriage--send-prep-thread nil)
+       (ignore-errors (carriage-clear-abort-handler))
+       (ignore-errors (carriage--preloader-stop))
+       (ignore-errors (carriage-ui-set-state 'error))
+       (setq carriage--send-in-flight nil)
+       (setq carriage--send-dispatch-scheduled nil)
+       (when (not (bound-and-true-p noninteractive))
+         (message "Carriage: подготовка запроса не удалась: %s"
+                  (carriage--sanitize-prep-error-message (error-message-string e))))
+       nil))))
 
 (defun carriage-mode--send-prepare-async-around (orig &rest args)
   "Advice around Send commands: async warm context/map caches, then dispatch directly.

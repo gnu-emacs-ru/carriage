@@ -50,10 +50,18 @@ Best-effort: never signal."
                  (fboundp 'carriage-context-collect)
                  (fboundp 'carriage-context-format))
         (let* ((root (or (carriage-project-root) default-directory))
-               (col (carriage-context-collect buffer root))
-               (ctx-text (when col (carriage-context-format col :where target))))
-          (if (and (stringp ctx-text) (> (length ctx-text) 0)) ctx-text "")))
-    (error "")))
+               (col (carriage-context-collect buffer root)))
+          ;; If collector returned no meaningful files, don't treat the header-only
+          ;; format as a real context block. This makes #+begin_context optional
+          ;; and prevents upstream callers from failing when no files were included.
+          (when (and (listp col)
+                     (let ((files (or (plist-get col :files) '()))
+                           (warns (or (plist-get col :warnings) '()))
+                           (stats (or (plist-get col :stats) '())))
+                       (not (and (zerop (length files)) (null warns) (or (null stats) (zerop (or (plist-get stats :included) 0))))))
+            (let ((ctx-text (carriage-context-format col :where target)))
+              (if (and (stringp ctx-text) (> (length ctx-text) 0)) ctx-text "")))))
+    (error ""))))
 
 (defun carriage--context-target ()
   "Return context target symbol for current buffer.

@@ -90,39 +90,23 @@
 
 (defun carriage-doc-state--fold--maybe-summary-from-plist (pl kind)
   "Generate summary string from PLIST for KIND (state/fingerprint/result)."
-  (let* ((imp (carriage-doc-state--important-plist pl))
-         (intent (plist-get imp :CAR_INTENT))
-         (suite (plist-get imp :CAR_SUITE))
-         (model (plist-get imp :CAR_MODEL))
-         (ctx-doc (plist-get imp :CAR_CTX_DOC))
-         (ctx-patched (plist-get imp :CAR_CTX_PATCHED))
-         (scope (plist-get imp :CAR_DOC_CTX_SCOPE))
-         (profile (plist-get imp :CAR_CTX_PROFILE)))
+  (let ((imp (carriage-doc-state--important-plist pl)))
     (cond
      ((eq kind 'state)
-      (format "%s %s %s"
-              (or (carriage-doc-state--ui-icon (carriage-doc-state--llm-display-name
-                                                (plist-get imp :CAR_BACKEND)
-                                                (plist-get imp :CAR_PROVIDER)
-                                                model) "M")
-                  "M")
-              (or intent "")
-              (or suite "")))
+       "STATE")
      ((eq kind 'fingerprint)
-      (carriage-doc-state--ctx-flag-badge-with-label
-       (cond
-        ((and ctx-doc ctx-patched) "DP")
-        (ctx-doc "Doc")
-        (ctx-patched "Pat")
-        (t "-"))
-       t
-       (carriage-doc-state--ui-icon 'ctx nil)))
+       "FINGERPRINT")
      ((eq kind 'result)
-      (let ((cost-u (plist-get pl :CAR_COST_TOTAL_U)))
-        (if (integerp cost-u)
-            (carriage-doc-state--format-money-suffix cost-u)
-          "—")))
-     (t ""))))
+       "RESULT")
+      (t ""))))
+
+(defun carriage-doc-state--fold--parse-line-plist (beg end)
+  "Parse the plist payload from a carriage doc-state line at BEG..END."
+  (save-excursion
+    (goto-char beg)
+    (let ((case-fold-search t))
+      (when (re-search-forward "^[ \t]*#\+[^:]+:[ \t]*\(.*\)$" end t)
+        (carriage-doc-state--fold--parse-sexp (match-string 1))))))
 
 (defun carriage-doc-state--fold--tooltip (raw-line pl kind)
   "Generate tooltip for fold overlay from RAW-LINE, PLIST and KIND."
@@ -134,6 +118,10 @@
   "Parse S as sexp, return plist or nil."
   (when (and (stringp s) (not (string-empty-p s)))
     (ignore-errors (car (read-from-string s)))))
+
+(defun carriage-doc-state--important-plist (pl)
+  "Return PL in a normalized plist form for overlay summaries."
+  (if (listp pl) pl '()))
 
 (defun carriage-doc-state--fold--scan-state-line ()
   "Scan for CARRIAGE_STATE line, return (beg . end) or nil."
@@ -194,11 +182,11 @@
                 (let* ((beg (car state-range))
                        (end (cdr state-range))
                        (raw (buffer-substring-no-properties beg end))
-                       (pl (carriage-doc-state--fold--parse-sexp (car (last (split-string raw ":")))))
+                       (pl (carriage-doc-state--fold--parse-line-plist beg end))
                        (summary (carriage-doc-state--fold--maybe-summary-from-plist pl 'state))
                        (tooltip (carriage-doc-state--fold--tooltip raw pl 'state)))
-                  (carriage-doc-state--fold--ov-upsert
-                   carriage-doc-state--fold-state-ov beg end summary tooltip))
+                   (carriage-doc-state--fold--ov-upsert
+                    carriage-doc-state--fold-state-ov beg end summary tooltip))
               (when (overlayp carriage-doc-state--fold-state-ov)
                 (delete-overlay carriage-doc-state--fold-state-ov)
                 nil)))
@@ -207,7 +195,7 @@
                       (let* ((beg (car rng))
                              (end (cdr rng))
                              (raw (buffer-substring-no-properties beg end))
-                             (pl (carriage-doc-state--fold--parse-sexp (car (last (split-string raw ":")))))
+                             (pl (carriage-doc-state--fold--parse-line-plist beg end))
                              (summary (carriage-doc-state--fold--maybe-summary-from-plist pl 'fingerprint))
                              (tooltip (carriage-doc-state--fold--tooltip raw pl 'fingerprint)))
                         (carriage-doc-state--fold--ov-upsert nil beg end summary tooltip)))
@@ -217,7 +205,7 @@
                       (let* ((beg (car rng))
                              (end (cdr rng))
                              (raw (buffer-substring-no-properties beg end))
-                             (pl (carriage-doc-state--fold--parse-sexp (car (last (split-string raw ":")))))
+                             (pl (carriage-doc-state--fold--parse-line-plist beg end))
                              (summary (carriage-doc-state--fold--maybe-summary-from-plist pl 'result))
                              (tooltip (carriage-doc-state--fold--tooltip raw pl 'result)))
                         (carriage-doc-state--fold--ov-upsert nil beg end summary tooltip)))

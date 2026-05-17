@@ -51,9 +51,12 @@
     (save-excursion
       (let ((case-fold-search t))
         (goto-char pos)
-        (let ((b (re-search-backward carriage-context--re-begin-context-line nil t))
-              (e (re-search-backward carriage-context--re-end-context-line nil t)))
-          (and b (or (null e) (> b e))))))))
+        (when (re-search-backward carriage-context--re-begin-context-line nil t)
+          (let ((beg (match-beginning 0)))
+            (goto-char beg)
+            (forward-line 1)
+            (and (re-search-forward carriage-context--re-end-context-line nil t)
+                 (> (match-beginning 0) pos))))))))
 
 (defun carriage-context--doc-paths-mark-dirty (beg end _len)
   "Mark doc-paths cache dirty if edit touches begin/end_context lines or occurs inside a begin_context block."
@@ -199,9 +202,22 @@
                      (when (and (stringp p) (not (string-empty-p p)))
                        (push p acc))))))))
           (setq acc (nreverse (delete-dups acc)))
-          (setq carriage-context--patched-files-cache (list :paths acc))
-          (setq carriage-context--patched-files-dirty nil)
-          acc)))))
+           (setq carriage-context--patched-files-cache (list :paths acc))
+           (setq carriage-context--patched-files-dirty nil)
+           acc)))))
+
+(add-hook 'carriage-mode-hook
+          (lambda ()
+            ;; Buffer-local hooks; only mark dirty when relevant lines change.
+            (add-hook 'after-change-functions
+                      #'carriage-context--patched-files-mark-dirty
+                      nil t)
+            (add-hook 'after-change-functions
+                      #'carriage-context--doc-paths-mark-dirty
+                      nil t)
+            ;; Opportunistically warm Project Map cache on idle to reduce Send latency.
+            (when (fboundp 'carriage-context-project-map-warm-ensure)
+              (ignore-errors (carriage-context-project-map-warm-ensure)))))
 
 (provide 'carriage-context-collect)
 ;;; carriage-context-collect.el ends here

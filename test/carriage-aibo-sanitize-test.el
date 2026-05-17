@@ -3,6 +3,8 @@
 (require 'ert)
 (require 'subr-x)
 
+(require 'carriage)
+
 (ignore-errors (require 'carriage-op-aibo))
 (require 'carriage-errors)
 
@@ -69,6 +71,16 @@
           (should (or (null (plist-get opts :occur))
                       (eq (plist-get opts :occur) 'first))))
       (ignore-errors (delete-directory root t)))))
+
+(ert-deftest carriage-sanitize-create-body-strips-legacy-markers ()
+  "Create-body sanitizer should remove legacy delimiters and stray end markers."
+  (should (equal (carriage--sanitize-create-body "<<abcdef\nline1\nline2\n:abcdef\n#+end\n")
+                 "line1\nline2")))
+
+(ert-deftest carriage-sanitize-patch-header-drops-delim-for-create ()
+  "Create patch headers should drop legacy :delim fields."
+  (should (equal (carriage--sanitize-patch-header '(:op create :delim "abcdef" :file "x.txt"))
+                 '(:op create :file "x.txt"))))
 
 (provide 'carriage-aibo-sanitize-test)
 ;;; carriage-aibo-sanitize-test.el ends here

@@ -31,6 +31,8 @@
 (require 'carriage-ui-faces)
 (require 'carriage-ui-spinner)
 (require 'carriage-ui-modeline)
+(require 'carriage-ui-doc-cost)
+(require 'carriage-ui-icons)
 (require 'carriage-ui-header)
 (require 'carriage-ui-context-badge)
 (require 'carriage-pricing nil t)
@@ -131,6 +133,8 @@ One of:
   "Monotonic version for apply-status badge; used to invalidate modeline cache.")
 
 ;; -----------------------------------------------------------------------------
+;; NOTE: doc-cost helpers moved to `carriage-ui-doc-cost.el'.
+(unless (featurep 'carriage-ui-doc-cost)
 ;; Doc-cost cache (sum of per-request costs from fingerprint lines).
 ;; Public API is required by spec/ui-cost-v2.org and ERT tests.
 
@@ -252,7 +256,7 @@ May scan buffer text; must not be called from redisplay."
                  (setq carriage-ui--doc-cost-refresh-timer nil)
                   (ignore-errors (carriage-ui-doc-cost-refresh-now buf))))))
           ))
-  t)
+  t))
 
 ;; Spinner moved to carriage-ui-spinner.el
 
@@ -690,6 +694,8 @@ Must never open debugger, even when `debug-on-error' is non-nil."
               (recenter 1)))
         (error nil)))))
 
+(unless (featurep 'carriage-ui-icons)
+
 (defvar carriage-ui--icons-lib-available (featurep 'all-the-icons)
   "Cached availability of all-the-icons library.")
 
@@ -1023,6 +1029,8 @@ Results are cached per-buffer and invalidated when theme or UI parameters change
           (when (stringp res)
             (puthash key res cache))
           res)))))
+
+) ;; end unless carriage-ui-icons
 
 ;; Header-line helpers (split from carriage-ui--header-line)
 

@@ -4087,69 +4087,80 @@ Return a single string with blocks concatenated by blank lines."
             (goto-char (point-max)))
           (let* ((end (line-end-position)))
             (push (buffer-substring-no-properties beg end) chunks))
-          (forward-line 1)))
+        (forward-line 1)))
       (mapconcat #'identity (nreverse chunks) "\n\n"))))
+
+(defun carriage--sanitize-create-body (body0)
+  "Return BODY0 sanitized for a :op create patch body.
+
+This strips legacy delim markers and an accidental trailing #+end."
+  (let ((lines (split-string (or body0 "") "\n" nil)))
+    (while (and lines (string-empty-p (string-trim (car (last lines)))))
+      (setq lines (butlast lines 1)))
+    (when (and lines
+               (string= (string-trim (car (last lines))) "#+end"))
+      (setq lines (butlast lines 1)))
+    (when (and lines
+               (string-prefix-p ":" (string-trim (car (last lines)))))
+      (setq lines (butlast lines 1)))
+    (when (and lines
+               (string-prefix-p "<<" (string-trim (car lines))))
+      (setq lines (cdr lines)))
+    (mapconcat #'identity lines "\n")))
+
+(defun carriage--sanitize-patch-header (hdr)
+  "Return HDR with create-only legacy fields removed." 
+  (if (not (listp hdr))
+      hdr
+    (let ((opstr (substring (format "%s" (plist-get hdr :op))
+                            (if (and (plist-get hdr :op)
+                                     (string-prefix-p ":" (format "%s" (plist-get hdr :op))))
+                                1 0))))
+      (if (not (string= opstr "create"))
+          hdr
+        (let ((pl hdr) (res nil))
+          (while pl
+            (let ((k (car pl)) (v (cadr pl)))
+              (unless (eq k :delim)
+                (setq res (append res (list k v)))))
+            (setq pl (cddr pl)))
+          res)))))
 
 (defun carriage--sanitize-llm-response (raw)
   "Return only sanitized #+begin_patch blocks from RAW.
 
 Sanitization rules:
 - Keep only begin_patch blocks; drop any text outside blocks.
-- For :op create: use the raw body between begin/end (no delimiter markers, no rewriting)."
+- For :op create: sanitize the body with `carriage--sanitize-create-body'."
   (with-temp-buffer
     (insert (or raw ""))
     (goto-char (point-min))
     (let ((acc '()))
       (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
         (let* ((hdr-str (match-string 1))
-               (hdr     (car (read-from-string hdr-str)))
-               (op      (plist-get hdr :op))
-               (opstr   (format "%s" op))
+               (hdr (or (carriage--patch--read-header-plist hdr-str)
+                        (car (read-from-string hdr-str))))
+               (hdr1 (carriage--sanitize-patch-header hdr))
                (body-beg (progn (forward-line 1) (point)))
                (body-end (progn
                            (unless (re-search-forward "^[ \t]*#\\+end_patch\\b" nil t)
                              (goto-char (point-max)))
                            (line-beginning-position)))
-               (body0 (buffer-substring-no-properties body-beg body-end)))
-          (when (string-prefix-p ":" (or opstr ""))
-            (setq opstr (substring opstr 1)))
-          ;; Normalize header for create: drop legacy :delim if present.
-          (let* ((hdr1 (if (string= opstr "create")
-                           (let ((pl hdr) (res nil))
-                             (while pl
-                               (let ((k (car pl)) (v (cadr pl)))
-                                 (unless (eq k :delim)
-                                   (setq res (append res (list k v)))))
-                               (setq pl (cddr pl)))
-                             res)
-                         hdr)))
-            ;; For :op create, strip legacy DELIM markers and an accidental trailing "#+end"
-            ;; that models sometimes emit inside the body.
-            (let* ((sanitized-body
-                    (if (string= opstr "create")
-                        (let* ((lines (split-string body0 "\n" nil))
-                               (rx-head "^[ \t]*<<[0-9a-f]\\{6\\}[ \t]*$")
-                               (rx-tail "^[ \t]*:[0-9a-f]\\{6\\}[ \t]*$")
-                               (rx-stray-end "^[ \t]*#\\+end[ \t]*$")
-                               ;; drop leading "<<hex"
-                               (lines1 (if (and lines (string-match-p rx-head (car lines)))
-                                           (cdr lines)
-                                         lines))
-                               ;; drop one trailing ":hex"
-                               (lines2 (let ((lst lines1))
-                                         (when (and lst (string-match-p rx-tail (or (car (last lst)) "")))
-                                           (setq lst (butlast lst 1)))
-                                         lst))
-                               ;; drop one trailing stray "#+end"
-                               (lines3 (let ((lst lines2))
-                                         (when (and lst (string-match-p rx-stray-end (or (car (last lst)) "")))
-                                           (setq lst (butlast lst 1)))
-                                         lst)))
-                          (mapconcat #'identity lines3 "\n"))
-                      body0))
-                   (hdr-print (prin1-to-string hdr1))
-                   (block (concat "#+begin_patch " hdr-print "\n" sanitized-body "\n#+end_patch\n")))
-              (push block acc))))
+               (body0 (buffer-substring-no-properties body-beg body-end))
+               (sanitized-body (if (and (listp hdr)
+                                        (string= (substring (format "%s" (plist-get hdr :op))
+                                                            (if (and (plist-get hdr :op)
+                                                                     (string-prefix-p ":" (format "%s" (plist-get hdr :op))))
+                                                                1 0))
+                                                 "create"))
+                                    (carriage--sanitize-create-body body0)
+                                  body0))
+               (block (concat "#+begin_patch "
+                              (prin1-to-string hdr1)
+                              "\n"
+                              sanitized-body
+                              "\n#+end_patch\n")))
+          (push block acc))
         (forward-line 1))
       (mapconcat #'identity (nreverse acc) "\n"))))
 

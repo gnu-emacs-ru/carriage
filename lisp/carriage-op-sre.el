@@ -659,9 +659,9 @@ Return cons (PAYLOAD . NEXT-INDEX). Applies single-space unescape for end marker
     (if (not (and abs (file-exists-p abs)))
         (list :after "" :count 0)
       (let* ((text (with-temp-buffer (insert-file-contents abs) (buffer-string))))
-        (let* ((pairs (or (alist-get :pairs plan-item) '()))
-               (changed 0)
-               (new-text text))
+        (let* ((pairs (or (carriage--plan-get plan-item :pairs) '()))
+                (changed 0)
+                (new-text text))
           (dolist (p pairs)
             (let* ((from (carriage--pair-get p :from))
                    (to   (carriage--pair-get p :to))
@@ -695,30 +695,27 @@ Implements NOOP→'skip when after==before and reports :matches and :changed-byt
       (cl-return-from carriage-apply-sre
         (list :op 'sre :status 'fail :file file :details "File not found")))
     (let* ((before (with-temp-buffer (insert-file-contents abs) (buffer-string)))
-           (sim    (carriage-sre-simulate-apply plan-item repo-root))
-           (after  (or (plist-get sim :after) before))
+           (sim (carriage-sre-simulate-apply plan-item repo-root))
+           (after (or (plist-get sim :after) before))
            (matches (or (plist-get sim :count) 0))
-            ;; Compute changed-bytes as difference in byte-length between before/after.
-            ;; Guard against nil by treating nil as empty string.
-            (let* ((before-str (or before ""))
-                   (after-str  (or after ""))
-                   (changed-bytes (max 0 (abs (- (string-bytes after-str) (string-bytes before-str))))))
-
+           (before-str (or before ""))
+           (after-str (or after ""))
+           (changed-bytes (max 0 (abs (- (string-bytes after-str)
+                                         (string-bytes before-str))))))
       (if (string= before after)
           ;; NOOP → skip
           (list :op 'sre :status 'skip :file file
                 :matches matches :changed-bytes 0
                 :details "No changes (noop)")
         ;; Write and optionally stage
-        (progn
-          (carriage-write-file-string abs after t)
-          (when (and (eq stage 'index)
-                     (fboundp 'carriage-apply-engine)
-                     (eq (carriage-apply-engine) 'git))
-            (carriage-git-add repo-root file))
-          (list :op 'sre :status 'ok :file file
-                :matches matches :changed-bytes changed-bytes
-                :details (format "Applied %d replacements" matches)))))))))
+        (carriage-write-file-string abs after t)
+        (when (and (eq stage 'index)
+                   (fboundp 'carriage-apply-engine)
+                   (eq (carriage-apply-engine) 'git))
+          (carriage-git-add repo-root file))
+        (list :op 'sre :status 'ok :file file
+              :matches matches :changed-bytes changed-bytes
+              :details (format "Applied %d replacements" matches))))))
 
 ;;;; Conflict Resolution Helpers
 

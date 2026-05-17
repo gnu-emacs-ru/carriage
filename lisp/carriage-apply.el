@@ -35,8 +35,10 @@
 (require 'carriage-utils)
 (require 'carriage-git)
 (require 'carriage-format-registry)
+(require 'carriage-op-sre)
 (require 'carriage-apply-engine)
 (require 'carriage-parser)
+(require 'carriage-context-patches)
 ;; Load default Git apply engine so it registers itself in the engine registry.
 (require 'carriage-engine-git)
 
@@ -747,7 +749,8 @@ For :op 'patch always force 'git engine (parity with sync path)."
                    state (list :code 'MODE_E_DISPATCH :severity 'error
                                :details (error-message-string e)))
                   (carriage-log "fs-async: error: %s" (error-message-string e))
-                  (plist-put state :aborted t)))))))
+                  (plist-put state :aborted t)
+                  (carriage--apply-finish plan state (plist-get state :callback))))))))
     (plist-put state :fs-timer tm)
     (carriage--apply-update-abort state token)))
 
@@ -1173,6 +1176,7 @@ CALLBACK, when non-nil, is invoked with the final REPORT on the main thread."
   (cl-destructuring-bind (&key state token patch-present &allow-other-keys)
       (carriage--async-initialize plan repo-root)
     ;; Register abort handler early; will be updated per step
+    (plist-put state :callback callback)
     (carriage--apply-update-abort state token)
     ;; Schedule start without passing extra ARGS to the lambda
     (run-at-time 0 nil

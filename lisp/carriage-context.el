@@ -34,6 +34,7 @@
 (require 'carriage-context-map)
 (require 'carriage-context-visible)
 (require 'carriage-context-collect)
+(require 'carriage-context-patches)
 
 (declare-function carriage-project-root "carriage-utils" ())
 (declare-function carriage--call-git "carriage-utils" (default-dir &rest args))
@@ -210,75 +211,6 @@ Note: This is intentionally conservative and may be tuned per user/project."
                              (and (stringp t0) (string-match-p rx t0)))))
                   rxs))))
 
-(defvar-local carriage-context--doc-paths-cache nil
-  "Cache of doc-context paths for the current buffer.
-Plist keys:
-  :scope    — value of `carriage-doc-context-scope'
-  :paths    — list of path strings extracted from doc context blocks
-  :warnings — list of warning strings produced while parsing begin_context blocks.
-
-Performance note:
-We intentionally do NOT invalidate this cache on every buffer edit
-(`buffer-chars-modified-tick'), because most edits do not affect
-#+begin_context blocks and full rescans can be expensive on large documents.
-
-Instead, we use a dedicated dirty-flag that is marked only when edits
-touch begin/end_context lines or occur inside a begin_context block.")
-
-(defvar-local carriage-context--doc-paths-dirty t
-  "When non-nil, doc-context paths cache must be recomputed for the current buffer.
-
-Perf invariant:
-- We avoid tying invalidation to `buffer-chars-modified-tick', because ordinary typing
-  would force O(buffer) rescans at inopportune moments (e.g., Send).
-- Instead, we mark dirty only when edits likely affect begin_context blocks.")
-
-(defconst carriage-context--re-begin-context-line
-  "^[ \t]*#\\+begin_context[ \t]*$"
-  "Regexp matching a *directive-only* begin_context marker line.
-
-Important:
-We intentionally require end-of-line to avoid false positives such as prose lines:
-  \"#+begin_context blocks and full rescans...\"")
-
-(defconst carriage-context--re-end-context-line
-  "^[ \t]*#\\+end_context[ \t]*$"
-  "Regexp matching a *directive-only* end_context marker line.")
-
-(defun carriage-context--pos-in-doc-context-block-p (pos)
-  "Return non-nil when POS is inside a #+begin_context...#+end_context block.
-Best-effort and designed to be cheap enough for after-change usage."
-  (when (number-or-marker-p pos)
-    (save-excursion
-      (let ((case-fold-search t))
-        (goto-char pos)
-        (let ((b (save-excursion
-                   (re-search-backward carriage-context--re-begin-context-line nil t)))
-              (e (save-excursion
-                   (re-search-backward carriage-context--re-end-context-line nil t))))
-          (and b (or (null e) (> b e))))))))
-
-(defun carriage-context--doc-paths-mark-dirty (beg end _len)
-  "Mark doc-paths cache dirty if edit touches begin/end_context lines or occurs inside a begin_context block.
-This function is designed to be O(1) in the common case."
-  (when (and (number-or-marker-p beg) (number-or-marker-p end))
-    (save-excursion
-      (let ((case-fold-search t)
-            (hit nil))
-        (goto-char beg)
-        (beginning-of-line)
-        (setq hit (or (looking-at-p carriage-context--re-begin-context-line)
-                      (looking-at-p carriage-context--re-end-context-line)
-                      (carriage-context--pos-in-doc-context-block-p (point))))
-        (unless hit
-          (goto-char end)
-          (beginning-of-line)
-          (setq hit (or (looking-at-p carriage-context--re-begin-context-line)
-                        (looking-at-p carriage-context--re-end-context-line)
-                        (carriage-context--pos-in-doc-context-block-p (point)))))
-        (when hit
-          (setq carriage-context--doc-paths-dirty t))))))
-
 (defvar-local carriage-context--patched-files-cache nil
   "Cache of patched-files paths (from applied begin_patch blocks) for the current buffer.
 Plist keys:
@@ -311,20 +243,6 @@ This function is designed to be O(1) per edit."
                         (looking-at-p "^[ \t]*#\\+end_patch\\b"))))
         (when hit
           (setq carriage-context--patched-files-dirty t))))))
-
-(add-hook 'carriage-mode-hook
-          (lambda ()
-            ;; Buffer-local hook; O(1) per edit and only marks dirty when patch lines touched.
-            (add-hook 'after-change-functions
-                      #'carriage-context--patched-files-mark-dirty
-                      nil t)
-            ;; Buffer-local hook; mark doc-context cache dirty only when edits can affect begin_context.
-            (add-hook 'after-change-functions
-                      #'carriage-context--doc-paths-mark-dirty
-                      nil t)
-            ;; Opportunistically warm Project Map cache on idle to reduce Send latency.
-            (when (fboundp 'carriage-context-project-map-warm-ensure)
-              (ignore-errors (carriage-context-project-map-warm-ensure)))))
 
 ;;;###autoload
 (defun carriage-toggle-include-patched-files ()
@@ -1573,63 +1491,6 @@ Important:
       ((or "rb") "ruby")
       ((or "yml" "yaml") "yaml")
       (_ "text"))))
-
-(defun carriage-context--collapse-applied-patches-in-text (text)
-  "Return TEXT with applied #+begin_patch blocks replaced by one-line history comments.
-
-Policy:
-- For blocks whose header plist contains :applied non-nil:
-  - Remove the whole begin_patch…end_patch block (including markers).
-  - Insert one comment line:
-      ;; applied patch: <target> — <description|result|Applied>
-- Non-applied patch blocks remain unchanged.
-
-This preserves history for the LLM while avoiding begin_patch markers that can bias it."
-  (with-temp-buffer
-    (insert (or text ""))
-    (goto-char (point-min))
-    (let ((case-fold-search t))
-      (while (re-search-forward "^[ \t]*#\\+begin_patch\\s-+\\((.*)\\)[ \t]*$" nil t)
-        (let* ((beg-line-beg (line-beginning-position))
-               (sexp-str (match-string 1))
-               (plist (condition-case _e
-                          (car (read-from-string sexp-str))
-                        (error nil))))
-          (if (and (listp plist) (plist-get plist :applied))
-              (let* ((desc (or (plist-get plist :description)
-                               (plist-get plist :result)
-                               "Applied"))
-                     (desc (string-trim (format "%s" desc)))
-                     (desc (if (string-empty-p desc) "Applied" desc))
-                     (target
-                      (cond
-                       ((eq (plist-get plist :op) 'rename)
-                        (let ((a (plist-get plist :from))
-                              (b (plist-get plist :to)))
-                          (string-trim
-                           (format "%s → %s"
-                                   (or (and (stringp a) a) "-")
-                                   (or (and (stringp b) b) "-")))))
-                       ((stringp (plist-get plist :path)) (plist-get plist :path))
-                       ((stringp (plist-get plist :file)) (plist-get plist :file))
-                       (t "-")))
-                     (summary (format ";; applied patch: %s — %s\n"
-                                      (string-trim (format "%s" target))
-                                      desc))
-                     (block-end
-                      (save-excursion
-                        (goto-char (line-end-position))
-                        (forward-line 1)
-                        (if (re-search-forward "^[ \t]*#\\+end_patch\\b.*$" nil t)
-                            (min (point-max) (1+ (line-end-position)))
-                          (point-max)))))
-                (delete-region beg-line-beg block-end)
-                (goto-char beg-line-beg)
-                (insert summary)
-                (goto-char (min (point-max) (+ beg-line-beg (length summary)))))
-            ;; Not applied: continue scanning from next line to avoid loops.
-            (goto-char (min (point-max) (1+ (line-end-position))))))))
-    (buffer-substring-no-properties (point-min) (point-max))))
 
 (defun carriage-context--doc-context-policy-hint ()
   "Return LLM-facing instruction about doc-context semantics, or nil.
